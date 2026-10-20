@@ -98,6 +98,16 @@ def initialize_storage() -> None:
             "PRIMARY KEY (message_id, user_id))"
         )
         connection.execute(
+            "CREATE TABLE IF NOT EXISTS scheduled_events ("
+            "message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, "
+            "starts_at INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS event_reminders_sent ("
+            "message_id INTEGER NOT NULL, reminder_key TEXT NOT NULL, sent_at INTEGER NOT NULL, "
+            "PRIMARY KEY (message_id, reminder_key))"
+        )
+        connection.execute(
             "CREATE TABLE IF NOT EXISTS player_roster_names ("
             "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, public_name TEXT NOT NULL, "
             "updated_at INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id))"
@@ -123,6 +133,48 @@ def get_rsvps(message_id: int) -> dict[str, list[int]]:
     for choice, user_id in rows:
         result.setdefault(choice, []).append(user_id)
     return result
+
+
+def save_scheduled_event(message_id: int, guild_id: int, channel_id: int, starts_at: int) -> None:
+    with sqlite3.connect(DATA_PATH) as connection:
+        connection.execute(
+            "INSERT INTO scheduled_events (message_id, guild_id, channel_id, starts_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET "
+            "guild_id = excluded.guild_id, channel_id = excluded.channel_id, starts_at = excluded.starts_at",
+            (message_id, guild_id, channel_id, starts_at),
+        )
+
+
+def get_upcoming_events(now: int) -> list[tuple[int, int, int, int]]:
+    with sqlite3.connect(DATA_PATH) as connection:
+        return connection.execute(
+            "SELECT message_id, guild_id, channel_id, starts_at FROM scheduled_events "
+            "WHERE starts_at > ? ORDER BY starts_at",
+            (now,),
+        ).fetchall()
+
+
+def event_reminder_was_sent(message_id: int, reminder_key: str) -> bool:
+    with sqlite3.connect(DATA_PATH) as connection:
+        row = connection.execute(
+            "SELECT 1 FROM event_reminders_sent WHERE message_id = ? AND reminder_key = ?",
+            (message_id, reminder_key),
+        ).fetchone()
+    return row is not None
+
+
+def mark_event_reminder_sent(message_id: int, reminder_key: str) -> None:
+    with sqlite3.connect(DATA_PATH) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO event_reminders_sent (message_id, reminder_key, sent_at) VALUES (?, ?, ?)",
+            (message_id, reminder_key, int(time.time())),
+        )
+
+
+def delete_scheduled_event(message_id: int) -> None:
+    with sqlite3.connect(DATA_PATH) as connection:
+        connection.execute("DELETE FROM scheduled_events WHERE message_id = ?", (message_id,))
+        connection.execute("DELETE FROM event_reminders_sent WHERE message_id = ?", (message_id,))
 
 
 def save_roster_name(guild_id: int, user_id: int, public_name: str | None) -> None:
@@ -734,6 +786,116 @@ class EventRSVPView(discord.ui.View):
         await update_event_rsvps(interaction, "declined")
 
 
+async def send_due_event_reminders(client: discord.Client) -> None:
+    now = int(time.time())
+    for message_id, guild_id, channel_id, starts_at in get_upcoming_events(now):
+        seconds_until_start = starts_at - now
+        if 23 * 60 * 60 <= seconds_until_start <= 24 * 60 * 60:
+            reminder_key = "24h"
+            reminder_label = "Training/Scrim steht bald an"
+        elif 0 < seconds_until_start <= 60 * 60:
+            reminder_key = "1h"
+            reminder_label = "Training/Scrim beginnt bald"
+        else:
+            continue
+
+        if event_reminder_was_sent(message_id, reminder_key):
+            continue
+
+        guild = client.get_guild(guild_id)
+        if guild is None:
+            continue
+
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            try:
+                fetched_channel = await client.fetch_channel(channel_id)
+            except discord.NotFound:
+                delete_scheduled_event(message_id)
+                continue
+            except discord.HTTPException as error:
+                print(f"Erinnerung für Termin {message_id} konnte Kanal nicht laden: {error}", file=sys.stderr)
+                continue
+            if not isinstance(fetched_channel, discord.TextChannel):
+                delete_scheduled_event(message_id)
+                continue
+            channel = fetched_channel
+
+        try:
+            event_message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            delete_scheduled_event(message_id)
+            continue
+        except discord.HTTPException as error:
+            print(f"Erinnerung für Termin {message_id} konnte Termin nicht laden: {error}", file=sys.stderr)
+            continue
+
+        if not event_message.embeds or not (event_message.embeds[0].footer.text or "").startswith(EVENT_MARKER):
+            delete_scheduled_event(message_id)
+            continue
+
+        attendee_ids = get_rsvps(message_id).get("going", [])
+        attendees = [guild.get_member(user_id) for user_id in attendee_ids]
+        attendees = [member for member in attendees if member is not None]
+        mentioned_attendees = attendees[:100]
+        mention_text = " ".join(member.mention for member in mentioned_attendees)
+        extra_attendees = max(0, len(attendees) - len(mentioned_attendees))
+
+        title = event_message.embeds[0].title or "Teamtermin"
+        content = f"⏰ **{reminder_label}: {title}** beginnt <t:{starts_at}:R>."
+        if mention_text:
+            content += f"\nDabei: {mention_text}"
+            if extra_attendees:
+                content += f" und {extra_attendees} weitere Zusagen"
+        else:
+            content += "\nBisher hat noch niemand **Dabei** ausgewählt."
+
+        try:
+            await channel.send(
+                content,
+                allowed_mentions=discord.AllowedMentions(
+                    users=mentioned_attendees,
+                    roles=False,
+                    everyone=False,
+                    replied_user=False,
+                ),
+            )
+        except discord.HTTPException as error:
+            print(f"Erinnerung für Termin {message_id} konnte nicht gesendet werden: {error}", file=sys.stderr)
+            continue
+
+        mark_event_reminder_sent(message_id, reminder_key)
+
+
+async def register_existing_scheduled_events(guild: discord.Guild) -> int:
+    event_channel = discord.utils.get(guild.text_channels, name="spieltermine")
+    if event_channel is None:
+        return 0
+
+    now = int(time.time())
+    imported = 0
+    try:
+        async for message in event_channel.history(limit=500):
+            if message.author != guild.me or not message.embeds:
+                continue
+            footer = message.embeds[0].footer.text or ""
+            if not footer.startswith(f"{EVENT_MARKER}|"):
+                continue
+            try:
+                starts_at = int(footer.rsplit("|", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if starts_at <= now:
+                continue
+
+            save_scheduled_event(message.id, guild.id, event_channel.id, starts_at)
+            imported += 1
+    except discord.HTTPException as error:
+        print(f"Vorhandene Termine konnten nicht für Erinnerungen eingelesen werden: {error}", file=sys.stderr)
+
+    return imported
+
+
 def register_app_commands(tree: app_commands.CommandTree) -> None:
     @tree.command(name="help", description="Zeigt die wichtigsten Server- und Bot-Aktionen.")
     async def help_command(interaction: discord.Interaction):
@@ -916,7 +1078,12 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
         embed.add_field(name="❌ Kann nicht (0)", value="Noch niemand", inline=True)
         embed.set_footer(text=f"{EVENT_MARKER}|{event_timestamp}")
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await event_channel.send(embed=embed, view=EventRSVPView(), allowed_mentions=discord.AllowedMentions.none())
+        event_message = await event_channel.send(
+            embed=embed,
+            view=EventRSVPView(),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        save_scheduled_event(event_message.id, interaction.guild.id, event_channel.id, event_timestamp)
         await interaction.followup.send("Der Termin mit RSVP-Buttons wurde in `#spieltermine` veröffentlicht.", ephemeral=True)
 
 
@@ -1290,8 +1457,17 @@ async def main(apply: bool) -> None:
     async def purge_declined_applications_error(error: Exception):
         print(f"Fehler bei der Bewerbungs-Löschfrist: {error}", file=sys.stderr)
 
+    @tasks.loop(minutes=1)
+    async def event_reminders():
+        await send_due_event_reminders(client)
+
+    @event_reminders.error
+    async def event_reminders_error(error: Exception):
+        print(f"Fehler bei den Termin-Erinnerungen: {error}", file=sys.stderr)
+
     setup_complete = False
     commands_synced = False
+    existing_events_registered = False
 
     @client.event
     async def on_connect():
@@ -1307,7 +1483,7 @@ async def main(apply: bool) -> None:
 
     @client.event
     async def on_ready():
-        nonlocal setup_complete, commands_synced
+        nonlocal setup_complete, commands_synced, existing_events_registered
         print(f"Mit Discord verbunden als {client.user}.", flush=True)
         guild = client.get_guild(target_id)
         if guild is None:
@@ -1319,6 +1495,10 @@ async def main(apply: bool) -> None:
             await setup_guild(guild, apply)
             setup_complete = True
         if apply:
+            if not existing_events_registered:
+                imported_events = await register_existing_scheduled_events(guild)
+                existing_events_registered = True
+                print(f"  {imported_events} bestehende Termine für Erinnerungen übernommen")
             if not commands_synced:
                 guild_object = discord.Object(id=target_id)
                 tree.copy_global_to(guild=guild_object)
@@ -1327,6 +1507,8 @@ async def main(apply: bool) -> None:
                 print("  Slash-Befehle für diesen Server veröffentlicht")
             if not purge_declined_applications.is_running():
                 purge_declined_applications.start()
+            if not event_reminders.is_running():
+                event_reminders.start()
             print("Onboarding-Bot läuft. Mit Ctrl+C beenden.")
         else:
             await client.close()
