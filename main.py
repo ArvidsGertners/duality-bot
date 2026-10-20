@@ -75,9 +75,9 @@ CATEGORIES = [
         ],
     },
     {
-        "name": "🔎 TEAM-SUCHE",
+        "name": "📝 BEWERBER",
         "roles": ("Bewerber", *STAFF_ROLES),
-        "channels": [("text", "looking-for-team")],
+        "channels": [("text", "bewerber-chat")],
     },
     {
         "name": "🎮 TEAM",
@@ -496,7 +496,8 @@ class ApplicationSelectionView(discord.ui.View):
             return
         applicant_role = roles.get("Bewerber")
         staff_channel = discord.utils.get(interaction.guild.text_channels, name="bewerbungen")
-        if not applicant_role or not staff_channel:
+        applicant_chat = discord.utils.get(interaction.guild.text_channels, name="bewerber-chat")
+        if not applicant_role or not staff_channel or not applicant_chat:
             await interaction.response.send_message(
                 "Die Bewerbungskanäle sind noch nicht eingerichtet. Bitte melde dich beim Staff.", ephemeral=True
             )
@@ -574,8 +575,20 @@ class ApplicationSelectionView(discord.ui.View):
                 )
                 return
 
+            try:
+                await applicant_chat.send(
+                    f"{member.mention} willkommen im Bewerberbereich. Du kannst hier Fragen zum Bewerbungsablauf stellen.",
+                    allowed_mentions=discord.AllowedMentions(
+                        users=[member],
+                        roles=False,
+                        everyone=False,
+                    ),
+                )
+            except discord.HTTPException:
+                logging.exception("Begrüßung im Bewerber-Chat konnte nicht gesendet werden")
+
             await interaction.followup.send(
-                "Danke! Deine Bewerbung wurde an den Staff geschickt. Du hast jetzt die Rolle `Bewerber`, Zugang zu `#looking-for-team` und kannst `#bewerbung` nicht mehr sehen oder erneut nutzen. Der Staff meldet sich nach der Prüfung bei dir.",
+                "Danke! Deine Bewerbung wurde an den Staff geschickt. Du hast jetzt die Rolle `Bewerber` und Zugang zu `#bewerber-chat`, wo du Fragen zum Ablauf stellen kannst. `#bewerbung` kannst du danach nicht mehr sehen oder erneut nutzen. Der Staff meldet sich nach der Prüfung bei dir.",
                 ephemeral=True,
             )
             self.draft.clear()
@@ -1154,6 +1167,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
     category_renames = {
         "📌 START HIER": "👋 EINGANGSHALLE",
         "💬 COMMUNITY": "💬 LOUNGE",
+        "🔎 TEAM-SUCHE": "📝 BEWERBER",
     }
     existing_category_names = {category.name for category in guild.categories}
     for old_name, new_name in category_renames.items():
@@ -1306,6 +1320,22 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             else:
                 print("    Doppelter Kanal general würde entfernt")
 
+        if name == "📝 BEWERBER" and "looking-for-team" in existing:
+            old_applicant_chat = existing["looking-for-team"]
+            if "bewerber-chat" not in existing:
+                if apply:
+                    await old_applicant_chat.edit(
+                        name="bewerber-chat",
+                        reason="Duality Mannheim benennt den Bewerberbereich um",
+                    )
+                    existing.pop("looking-for-team")
+                    existing["bewerber-chat"] = old_applicant_chat
+                    print("    Kanal umbenannt: looking-for-team → bewerber-chat")
+                else:
+                    print("    Kanal würde umbenannt: looking-for-team → bewerber-chat")
+            else:
+                print("    Alter Kanal looking-for-team bleibt bestehen, da bewerber-chat bereits existiert")
+
         for kind, channel_name in config["channels"]:
             channel = existing.get(channel_name)
             if channel:
@@ -1362,7 +1392,8 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 "die du spielen kannst, sowie deine Verfügbarkeit pro Abend von Mittwoch bis Sonntag aus. "
                 "Du kannst zum Beispiel Mittwoch 19–22 Uhr und Freitag 20–23 Uhr getrennt auswählen. "
                 "Wir fragen auch deinen bevorzugten Namen und optional Kurs/Ausbildung ab.\n\n"
-                "Deine Angaben werden privat an den Staff geschickt. Nach dem Absenden erhältst du Zugang zu `#looking-for-team`. "
+                "Deine Angaben werden privat an den Staff geschickt. Nach dem Absenden erhältst du Zugang zu `#bewerber-chat`, "
+                "wo du Fragen zum Ablauf stellen kannst. "
                 "Auch bei einer Ablehnung bleibt die Rolle `Bewerber` bestehen. Wenn du Rückfragen hast, wende dich direkt an den Staff. "
                 f"Abgelehnte Bewerbungseinträge werden nach {APPLICATION_RETENTION_DAYS} Tagen gelöscht."
             ),
@@ -1440,6 +1471,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 "**Du möchtest dich fürs Valorant-Team bewerben?**\n"
                 "`#bewerbung` in der Valorant-Kategorie ist für alle sichtbar. Dort kannst du über den Button deine Bewerbung starten. "
                 "Nach dem Absenden erhältst du die Rolle `Bewerber` und kannst den Kanal weder sehen noch erneut nutzen. "
+                "Für Fragen zum Bewerbungsablauf kannst du anschließend in `#bewerber-chat` schreiben. "
                 "Bewerbungen sind "
                 "ab 16 Jahren möglich; besonders wichtig sind Spielzeiten Mittwoch bis Sonntag ab 19 Uhr. "
                 "Deinen aktuellen Valorant-Rang kannst du optional über das Dropdown unter dieser Nachricht angeben "
