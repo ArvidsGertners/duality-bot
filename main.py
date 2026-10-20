@@ -39,7 +39,7 @@ VALORANT_RANKS = [
 ]
 VALORANT_ROLES = ("Duelist", "Initiator", "Controller", "Sentinel")
 ROLE_NAMES = [
-    "Owner", "Admin", "Coach", "Spieler", "Bewerber", "LFT",
+    "Owner", "Admin", "Coach", "Spieler", "Bewerber",
     "Ping Valorant", "Ping Events", *VALORANT_RANKS,
 ]
 STAFF_ROLES = ("Owner", "Admin", "Coach")
@@ -50,6 +50,7 @@ APPLICATION_DECISION_PREFIX = "DUALITY_APPLICATION_"
 EVENT_MARKER = "DUALITY_EVENT_V1"
 DATA_PATH = Path(__file__).with_name("duality_bot_data.sqlite3")
 APPLICATION_LOCKS: dict[int, asyncio.Lock] = {}
+APPLICATION_SUBMIT_LOCKS: dict[int, asyncio.Lock] = {}
 
 CATEGORIES = [
     {
@@ -65,11 +66,17 @@ CATEGORIES = [
     {
         "name": "🎯 VALORANT",
         "roles": None,
-        "channels": [("text", "valo-chat"), ("text", "bewerbung")],
+        "channels": [
+            ("text", "valo-chat"),
+            ("voice", "Valorant 1"),
+            ("voice", "Valorant 2"),
+            ("voice", "Valorant 3"),
+            ("text", "bewerbung"),
+        ],
     },
     {
         "name": "🔎 TEAM-SUCHE",
-        "roles": ("LFT", *STAFF_ROLES),
+        "roles": ("Bewerber", *STAFF_ROLES),
         "channels": [("text", "looking-for-team")],
     },
     {
@@ -230,12 +237,34 @@ def category_overwrites(guild: discord.Guild, roles: dict[str, discord.Role], al
 
 def application_overwrites(guild: discord.Guild, roles: dict[str, discord.Role]):
     overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False)
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=False,
+            read_message_history=True,
+        )
     }
-    for role_name in ("Bewerber", *STAFF_ROLES):
+    for role_name in ("Bewerber", "Spieler"):
         role = roles.get(role_name)
         if role:
             overwrites[role] = discord.PermissionOverwrite(
+                view_channel=False,
+                send_messages=False,
+                read_message_history=False,
+            )
+    for role_name in STAFF_ROLES:
+        role = roles.get(role_name)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+            )
+    # Member overwrites come after role overwrites, so staff who also have
+    # the Spieler or Bewerber role can still review applications.
+    for member in guild.members:
+        member_role_names = {role.name for role in member.roles}
+        if member_role_names.intersection(STAFF_ROLES) and member_role_names.intersection({"Spieler", "Bewerber"}):
+            overwrites[member] = discord.PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
                 read_message_history=True,
@@ -277,7 +306,7 @@ def rules_overwrites(guild: discord.Guild, roles: dict[str, discord.Role]):
 
 
 def has_member_choice(member: discord.Member, roles: dict[str, discord.Role]) -> bool:
-    choice_names = {"LFT", "Spieler"}
+    choice_names = {"Bewerber", "Spieler"}
     return any(role.name in choice_names for role in member.roles)
 
 
@@ -465,58 +494,92 @@ class ApplicationSelectionView(discord.ui.View):
                 "Bitte wähle bei den spielbaren Rollen auch deine Main-Rolle aus.", ephemeral=True
             )
             return
-        lft_role = roles.get("LFT")
+        applicant_role = roles.get("Bewerber")
         staff_channel = discord.utils.get(interaction.guild.text_channels, name="bewerbungen")
-        if not lft_role or not staff_channel:
+        if not applicant_role or not staff_channel:
             await interaction.response.send_message(
                 "Die Bewerbungskanäle sind noch nicht eingerichtet. Bitte melde dich beim Staff.", ephemeral=True
             )
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        applicant_role = roles.get("Bewerber")
-        if applicant_role in member.roles:
-            await member.remove_roles(applicant_role, reason="Bewerbung eingereicht")
-        await member.add_roles(lft_role, reason="Mitglied möchte ein Valorant-Team finden")
+        submit_lock = APPLICATION_SUBMIT_LOCKS.setdefault(member.id, asyncio.Lock())
+        async with submit_lock:
+            try:
+                member = await interaction.guild.fetch_member(member.id)
+            except discord.HTTPException:
+                await interaction.followup.send(
+                    "Dein Mitgliedsstatus konnte gerade nicht geprüft werden. Bitte versuche es erneut.",
+                    ephemeral=True,
+                )
+                return
+            if has_member_choice(member, roles):
+                await interaction.followup.send(
+                    "Du hast bereits eine Bewerbung eingereicht oder bist Spieler. Eine weitere Bewerbung ist hier nicht möglich.",
+                    ephemeral=True,
+                )
+                self.stop()
+                return
 
-        submitted_at = int(time.time())
-        application_embed = discord.Embed(
-            title="Neue Team-Bewerbung",
-            description=f"Bewerbung von {member.mention} · eingegangen <t:{submitted_at}:R>",
-            color=discord.Color.from_rgb(110, 70, 255),
-        )
-        application_embed.add_field(name="Mindestalter", value="16+ bestätigt", inline=True)
-        application_embed.add_field(name="Bevorzugter Name", value=str(self.draft["real_name"]), inline=True)
-        application_embed.add_field(
-            name="Kurs/Ausbildung", value=str(self.draft["course"]) or "Nicht angegeben", inline=True
-        )
-        application_embed.add_field(name="Main-Rolle", value=self.main_role[0], inline=True)
-        application_embed.add_field(
-            name="Spielbare Rollen (inkl. Main-Rolle)", value=", ".join(self.playable_roles), inline=True
-        )
-        short_days = dict(self.DAYS)
-        selected_times = [tuple(value.split("|", 1)) for value in self.availability]
-        selected_times.sort(
-            key=lambda item: (
-                next(index for index, (day, _) in enumerate(self.DAYS) if day == item[0]),
-                self.TIME_WINDOWS.index(item[1]),
+            try:
+                await member.add_roles(applicant_role, reason="Bewerbung eingereicht")
+            except discord.HTTPException:
+                await interaction.followup.send(
+                    "Deine Bewerbung konnte nicht freigeschaltet werden. Bitte melde dich beim Staff.",
+                    ephemeral=True,
+                )
+                return
+
+            submitted_at = int(time.time())
+            application_embed = discord.Embed(
+                title="Neue Team-Bewerbung",
+                description=f"Bewerbung von {member.mention} · eingegangen <t:{submitted_at}:R>",
+                color=discord.Color.from_rgb(110, 70, 255),
             )
-        )
-        availability_text = "\n".join(f"{short_days[day]} · {window}" for day, window in selected_times)
-        application_embed.add_field(name="Spielzeiten (Mi–So)", value=availability_text, inline=False)
-        application_embed.add_field(name="Tracker.gg", value=str(self.draft["tracker_url"])[:1024], inline=False)
-        application_embed.set_footer(text=f"{APPLICATION_PENDING_PREFIX}{member.id}")
-        await staff_channel.send(
-            embed=application_embed,
-            view=ApplicationReviewView(),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        await interaction.followup.send(
-            "Danke! Deine Bewerbung wurde privat an den Staff geschickt. Du hast jetzt Zugang zu #looking-for-team. Der Staff meldet sich nach der Prüfung bei dir.",
-            ephemeral=True,
-        )
-        self.draft.clear()
-        self.stop()
+            application_embed.add_field(name="Mindestalter", value="16+ bestätigt", inline=True)
+            application_embed.add_field(name="Bevorzugter Name", value=str(self.draft["real_name"]), inline=True)
+            application_embed.add_field(
+                name="Kurs/Ausbildung", value=str(self.draft["course"]) or "Nicht angegeben", inline=True
+            )
+            application_embed.add_field(name="Main-Rolle", value=self.main_role[0], inline=True)
+            application_embed.add_field(
+                name="Spielbare Rollen (inkl. Main-Rolle)", value=", ".join(self.playable_roles), inline=True
+            )
+            short_days = dict(self.DAYS)
+            selected_times = [tuple(value.split("|", 1)) for value in self.availability]
+            selected_times.sort(
+                key=lambda item: (
+                    next(index for index, (day, _) in enumerate(self.DAYS) if day == item[0]),
+                    self.TIME_WINDOWS.index(item[1]),
+                )
+            )
+            availability_text = "\n".join(f"{short_days[day]} · {window}" for day, window in selected_times)
+            application_embed.add_field(name="Spielzeiten (Mi–So)", value=availability_text, inline=False)
+            application_embed.add_field(name="Tracker.gg", value=str(self.draft["tracker_url"])[:1024], inline=False)
+            application_embed.set_footer(text=f"{APPLICATION_PENDING_PREFIX}{member.id}")
+            try:
+                await staff_channel.send(
+                    embed=application_embed,
+                    view=ApplicationReviewView(),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                try:
+                    await member.remove_roles(applicant_role, reason="Bewerbung konnte nicht an den Staff übermittelt werden")
+                except discord.HTTPException:
+                    logging.exception("Bewerberrolle konnte nach fehlgeschlagener Übermittlung nicht zurückgenommen werden")
+                await interaction.followup.send(
+                    "Die Bewerbung konnte gerade nicht an den Staff übermittelt werden. Bitte versuche es später erneut oder kontaktiere Staff.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.followup.send(
+                "Danke! Deine Bewerbung wurde an den Staff geschickt. Du hast jetzt die Rolle `Bewerber`, Zugang zu `#looking-for-team` und kannst `#bewerbung` nicht mehr sehen oder erneut nutzen. Der Staff meldet sich nach der Prüfung bei dir.",
+                ephemeral=True,
+            )
+            self.draft.clear()
+            self.stop()
 
 
 class OnboardingView(discord.ui.View):
@@ -575,9 +638,8 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
 
     roles = {role.name: role for role in interaction.guild.roles}
     player_role = roles.get("Spieler")
-    lft_role = roles.get("LFT")
     applicant_role = roles.get("Bewerber")
-    if not player_role or not lft_role or (not accepted and not applicant_role):
+    if not player_role or not applicant_role:
         await interaction.response.send_message("Die benötigten Rollen fehlen. Bitte Staff prüfen lassen.", ephemeral=True)
         return
 
@@ -595,16 +657,16 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
 
     if accepted:
         await applicant.add_roles(player_role, reason=f"Bewerbung angenommen von {interaction.user}")
-        await applicant.remove_roles(lft_role, reason="Bewerbung angenommen")
+        await applicant.remove_roles(applicant_role, reason="Bewerbung angenommen")
         decision = "ACCEPTED"
         decision_text = f"Angenommen von {interaction.user.mention} · <t:{int(time.time())}:F>"
         dm_text = "Deine Bewerbung bei Duality Mannheim wurde angenommen. Du hast jetzt die Rolle `Spieler` und Zugang zum Teambereich. Willkommen im Team!"
     else:
-        await applicant.remove_roles(lft_role, reason=f"Bewerbung abgelehnt von {interaction.user}")
-        await applicant.add_roles(applicant_role, reason="Bewerberzugang nach Entscheidung wiederhergestellt")
+        if applicant_role not in applicant.roles:
+            await applicant.add_roles(applicant_role, reason="Bewerberstatus nach Ablehnung beibehalten")
         decision = "DECLINED"
         decision_text = f"Abgelehnt von {interaction.user.mention} · <t:{int(time.time())}:F>"
-        dm_text = "Danke für deine Bewerbung bei Duality Mannheim. Der Staff kann dir aktuell keinen Teamplatz anbieten. Deine Community-Zugänge bleiben bestehen; du kannst dich bei Interesse später erneut über `#bewerbung` bewerben."
+        dm_text = "Danke für deine Bewerbung bei Duality Mannheim. Der Staff kann dir aktuell keinen Teamplatz anbieten. Deine Rolle `Bewerber` bleibt bestehen, daher kannst du über `#bewerbung` keine weitere Bewerbung einreichen. Wenn du Rückfragen hast, wende dich bitte direkt an den Staff."
 
     dm_sent = True
     try:
@@ -618,7 +680,7 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
     embed.set_footer(text=f"{APPLICATION_DECISION_PREFIX}{decision}|{applicant_id}|{interaction.user.id}|{decided_at}")
     await interaction.message.edit(embed=embed, view=None)
 
-    response = "Bewerbung angenommen" if accepted else "Bewerbung abgelehnt; Bewerberzugang für eine spätere Bewerbung wiederhergestellt"
+    response = "Bewerbung angenommen" if accepted else "Bewerbung abgelehnt; Bewerberrolle bleibt bestehen und sperrt eine erneute Bewerbung"
     if not dm_sent:
         response += ". Die DM konnte nicht zugestellt werden"
     if not accepted:
@@ -911,7 +973,7 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
         )
         embed.add_field(
             name="Valorant-Team",
-            value="Wähle beim Server-Onboarding die Bewerbungsoption. Deinen Rang kannst du optional im Dropdown in `#willkommen` angeben; er wird nicht in der Bewerbung abgefragt. Starte das Teamformular über den Button in `#bewerbung`.",
+            value="`#bewerbung` ist für alle sichtbar. Starte dort über den Button das Teamformular. Nach dem Absenden erhältst du `Bewerber` und kannst den Bewerbungskanal nicht erneut nutzen. Deinen Rang kannst du optional im Dropdown in `#willkommen` angeben.",
             inline=False,
         )
         embed.add_field(
@@ -1106,17 +1168,6 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 print(f"  Kategorie würde umbenannt: {old_name} → {new_name}")
 
     roles = {role.name: role for role in guild.roles}
-    old_lft_role = roles.get("Tryout")
-    if "LFT" not in roles and old_lft_role:
-        if apply:
-            await old_lft_role.edit(name="LFT", reason="Duality Mannheim ersetzt Tryout-Zugang durch Team-Suche")
-            roles.pop("Tryout", None)
-            roles["LFT"] = old_lft_role
-            print("  Rolle Tryout in LFT umbenannt")
-        else:
-            print("  Vorhandene Rolle Tryout würde in LFT umbenannt")
-            roles["LFT"] = old_lft_role
-
     for name in ROLE_NAMES:
         if name in roles:
             print(f"  Rolle vorhanden: {name}")
@@ -1126,6 +1177,20 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             print(f"  Rolle erstellt: {name}")
         else:
             print(f"  Rolle würde erstellt: {name}")
+
+    legacy_lft_role = roles.get("LFT")
+    applicant_role = roles.get("Bewerber")
+    player_role = roles.get("Spieler")
+    if legacy_lft_role and applicant_role:
+        old_lft_members = list(legacy_lft_role.members)
+        if apply:
+            for member in old_lft_members:
+                if applicant_role not in member.roles and player_role not in member.roles:
+                    await member.add_roles(applicant_role, reason="Bisherige LFT-Bewerbung auf Bewerber umgestellt")
+                await member.remove_roles(legacy_lft_role, reason="Duality Mannheim verwendet keine LFT-Rolle mehr")
+            print(f"  Alte LFT-Zuweisungen auf Bewerber umgestellt oder entfernt: {len(old_lft_members)}")
+        elif old_lft_members:
+            print(f"  Alte LFT-Zuweisungen würden auf Bewerber umgestellt oder entfernt: {len(old_lft_members)}")
 
     category_lookup = {category.name: category for category in guild.categories}
     old_announcements = next(
@@ -1247,9 +1312,9 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 if apply and channel_name == "bewerbung":
                     await channel.edit(
                         overwrites=application_overwrites(guild, roles),
-                        reason="Bewerbung nur für Bewerber und Staff sichtbar",
+                        reason="Bewerbung öffentlich lesbar; Spieler und Bewerber werden ausgeschlossen",
                     )
-                    print("    Bewerbungszugriff gesetzt: Bewerber und Staff")
+                    print("    Bewerbungszugriff gesetzt: alle sehen den Kanal; Bewerber und Spieler nicht")
                 elif apply and channel_name == "regeln":
                     await channel.edit(
                         overwrites=rules_overwrites(guild, roles),
@@ -1269,7 +1334,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                         channel_name,
                         category=category,
                         overwrites=application_overwrites(guild, roles),
-                        reason="Duality Mannheim Bewerbungsbereich",
+                        reason="Duality Mannheim Bewerbung öffentlich lesbar einrichten",
                     )
                 elif channel_name == "regeln":
                     await guild.create_text_channel(
@@ -1289,14 +1354,17 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
         embed = discord.Embed(
             title="Bewerbung für Duality Mannheim",
             description=(
-                "Du möchtest für Duality Mannheim Valorant spielen? Starte hier deine Bewerbung.\n\n"
+                "Du möchtest für Duality Mannheim Valorant spielen? Dieser Kanal ist für alle Mitglieder sichtbar. "
+                "Starte hier über den Button deine Bewerbung. Nach dem Absenden erhältst du die Rolle `Bewerber`; "
+                "danach ist dieser Kanal für dich nicht mehr sichtbar und du kannst keine weitere Bewerbung einreichen.\n\n"
                 "Du brauchst deinen Tracker.gg-Profillink und bestätigst, dass du mindestens 16 bist. "
                 "Außerdem wählst du deine Main-Rolle (Duelist, Initiator, Controller oder Sentinel), alle Rollen, "
                 "die du spielen kannst, sowie deine Verfügbarkeit pro Abend von Mittwoch bis Sonntag aus. "
                 "Du kannst zum Beispiel Mittwoch 19–22 Uhr und Freitag 20–23 Uhr getrennt auswählen. "
                 "Wir fragen auch deinen bevorzugten Namen und optional Kurs/Ausbildung ab.\n\n"
-                "Deine Angaben werden privat an den Staff geschickt. Wenn deine Bewerbung abgelehnt wird, wird "
-                f"der Eintrag nach {APPLICATION_RETENTION_DAYS} Tagen gelöscht. Nach dem Absenden erhältst du Zugang zu `#looking-for-team`."
+                "Deine Angaben werden privat an den Staff geschickt. Nach dem Absenden erhältst du Zugang zu `#looking-for-team`. "
+                "Auch bei einer Ablehnung bleibt die Rolle `Bewerber` bestehen. Wenn du Rückfragen hast, wende dich direkt an den Staff. "
+                f"Abgelehnte Bewerbungseinträge werden nach {APPLICATION_RETENTION_DAYS} Tagen gelöscht."
             ),
             color=discord.Color.from_rgb(110, 70, 255),
         )
@@ -1370,12 +1438,13 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 "• Lies zuerst `#regeln`.\n"
                 "• Stell dich in `#allgemein` vor und lerne die Community kennen.\n\n"
                 "**Du möchtest dich fürs Valorant-Team bewerben?**\n"
-                "Wähle beim Server-Onboarding die Option zur Team-Bewerbung. Danach erhältst du Zugang zu `#bewerbung` "
-                "in der Valorant-Kategorie. Dort kannst du über den Button deine Bewerbung starten. Bewerbungen sind "
+                "`#bewerbung` in der Valorant-Kategorie ist für alle sichtbar. Dort kannst du über den Button deine Bewerbung starten. "
+                "Nach dem Absenden erhältst du die Rolle `Bewerber` und kannst den Kanal weder sehen noch erneut nutzen. "
+                "Bewerbungen sind "
                 "ab 16 Jahren möglich; besonders wichtig sind Spielzeiten Mittwoch bis Sonntag ab 19 Uhr. "
                 "Deinen aktuellen Valorant-Rang kannst du optional über das Dropdown unter dieser Nachricht angeben "
                 "und später jederzeit ändern. Der Rang wird nicht in der Bewerbung abgefragt.\n\n"
-                "Nach dem Absenden prüft der Staff deine Bewerbung. Teamzugang gibt es erst nach einer Annahme.\n\n"
+                "Nach dem Absenden prüft der Staff deine Bewerbung. Zugang zum Teambereich gibt es erst nach einer Annahme.\n\n"
                 "**Benachrichtigungen**\n"
                 "Nutze die Buttons unter dieser Nachricht, um freiwillig Pings für Valorant-Updates oder Community-Events zu erhalten."
                 " Dein aktueller Valorant-Rang ist optional und kann über das Rang-Dropdown hier geändert werden."
