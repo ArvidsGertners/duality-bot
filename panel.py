@@ -683,6 +683,8 @@ class PanelHooks:
     sync_stats: Callable[[discord.Guild, discord.Member], Awaitable[str]]
     lookup_stats: Callable[[str], Awaitable[dict]]
     stats_rules: Callable[[], dict]
+    # Server-Wachstum: Beitritte, Abgänge, Mitgliederzahl je Woche (nur Zahlen, keine Personen) und Zählbeginn
+    member_flow: Callable[[int], dict]
 
 
 class Panel:
@@ -728,6 +730,7 @@ class Panel:
             web.get("/api/events", self.api_events),
             web.get("/api/attendance", self.api_attendance),
             web.get("/api/ranking", self.api_ranking),
+            web.get("/api/growth", self.api_growth),
             web.get("/api/stats", self.api_stats),
             web.post("/api/stats/lookup", self.api_stats_lookup),
             web.get("/api/stats/{user_id}", self.api_player_stats),
@@ -1701,6 +1704,12 @@ class Panel:
                 ],
             })
         return web.json_response({"players": players})
+
+    async def api_growth(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        data = self.hooks.member_flow(guild.id)
+        return web.json_response({**data, "members": guild.member_count})
 
     @staticmethod
     def match_payload(match) -> dict:

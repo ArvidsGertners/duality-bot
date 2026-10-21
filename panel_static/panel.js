@@ -29,6 +29,7 @@ const state = {
   stats: null,
   statsSort: { key: "name", ascending: true },
   statsUser: null,
+  growth: null,
   texts: [],
   announcementData: null,
   editingAnnouncement: null,
@@ -229,6 +230,80 @@ function renderDashboard(status) {
   ]);
   renderAlerts(status.alerts);
   $("#dash-updated").textContent = `Zuletzt aktualisiert: ${clock.format(new Date(status.time * 1000))} Uhr (alle 5 Sekunden)`;
+}
+
+/* Server-Wachstum: Beitritte als grüne Balken nach oben, Abgänge als rote nach unten */
+
+function svgElement(name, attributes = {}, text = null) {
+  const element = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
+  if (text !== null) element.textContent = text;
+  return element;
+}
+
+function signed(value) {
+  return value > 0 ? `+${value}` : value < 0 ? `−${Math.abs(value)}` : "±0";
+}
+
+function renderGrowthChart() {
+  const { weeks } = state.growth;
+  const chart = $("#growth-chart");
+  const width = Math.max(300, Math.round(chart.clientWidth || 700));
+  const height = 210;
+  const top = 18;
+  const plot = 150;
+  const maxUp = Math.max(1, ...weeks.map((week) => week.joins));
+  const maxDown = Math.max(0, ...weeks.map((week) => (week.leaves_known ? week.leaves : 0)));
+  const scale = plot / (maxUp + maxDown);
+  const zero = top + maxUp * scale;
+  const slot = width / weeks.length;
+  const bar = Math.max(6, Math.min(34, slot * 0.55));
+  const everyOther = slot < 42;
+  const svg = svgElement("svg", { viewBox: `0 0 ${width} ${height}`, width, height, role: "img" });
+  svg.setAttribute("aria-label", `Beitritte und Abgänge der letzten ${weeks.length} Wochen: `
+    + weeks.map((week) => `KW ${week.week}: +${week.joins}${week.leaves_known ? ` / −${week.leaves}` : ""}`).join(", "));
+  svg.append(svgElement("line", { x1: 0, x2: width, y1: zero, y2: zero, class: "growth-axis" }));
+  weeks.forEach((week, index) => {
+    const x = index * slot + (slot - bar) / 2;
+    const center = x + bar / 2;
+    const group = svgElement("g");
+    group.append(svgElement("title", {}, `KW ${week.week} (ab ${new Date(`${week.week_start}T12:00:00`).toLocaleDateString("de-DE")}): `
+      + `${week.joins} beigetreten, ${week.leaves_known ? `${week.leaves} gegangen` : "Abgänge noch nicht gezählt"}`));
+    if (week.joins) {
+      const up = week.joins * scale;
+      group.append(svgElement("rect", { x, y: zero - up, width: bar, height: up, class: "growth-join" }));
+      group.append(svgElement("text", { x: center, y: zero - up - 4, class: "growth-value" }, `+${week.joins}`));
+    }
+    if (week.leaves_known && week.leaves) {
+      const down = week.leaves * scale;
+      group.append(svgElement("rect", { x, y: zero, width: bar, height: down, class: "growth-leave" }));
+      group.append(svgElement("text", { x: center, y: zero + down + 12, class: "growth-value" }, `−${week.leaves}`));
+    }
+    const current = index === weeks.length - 1;
+    if (!everyOther || current || (weeks.length - 1 - index) % 2 === 0) {
+      group.append(svgElement("text", { x: center, y: height - 6, class: `growth-label${current ? " current" : ""}` }, `KW${week.week}`));
+    }
+    svg.append(group);
+  });
+  chart.replaceChildren(svg);
+}
+
+async function loadGrowth() {
+  state.growth = await api("/api/growth");
+  const { weeks, members, tracking_since: since } = state.growth;
+  const current = weeks[weeks.length - 1];
+  const joins = weeks.reduce((sum, week) => sum + week.joins, 0);
+  const leaves = weeks.reduce((sum, week) => sum + (week.leaves_known ? week.leaves : 0), 0);
+  $("#growth-tiles").replaceChildren(
+    statTile("Mitglieder", String(members ?? "–"), "aktuell auf dem Server"),
+    statTile("Diese Woche", signed(current.joins - current.leaves), `${current.joins} beigetreten · ${current.leaves} gegangen`),
+    statTile(`Beitritte ${weeks.length} Wo.`, String(joins), "neue Mitglieder"),
+    statTile(`Abgänge ${weeks.length} Wo.`, String(leaves), since ? "seit Zählbeginn" : "noch nicht gezählt"),
+  );
+  renderGrowthChart();
+  $("#growth-note").textContent = since
+    ? `Abgänge zählt der Bot seit ${new Date(`${since}T12:00:00`).toLocaleDateString("de-DE")}. Davor zeigt das Diagramm nur Beitritte von Personen, die heute noch Mitglied sind. Gespeichert werden nur Tageszahlen, keine Namen.`
+    : "Der Bot zählt Beitritte und Abgänge, sobald er mit dem Server verbunden ist. Gespeichert werden nur Tageszahlen, keine Namen.";
 }
 
 /* Seiten mit Daten aus /api */
@@ -1491,6 +1566,7 @@ async function loadTickets() {
 }
 
 const pageLoaders = {
+  dashboard: loadGrowth,
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
   anwesenheit: loadAttendance, rangliste: loadRanking, statistiken: loadStats, einstellungen: loadSettings, texte: loadTexts,
   ankuendigungen: loadAnnouncements, setup: loadSetup,
@@ -1854,6 +1930,11 @@ async function init() {
   $("#log-search").addEventListener("input", renderLog);
   for (const box of document.querySelectorAll("input[name=log-level]")) box.addEventListener("change", renderLog);
   window.addEventListener("hashchange", showPage);
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (state.growth && !$("#page-dashboard").hidden) renderGrowthChart(); }, 150);
+  });
   showPage();
   setInterval(renderUptime, 1000);
   connect();

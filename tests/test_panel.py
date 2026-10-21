@@ -208,6 +208,10 @@ def make_hooks(client=None) -> panel.PanelHooks:
         sync_stats=mock.AsyncMock(return_value="5 Matches abgeholt."),
         lookup_stats=mock.AsyncMock(),
         stats_rules=lambda: {"match_count": 20, "only_competitive": True, "retention_days": 90, "enabled": True},
+        member_flow=lambda guild_id: {
+            "weeks": [{"week_start": "2026-10-19", "week": 43, "joins": 3, "leaves": 1, "members": 4, "leaves_known": True}],
+            "tracking_since": "2026-10-19",
+        },
     )
 
 
@@ -1256,6 +1260,17 @@ class RankingPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((first["position"], first["name"], first["rank_value"]), (1, "Zoe (Kader)", [4, 1]))
         self.assertEqual([entry["rank_tier"] for entry in first["history"]], ["Gold 3", "Platinum 1"])
         self.assertEqual((second["rank_tier"], second["rank_value"], second["history"]), (None, None, []))
+
+
+class GrowthPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_growth(self):
+        client = TestClient(TestServer(panel.Panel(CONFIG, make_hooks()).build_app()))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        self.assertEqual((await client.get("/api/growth")).status, 401)
+        _, cookie = session_cookie(COACH_ID)
+        data = await (await client.get("/api/growth", headers={"Cookie": cookie})).json()
+        self.assertEqual((data["members"], data["tracking_since"], data["weeks"][0]["joins"]), (4, "2026-10-19", 3))
 
 
 def match(match_id: str, won: int | None = 1, agent: str = "Jett") -> main.MatchStat:

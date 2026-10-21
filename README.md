@@ -67,6 +67,8 @@ Jede steuernde Aktion landet mit Name im Audit-Kanal.
 
 **Statistiken:** Beim täglichen Rang-Abgleich holt der Bot zusätzlich die letzten Matches jedes verknüpften Spielers (`/valorant/v1/stored-matches`, Standard: 20 Competitive-Matches, einstellbar) und speichert Map, Agent, K/D/A, Treffer, Schaden, Punkte und Ergebnis in `match_stats`. Matches älter als 90 Tage löscht er; eine neue oder gelöste Riot-ID löscht die Matches des alten Kontos. Die Daten sind Teil von Auskunft und Löschung.
 
+**Server-Wachstum:** Das Dashboard zeigt Beitritte und Abgänge der letzten 12 Wochen. Der Bot speichert dafür nur Tageszahlen in `member_flow` (keine User-IDs, 400 Tage). Beim Start trägt er Beitritte aus den Beitrittsdaten der aktuellen Mitglieder nach; Abgänge zählt er erst ab dem ersten Start mit dieser Version.
+
 ### 1. Discord-Application vorbereiten
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) → die Bot-Application → **OAuth2**.

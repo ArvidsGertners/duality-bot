@@ -690,6 +690,41 @@ class MatchStatsTests(unittest.IsolatedAsyncioTestCase):
             await main.lookup_stats("Bewerber#1234")
 
 
+class MemberFlowTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        main.initialize_storage()
+
+    def test_berlin_day(self):
+        # 23:30 UTC ist in Berlin (Sommerzeit) schon der nächste Tag.
+        self.assertEqual(main.berlin_day(datetime(2026, 10, 20, 23, 30, tzinfo=timezone.utc)), "2026-10-21")
+
+    def test_weeks_backfill_and_tracking(self):
+        today = datetime(2026, 10, 21).date()  # Mittwoch, KW 43
+        main.record_member_flow(1, "2026-10-19", members=40)  # Zählbeginn am Montag
+        main.record_member_flow(1, "2026-10-20", joins=1, members=41)
+        main.record_member_flow(1, "2026-10-21", joins=1, members=42)
+        main.record_member_flow(1, "2026-10-21", leaves=1, members=41)
+        # Nachgetragen werden nur Tage vor dem Zählbeginn; Beitritte danach zählen die Ereignisse.
+        main.backfill_member_joins(1, ["2026-10-12", "2026-10-13", "2026-10-13", "2026-10-20", "2025-01-01"])
+        main.backfill_member_joins(1, ["2026-10-12", "2026-10-13", "2026-10-13", "2026-10-20"])  # erneut: nichts doppelt
+        data = main.member_flow_weeks(1, 3, today)
+        self.assertEqual(data["tracking_since"], "2026-10-19")
+        self.assertEqual([week["week"] for week in data["weeks"]], [41, 42, 43])
+        self.assertEqual(
+            [(week["joins"], week["leaves"], week["members"], week["leaves_known"]) for week in data["weeks"]],
+            [(0, 0, None, False), (3, 0, None, False), (2, 1, 41, True)],
+        )
+        main.record_member_flow(2, "2026-10-21", joins=5)
+        self.assertEqual(main.member_flow_weeks(1, 1, today)["weeks"][0]["joins"], 2)  # andere Server zählen nicht mit
+        self.assertEqual(main.delete_old_member_flow("2026-10-19"), 2)
+        self.assertEqual(main.member_flow_weeks(1, 3, today)["weeks"][1]["joins"], 0)
+
+
 class SettingsTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

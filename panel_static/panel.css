@@ -371,6 +371,17 @@ tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--color-error); }
 .rate-bar.low > span { background: var(--color-primary); }
 #stats-list tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--color-primary); }
 
+/* Server-Wachstum */
+.growth-chart { margin: .25rem 0 .75rem; overflow: hidden; }
+.growth-chart svg { display: block; max-width: 100%; height: auto; }
+.growth-axis { stroke: var(--line); stroke-width: 1; }
+.growth-join { fill: var(--color-success); }
+.growth-leave { fill: var(--color-primary); }
+.growth-value, .growth-label { font-family: var(--mono); font-size: 11px; text-anchor: middle; }
+.growth-value { fill: var(--color-base-content); font-weight: 700; }
+.growth-label { fill: var(--muted); }
+.growth-label.current { fill: var(--color-base-content); font-weight: 700; }
+
 /* Rangliste */
 .sparkline { display: block; }
 .sparkline polyline { fill: none; stroke: var(--color-primary); stroke-width: 2; }

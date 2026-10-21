@@ -25,7 +25,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
 from contextlib import closing, contextmanager
-from datetime import datetime, timedelta, time as day_time
+from datetime import date, datetime, timedelta, time as day_time
 from pathlib import Path
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
@@ -87,6 +87,8 @@ HENRIKDEV_NO_RECENT_MATCHES = 24
 RANK_SYNC_DELAY_SECONDS = 3
 STATS_MATCH_COUNT = 20
 MATCH_STATS_RETENTION_DAYS = 90
+MEMBER_FLOW_RETENTION_DAYS = 400
+GROWTH_WEEKS = 12
 TEMP_VOICE_CREATORS = {"➕ Neuer Voice": "🔊", "➕ Neuer Valorant-Voice": "🎯"}
 BACKGROUND_TASKS: set[asyncio.Task] = set()
 # Schwache Referenzen: Ein Lock verschwindet, sobald niemand mehr darauf wartet.
@@ -269,6 +271,13 @@ def initialize_storage() -> None:
             "head INTEGER NOT NULL, body INTEGER NOT NULL, leg INTEGER NOT NULL, damage INTEGER NOT NULL, "
             "score INTEGER NOT NULL, rounds INTEGER NOT NULL, won INTEGER, fetched_at INTEGER NOT NULL, "
             "PRIMARY KEY (guild_id, user_id, match_id))"
+        )
+        # Server-Wachstum: nur Tageszahlen, keine User-IDs. tracked = 0 heißt „aus Beitrittsdaten nachgetragen“,
+        # dann sind Abgänge für den Tag unbekannt.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS member_flow ("
+            "guild_id INTEGER NOT NULL, day TEXT NOT NULL, joins INTEGER NOT NULL DEFAULT 0, leaves INTEGER NOT NULL DEFAULT 0, "
+            "members INTEGER, tracked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, day))"
         )
         # Spalten, die spätere Versionen ergänzt haben; bestehende Zeilen behalten ihre Daten.
         event_columns = {row[1] for row in connection.execute("PRAGMA table_info(scheduled_events)")}
@@ -622,6 +631,73 @@ def summarize_matches(matches: Sequence[MatchStat]) -> dict:
         "agents": grouped("agent"),
         "maps": grouped("map"),
     }
+
+
+def berlin_day(moment: datetime) -> str:
+    return moment.astimezone(BERLIN).date().isoformat()
+
+
+def record_member_flow(guild_id: int, day: str, joins: int = 0, leaves: int = 0, members: int | None = None) -> None:
+    """Beitritt/Abgang zählen und die aktuelle Mitgliederzahl merken; der Tag gilt danach als gezählt."""
+    with open_db() as connection:
+        connection.execute(
+            "INSERT INTO member_flow (guild_id, day, joins, leaves, members, tracked) VALUES (?, ?, ?, ?, ?, 1) "
+            "ON CONFLICT (guild_id, day) DO UPDATE SET joins = joins + excluded.joins, leaves = leaves + excluded.leaves, "
+            "members = COALESCE(excluded.members, members), tracked = 1",
+            (guild_id, day, joins, leaves, members),
+        )
+
+
+def backfill_member_joins(guild_id: int, join_days: Sequence[str]) -> None:
+    """Trägt Beitritte vor Zählbeginn aus den Beitrittsdaten der heutigen Mitglieder nach (Abgänge kennt Discord nicht)."""
+    with open_db() as connection:
+        first_tracked = connection.execute(
+            "SELECT MIN(day) FROM member_flow WHERE guild_id = ? AND tracked = 1", (guild_id,)
+        ).fetchone()[0]
+        connection.execute("DELETE FROM member_flow WHERE guild_id = ? AND tracked = 0", (guild_id,))
+        counts: dict[str, int] = {}
+        for day in join_days:
+            if first_tracked is None or day < first_tracked:
+                counts[day] = counts.get(day, 0) + 1
+        connection.executemany(
+            "INSERT INTO member_flow (guild_id, day, joins, tracked) VALUES (?, ?, ?, 0)",
+            [(guild_id, day, count) for day, count in counts.items()],
+        )
+
+
+def member_flow_weeks(guild_id: int, weeks: int, today: date) -> dict:
+    """Beitritte, Abgänge und Mitgliederzahl je Kalenderwoche (Montag–Sonntag), älteste zuerst."""
+    start = today - timedelta(days=today.weekday(), weeks=weeks - 1)
+    buckets = [
+        {"week_start": (start + timedelta(weeks=index)).isoformat(), "week": (start + timedelta(weeks=index)).isocalendar().week,
+         "joins": 0, "leaves": 0, "members": None, "leaves_known": False}
+        for index in range(weeks)
+    ]
+    with open_db() as connection:
+        rows = connection.execute(
+            "SELECT day, joins, leaves, members, tracked FROM member_flow WHERE guild_id = ? AND day >= ? ORDER BY day",
+            (guild_id, start.isoformat()),
+        ).fetchall()
+        tracking_since = connection.execute(
+            "SELECT MIN(day) FROM member_flow WHERE guild_id = ? AND tracked = 1", (guild_id,)
+        ).fetchone()[0]
+    for day, joins, leaves, members, tracked in rows:
+        index = (date.fromisoformat(day) - start).days // 7
+        if not 0 <= index < weeks:
+            continue
+        bucket = buckets[index]
+        bucket["joins"] += joins
+        bucket["leaves"] += leaves
+        if members is not None:
+            bucket["members"] = members
+        if tracked:
+            bucket["leaves_known"] = True
+    return {"weeks": buckets, "tracking_since": tracking_since}
+
+
+def delete_old_member_flow(before_day: str) -> int:
+    with open_db() as connection:
+        return connection.execute("DELETE FROM member_flow WHERE day < ?", (before_day,)).rowcount
 
 
 def attendance(guild_id: int, user_id: int, since: int, until: int) -> tuple[int, int]:
@@ -3383,6 +3459,7 @@ async def purge_expired_data(guild: discord.Guild | None) -> tuple[int, int]:
     if removed_events:
         log.info("%s vergangene Termine aus der Datenbank entfernt", removed_events)
     removed_matches = delete_old_match_stats(now - MATCH_STATS_RETENTION_DAYS * 24 * 60 * 60)
+    delete_old_member_flow((datetime.now(BERLIN).date() - timedelta(days=MEMBER_FLOW_RETENTION_DAYS)).isoformat())
     if removed_matches:
         log.info("%s Matches älter als %s Tage aus den Statistiken entfernt", removed_matches, MATCH_STATS_RETENTION_DAYS)
 
@@ -4922,12 +4999,14 @@ async def main(apply: bool) -> int | None:
     @client.event
     async def on_member_remove(member: discord.Member):
         if apply and member.guild.id == target_id:
+            record_member_flow(member.guild.id, berlin_day(discord.utils.utcnow()), leaves=1, members=member.guild.member_count)
             await audit(member.guild, f"**Server verlassen:** {member.mention} (`{member.id}`, {member})", discord.Color.orange())
             await close_applications_of_departed_member(member)
 
     @client.event
     async def on_member_join(member: discord.Member):
         if apply and member.guild.id == target_id:
+            record_member_flow(member.guild.id, berlin_day(discord.utils.utcnow()), joins=1, members=member.guild.member_count)
             created = int(member.created_at.timestamp())
             await audit(
                 member.guild,
@@ -4979,6 +5058,9 @@ async def main(apply: bool) -> int | None:
                 commands_synced = True
                 print("  Slash-Befehle für diesen Server veröffentlicht")
             await clean_up_temp_voice(guild)
+            # Zählbeginn fürs Server-Wachstum; davor nur Beitritte der heutigen Mitglieder.
+            record_member_flow(guild.id, berlin_day(discord.utils.utcnow()), members=guild.member_count)
+            backfill_member_joins(guild.id, [berlin_day(member.joined_at) for member in guild.members if member.joined_at])
             if not purge_declined_applications.is_running():
                 purge_declined_applications.start()
             if not sync_ranks.is_running():
@@ -5083,6 +5165,7 @@ async def main(apply: bool) -> int | None:
                     summarize_matches=summarize_matches,
                     sync_stats=sync_stats_now,
                     lookup_stats=lookup_stats,
+                    member_flow=lambda guild_id: member_flow_weeks(guild_id, GROWTH_WEEKS, datetime.now(BERLIN).date()),
                     stats_rules=lambda: {
                         "match_count": setting("stats_match_count"),
                         "only_competitive": setting("stats_only_competitive"),

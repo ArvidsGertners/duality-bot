@@ -163,8 +163,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] Duality-Logo (DM-Zeichen aus `Duality-DM.svg`/`Duality-DM-LightBG.svg`) statt Raute: als Inline-SVG in Seitenleiste und Anmeldeseite, linker Teil folgt der Textfarbe (weiß auf dunkel, schwarz auf hell), rechter Teil rot; dazu `favicon.svg` auf schwarzem Feld — fertig (b169451)
 
 ## Neue Features (Wunsch von Arvids, 21.10.2026)
-- [x] Spieler-Statistiken: HenrikDev `stored-matches` beim täglichen Rang-Abgleich, Tabelle `match_stats` (90 Tage, in Auskunft/Löschung, neue Riot-ID löscht alte Matches), Seite „Statistiken“ (Team-Tabelle sortierbar, Detail mit Kennzahlen, Agents, Maps, letzten Matches), „Bewerber prüfen“ ohne Speichern (6/min je Staff), „Jetzt aktualisieren“ ab Admin, Einstellungen `stats_match_count` (20) und `stats_only_competitive` (an) — fertig (Commit folgt)
-- [ ] Server-Wachstum: Tageszahlen ohne User-IDs, Diagramm auf dem Dashboard — in Arbeit
+- [x] Spieler-Statistiken: HenrikDev `stored-matches` beim täglichen Rang-Abgleich, Tabelle `match_stats` (90 Tage, in Auskunft/Löschung, neue Riot-ID löscht alte Matches), Seite „Statistiken“ (Team-Tabelle sortierbar, Detail mit Kennzahlen, Agents, Maps, letzten Matches), „Bewerber prüfen“ ohne Speichern (6/min je Staff), „Jetzt aktualisieren“ ab Admin, Einstellungen `stats_match_count` (20) und `stats_only_competitive` (an) — fertig (6f4919e)
+- [x] Server-Wachstum: Tabelle `member_flow` nur mit Tageszahlen (keine User-IDs, 400 Tage), Zählung bei Beitritt/Abgang, beim Start Mitgliederzahl + Nachtrag der Beitritte vor Zählbeginn aus `joined_at`; Dashboard-Karte mit Kacheln und SVG-Balkendiagramm (12 Wochen, Beitritte grün, Abgänge rot) — fertig (Commit folgt)
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
@@ -182,6 +182,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 | `BACKUP_RETENTION_DAYS` | `14` | Ältere Backups werden gelöscht |
 
 ## Neue Tabellen und Spalten
+- `match_stats` (Statistiken), `member_flow` (Server-Wachstum)
 - `rank_history` (C4)
 - `bot_settings` (D3)
 - `bot_texts` (D2, mit Verlauf)
