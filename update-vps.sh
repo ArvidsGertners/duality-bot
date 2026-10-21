@@ -70,6 +70,12 @@ run_as_bot git -C "$APP_DIR" pull --ff-only origin main
 echo "Aktualisiere Python-Abhängigkeiten ..."
 run_as_bot "$UV" pip install --python "$VENV_PYTHON" -r "$APP_DIR/requirements.txt"
 
+# Ein Stand mit Syntaxfehler würde den laufenden Bot ablösen und nicht mehr starten.
+if ! run_as_bot "$VENV_PYTHON" -m py_compile "$APP_DIR/main.py" "$APP_DIR/panel.py"; then
+    echo "Fehler: Der neue Stand enthält einen Syntaxfehler. Der Bot läuft mit dem alten Stand weiter und wurde nicht neu gestartet."
+    exit 1
+fi
+
 echo "Starte den Bot-Dienst neu. --apply führt dabei die Server-Einrichtung erneut aus."
 if ! systemctl restart "$SERVICE"; then
     systemctl --no-pager --full status "$SERVICE" || true

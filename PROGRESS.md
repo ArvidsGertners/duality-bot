@@ -57,9 +57,9 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [ ] F Scrim-Börse, eigenes Gesuch, `scrim_requests`, Termin aus Scrim, Einladungslink — zurückgestellt (bei Wiederaufnahme: PRACC-Bot als Quelle prüfen, `scrim_requests` in Auskunft/Löschung aufnehmen)
 
 ### Phase 7 – Abschluss
-- [ ] README (Web-Panel, Env-Variablen, systemd, Caddy, SSH-Tunnel, Backup zurückspielen, Webhook) — offen
-- [ ] Update-Skripte prüfen — offen
-- [ ] `/help` um neue Befehle ergänzen — offen
+- [x] README (Web-Panel, Env-Variablen, systemd, Caddy + nginx wie auf dem VPS, SSH-Tunnel, Backup zurückspielen, Webhook, Datenschutz, Deploy) — fertig (Commit „Abschluss …“)
+- [x] Update-Skripte geprüft: `update-mac.sh` bricht jetzt vor dem Commit ab, wenn `py_compile` oder ein Test scheitert; `update-vps.sh` prüft nach dem Pull die Syntax und startet sonst nicht neu — fertig (dto.)
+- [x] `/help` nennt `/rangliste` (seit aa72e6d, Text im Panel änderbar) — fertig
 
 ## Entscheidungen und Annahmen
 - **VPS-Zugriff erlaubt** (Arvids, 21.10.2026), Ausnahme von „VPS nicht anfassen“ für die Panel-Einrichtung. Login per SSH-Schlüssel als root@217.154.173.183 (nie per Passwort). Vor jeder Änderung am laufenden Bot fragen.
@@ -176,4 +176,11 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Phase 6 (Scrims) ist zurückgestellt. Auf Arvids' OK für Phase 7 warten: README (Web-Panel, Env-Variablen, systemd, Caddy/nginx, SSH-Tunnel, Backup zurückspielen, Alarm-Webhook), Update-Skripte prüfen, /help. Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Alle Phasen außer Phase 6 (zurückgestellt) sind fertig. VPS-Update mit dem Abschluss-Commit anbieten (nur README und Skripte, kein Neustart nötig außer durch update-vps.sh selbst). Mögliche nächste Schritte: eigene Domain statt sslip.io, `ALERT_WEBHOOK_URL` setzen, Scrim-Suche später mit PRACC.
+
+## Abschluss (Stand 21.10.2026)
+- **Geänderte/neue Dateien:** `main.py`, `panel.py` (neu), `panel_static/` (neu: index.html, panel.css, panel.js), `tests/` (neu: test_panel.py, test_bot.py, test_setup.py), `requirements.txt` (+ aiohttp), `.gitignore` (+ backups/), `update-mac.sh`, `update-vps.sh`, `README.md`, `PROGRESS.md`, `PANEL_PROMPT.md`.
+- **Neue Tabellen/Spalten:** `rank_history`, `bot_settings`, `bot_texts`, `scheduled_announcements`; `scheduled_events` + `title`, `details`, `cancelled_at`.
+- **Neue Env-Variablen:** siehe Tabelle oben bzw. README.
+- **Nicht getestet (nur mit simuliertem Discord):** Termin bearbeiten/absagen an echten Nachrichten, Rang-Glückwunsch im echten Teamchat, Ankündigung senden, Text-Änderung an fester Nachricht, Bewerbungsnachrichten löschen (Datenschutz), Setup-Vorschau/-Anwenden am echten Server, Warnung per Webhook, Panel-`restart` mit systemd. Echt getestet: Login über Discord, Bot-Start/Deploy, Backups auf dem VPS, Slash-Befehle registriert.
+- **Bekannte Einschränkungen:** Diff zeigt `bewerber-chat` bei sehr alten Servern als neu statt umbenannt; geänderte Bewerbungs-Löschfrist erscheint im #bewerbung-Text erst beim nächsten Speichern/Neustart; Panel unter sslip.io hängt von fremdem DNS ab; der gelöschte Termin am 24.10. verschwindet erst beim Erinnerungs-Check. Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

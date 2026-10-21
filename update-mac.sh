@@ -32,6 +32,22 @@ if [[ "$(git branch --show-current)" != "main" ]]; then
     exit 1
 fi
 
+# Nie einen Stand pushen, der nicht kompiliert oder dessen Tests scheitern.
+PYTHON="$PROJECT_DIR/.venv/bin/python"
+if [[ -x "$PYTHON" ]]; then
+    echo "Prüfe Syntax und Tests ..."
+    if ! "$PYTHON" -m py_compile main.py panel.py; then
+        echo "Fehler: Syntaxfehler, es wird nichts committet."
+        exit 1
+    fi
+    if ! "$PYTHON" -m unittest discover -s tests -q; then
+        echo "Fehler: Tests schlagen fehl, es wird nichts committet."
+        exit 1
+    fi
+else
+    echo "Hinweis: $PYTHON fehlt, Syntax und Tests werden nicht geprüft."
+fi
+
 for file in "${FILES[@]}"; do
     if [[ ! -e "$file" ]]; then
         echo "Fehler: Datei fehlt: $PROJECT_DIR/$file"
