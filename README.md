@@ -170,6 +170,21 @@ server {
 
     access_log /var/log/nginx/access.log combined if=$duality_loggable;
 
+    # Nur statische Dateien komprimieren: API-Antworten tragen Geheimnisse (BREACH).
+    location /static/ {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        gzip on;
+        gzip_vary on;
+        gzip_proxied any;
+        gzip_comp_level 6;
+        gzip_min_length 1024;
+        gzip_types text/css application/javascript text/javascript;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8090;
         proxy_http_version 1.1;
