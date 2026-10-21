@@ -233,6 +233,8 @@ def page(title: str, body: str, status: int = 200) -> web.Response:
         '<!doctype html><html lang="de"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{html.escape(title)} · Duality-Panel</title>"
+        '<script src="/static/theme.js"></script>'
+        '<link rel="stylesheet" href="/static/daisyui.css">'
         '<link rel="stylesheet" href="/static/panel.css"></head>'
         '<body class="center-page"><main class="card narrow">'
         '<div class="brand"><span class="brand-mark" aria-hidden="true"></span>Duality-Panel</div>'
@@ -241,7 +243,7 @@ def page(title: str, body: str, status: int = 200) -> web.Response:
     return web.Response(text=document, content_type="text/html", status=status, headers={"Cache-Control": "no-store"})
 
 
-LOGIN_LINK = '<p><a class="button primary" href="/auth/login">Mit Discord anmelden</a></p>'
+LOGIN_LINK = '<p><a class="btn btn-primary" href="/auth/login">Mit Discord anmelden</a></p>'
 
 
 class ConsoleLog:

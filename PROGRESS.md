@@ -57,7 +57,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [ ] F Scrim-Börse, eigenes Gesuch, `scrim_requests`, Termin aus Scrim, Einladungslink — zurückgestellt (bei Wiederaufnahme: PRACC-Bot als Quelle prüfen, `scrim_requests` in Auskunft/Löschung aufnehmen)
 
 ### Phase 7 – Abschluss
-- [x] README (Web-Panel, Env-Variablen, systemd, Caddy + nginx wie auf dem VPS, SSH-Tunnel, Backup zurückspielen, Webhook, Datenschutz, Deploy) — fertig (Commit „Abschluss …“)
+- [x] README (Web-Panel, Env-Variablen, systemd, Caddy + nginx wie auf dem VPS, SSH-Tunnel, Backup zurückspielen, Webhook, Datenschutz, Deploy) — fertig (f24331b)
 - [x] Update-Skripte geprüft: `update-mac.sh` bricht jetzt vor dem Commit ab, wenn `py_compile` oder ein Test scheitert; `update-vps.sh` prüft nach dem Pull die Syntax und startet sonst nicht neu — fertig (dto.)
 - [x] `/help` nennt `/rangliste` (seit aa72e6d, Text im Panel änderbar) — fertig
 
@@ -146,6 +146,13 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - **21.10.2026, 12:52 UTC: Phase 3 deployt (aa72e6d)**, vorher Backup `duality-backup-2026-10-21_145223.sqlite3`. `update-vps.sh` Exit 0, Dienst aktiv, 0 Fehler im Log, Schema migriert (`scheduled_events` + `title`/`details`/`cancelled_at`, `rank_history` da), `/rangliste` bei Discord registriert, Panel lokal/öffentlich ok. Hinweise: ein verknüpftes Profil gehört zu jemandem, der den Server verlassen hat (wird beim Abgleich übersprungen); der gespeicherte Termin am 24.10. 17:00 hat eine in Discord gelöschte Nachricht (kein Titel, verschwindet beim Erinnerungs-Check 24 h vorher von selbst).
 - **21.10.2026, 13:12 UTC: Phase 4 deployt (e5499f4)**, vorher Backup `duality-backup-2026-10-21_151242.sqlite3`. `update-vps.sh` Exit 0, Dienst aktiv, 0 Fehler, neue Tabellen da, Standardwerte aktiv, feste Nachrichten mit den (unveränderten) Standardtexten neu gesetzt, Panel lokal/öffentlich ok.
 - **21.10.2026, 13:21 UTC: Phase 5 deployt (7f87f7d)**, vorher Backup `duality-backup-2026-10-21_152155.sqlite3`. Exit 0, Dienst aktiv, 0 Fehler, Panel ok. Setup-Vorschau gegen den echten Server noch nicht angesehen (geht nur über das Panel).
+- **21.10.2026, 15:06 UTC: Abschluss deployt (f24331b)**, vorher Backup `duality-backup-2026-10-21_170647.sqlite3`. Exit 0, Dienst aktiv, 0 Fehler, Syntaxprüfung in `update-vps.sh` vorhanden, `git status` sauber, Panel lokal/öffentlich ok.
+
+## Design-Update (Wunsch von Arvids, 21.10.2026)
+- [x] Panel in den Farben der Palette (`palette.ase`: `#eb1b29`, Schwarz, Weiß), Themes `duality-dark`/`duality-light`, Umschalter System/Hell/Dunkel in der Seitenleiste (Wahl nur im Browser gespeichert, `panel_static/theme.js`) — fertig (Commit folgt)
+- Statt shadcn (braucht React + Build, verboten) auf Wunsch daisyUI 5.7.50: nur die genutzten Komponenten als `panel_static/daisyui.css`, unverändert von jsDelivr zusammengefügt, ohne Tailwind und ohne Build. Eigene Klassen nur für Layout und Discord-Vorschau.
+- Kontrast: Primärrot `#eb1b29` mit weißer Schrift hat 4,45:1 (knapp unter 4,5); roter Text nutzt daher den Akzent (`#ff4d58` dunkel, `#c8101c` hell). Fehler-Knöpfe sind umrandet, damit sie sich vom roten Primärknopf abheben.
+- Standardfarbe neuer Ankündigungen ist jetzt `#eb1b29`.
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
@@ -176,7 +183,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Alle Phasen außer Phase 6 (zurückgestellt) sind fertig. VPS-Update mit dem Abschluss-Commit anbieten (nur README und Skripte, kein Neustart nötig außer durch update-vps.sh selbst). Mögliche nächste Schritte: eigene Domain statt sslip.io, `ALERT_WEBHOOK_URL` setzen, Scrim-Suche später mit PRACC.
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Alle Phasen außer Phase 6 (zurückgestellt) sind fertig. VPS läuft mit dem Abschluss-Stand (f24331b). Mögliche nächste Schritte: eigene Domain statt sslip.io, `ALERT_WEBHOOK_URL` setzen, Scrim-Suche später mit PRACC.
 
 ## Abschluss (Stand 21.10.2026)
 - **Geänderte/neue Dateien:** `main.py`, `panel.py` (neu), `panel_static/` (neu: index.html, panel.css, panel.js), `tests/` (neu: test_panel.py, test_bot.py, test_setup.py), `requirements.txt` (+ aiohttp), `.gitignore` (+ backups/), `update-mac.sh`, `update-vps.sh`, `README.md`, `PROGRESS.md`, `PANEL_PROMPT.md`.

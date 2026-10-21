@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Duality-Panel</title>
+  <script src="/static/theme.js"></script>
+  <link rel="stylesheet" href="/static/daisyui.css">
   <link rel="stylesheet" href="/static/panel.css">
   <script src="/static/panel.js" defer></script>
 </head>
@@ -13,7 +15,7 @@
     <header class="sidebar">
       <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Duality-Panel</div>
       <nav aria-label="Bereiche">
-        <ul id="nav">
+        <ul class="menu" id="nav">
           <li><a href="#dashboard" data-page="dashboard" data-level="1">Dashboard</a></li>
           <li><a href="#konsole" data-page="konsole" data-level="1">Konsole</a></li>
           <li><a href="#voice" data-page="voice" data-level="1">Voice</a></li>
@@ -37,12 +39,20 @@
           <div id="user-name">…</div>
           <div class="muted" id="user-role"></div>
         </div>
-        <button type="button" class="small" id="logout">Abmelden</button>
+        <div class="user-actions">
+          <label class="visually-hidden" for="theme-select">Darstellung</label>
+          <select class="select select-sm" id="theme-select">
+            <option value="system">System</option>
+            <option value="light">Hell</option>
+            <option value="dark">Dunkel</option>
+          </select>
+          <button type="button" class="btn btn-sm" id="logout">Abmelden</button>
+        </div>
       </div>
     </header>
 
     <main id="main" tabindex="-1">
-      <div class="banner" id="connection-banner" role="status" hidden></div>
+      <div class="alert alert-warning" id="connection-banner" role="status" hidden></div>
 
       <section id="page-dashboard" class="page" aria-labelledby="title-dashboard">
         <h1 id="title-dashboard">Dashboard</h1>
@@ -74,7 +84,7 @@
         <article class="card spaced" aria-labelledby="card-tasks">
           <h2 id="card-tasks">Hintergrund-Tasks</h2>
           <div class="table-wrap">
-            <table>
+            <table class="table">
               <thead>
                 <tr><th scope="col">Task</th><th scope="col">Status</th><th scope="col">Letzter Lauf</th><th scope="col">Nächster Lauf</th><th scope="col">Letzter Fehler</th></tr>
               </thead>
@@ -89,7 +99,7 @@
         <h1 id="title-voice">Voice-Kanäle</h1>
         <div class="toolbar">
           <p class="muted" id="voice-summary" role="status">Warte auf Daten vom Bot …</p>
-          <label><input type="checkbox" id="voice-hide-empty"> Leere Kanäle ausblenden</label>
+          <label><input class="checkbox checkbox-sm" type="checkbox" id="voice-hide-empty"> Leere Kanäle ausblenden</label>
         </div>
         <div class="voice-grid" id="voice-list"></div>
       </section>
@@ -98,20 +108,20 @@
         <h1 id="title-termine">Termine</h1>
         <div class="toolbar">
           <div role="group" aria-label="Ansicht">
-            <button type="button" id="events-view-list" aria-pressed="true">Liste</button>
-            <button type="button" id="events-view-calendar" aria-pressed="false">Kalender</button>
+            <button class="btn" type="button" id="events-view-list" aria-pressed="true">Liste</button>
+            <button class="btn" type="button" id="events-view-calendar" aria-pressed="false">Kalender</button>
           </div>
           <label for="events-range">Zeitraum</label>
-          <select id="events-range">
+          <select class="select" id="events-range">
             <option value="upcoming">Kommende</option>
             <option value="past">Vergangene</option>
             <option value="all">Alle</option>
           </select>
-          <button type="button" class="primary" id="event-new">Neuer Termin</button>
+          <button type="button" class="btn btn-primary" id="event-new">Neuer Termin</button>
           <span class="muted" id="events-message" role="status"></span>
         </div>
         <div class="card table-wrap" id="events-list-view">
-          <table>
+          <table class="table">
             <thead>
               <tr><th scope="col">Wann</th><th scope="col">Termin</th><th scope="col">Antworten</th><th scope="col">Erinnerungen</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr>
             </thead>
@@ -120,12 +130,12 @@
         </div>
         <div class="card" id="events-calendar-view" hidden>
           <div class="toolbar calendar-nav">
-            <button type="button" id="calendar-prev" aria-label="Vorheriger Monat">‹</button>
+            <button class="btn" type="button" id="calendar-prev" aria-label="Vorheriger Monat">‹</button>
             <h2 id="calendar-title" aria-live="polite"></h2>
-            <button type="button" id="calendar-next" aria-label="Nächster Monat">›</button>
+            <button class="btn" type="button" id="calendar-next" aria-label="Nächster Monat">›</button>
           </div>
           <div class="table-wrap">
-            <table class="calendar">
+            <table class="table calendar">
               <thead><tr><th scope="col">Mo</th><th scope="col">Di</th><th scope="col">Mi</th><th scope="col">Do</th><th scope="col">Fr</th><th scope="col">Sa</th><th scope="col">So</th></tr></thead>
               <tbody id="calendar-body"></tbody>
             </table>
@@ -139,18 +149,18 @@
         <p class="muted" id="attendance-rules"></p>
         <div class="toolbar">
           <label for="attendance-days">Zeitraum</label>
-          <select id="attendance-days">
+          <select class="select" id="attendance-days">
             <option value="7">Letzte 7 Tage</option>
             <option value="14">Letzte 14 Tage</option>
             <option value="30" selected>Letzte 30 Tage</option>
             <option value="60">Letzte 60 Tage</option>
             <option value="90">Letzte 90 Tage</option>
           </select>
-          <a class="button small" id="attendance-csv" href="/api/attendance.csv?days=30" download>Als CSV exportieren</a>
+          <a class="btn btn-sm" id="attendance-csv" href="/api/attendance.csv?days=30" download>Als CSV exportieren</a>
           <span class="muted" id="attendance-summary" role="status"></span>
         </div>
         <div class="card table-wrap">
-          <table>
+          <table class="table">
             <thead>
               <tr>
                 <th scope="col" aria-sort="ascending"><button type="button" class="sort" data-sort="name">Spieler</button></th>
@@ -171,7 +181,7 @@
         <h1 id="title-rangliste">Rangliste</h1>
         <p class="muted">Wie <code>/rangliste</code>: alle Spieler mit verknüpfter Riot-ID, höchster Rang zuerst. Der Verlauf zeigt jede Rangänderung seit dem Verknüpfen.</p>
         <div class="card table-wrap">
-          <table>
+          <table class="table">
             <thead>
               <tr><th scope="col">Platz</th><th scope="col">Spieler</th><th scope="col">Rang</th><th scope="col">Letzter Abgleich</th><th scope="col">Verlauf</th></tr>
             </thead>
@@ -186,7 +196,7 @@
           (Name, Kurs, Tracker-Link) stehen nur in der Discord-Nachricht. Abgelehnte und geschlossene Bewerbungen löscht der Bot nach der Löschfrist.</p>
         <div class="toolbar">
           <label for="application-filter">Status</label>
-          <select id="application-filter">
+          <select class="select" id="application-filter">
             <option value="all">Alle</option>
             <option value="pending">Offen</option>
             <option value="accepted">Angenommen</option>
@@ -194,10 +204,10 @@
             <option value="left">Geschlossen (Server verlassen)</option>
           </select>
           <span class="muted" id="application-count" role="status"></span>
-          <button type="button" class="danger" id="new-season" data-level="2">Neue Saison …</button>
+          <button type="button" class="btn btn-error btn-outline" id="new-season" data-level="2">Neue Saison …</button>
         </div>
         <div class="card table-wrap">
-          <table>
+          <table class="table">
             <thead>
               <tr><th scope="col">Bewerber</th><th scope="col">Status</th><th scope="col">Eingang</th><th scope="col">Stimmen</th><th scope="col">Entschieden von</th><th scope="col">Nachricht</th></tr>
             </thead>
@@ -210,13 +220,13 @@
         <h1 id="title-spieler">Spieler &amp; Profile</h1>
         <p class="muted">Profile aus <code>/riot-id</code> und Bewerbungen. Der Rang wird täglich automatisch abgeglichen.</p>
         <div class="toolbar">
-          <label><input type="checkbox" id="players-only" checked> Nur Spieler</label>
+          <label><input class="checkbox checkbox-sm" type="checkbox" id="players-only" checked> Nur Spieler</label>
           <label class="visually-hidden" for="player-search">Spieler suchen</label>
-          <input type="search" id="player-search" placeholder="Name oder Riot-ID …">
+          <input class="input" type="search" id="player-search" placeholder="Name oder Riot-ID …">
           <span class="muted" id="player-message" role="status"></span>
         </div>
         <div class="card table-wrap">
-          <table>
+          <table class="table">
             <thead>
               <tr><th scope="col">Person</th><th scope="col">Rolle</th><th scope="col">Riot-ID</th><th scope="col">Rang</th><th scope="col">Letzter Abgleich</th><th scope="col">Main-Rolle</th><th scope="col">Spielbar</th><th scope="col"><span class="visually-hidden">Aktion</span></th></tr>
             </thead>
@@ -230,7 +240,7 @@
         <p class="muted">Die Inhalte stehen nur im privaten Thread in Discord; hier gibt es bewusst nur Status und Link.</p>
         <div class="toolbar">
           <label for="ticket-filter">Anzeigen</label>
-          <select id="ticket-filter">
+          <select class="select" id="ticket-filter">
             <option value="open">Offene</option>
             <option value="closed">Geschlossene</option>
             <option value="all">Alle</option>
@@ -238,7 +248,7 @@
           <span class="muted" id="ticket-count" role="status"></span>
         </div>
         <div class="card table-wrap">
-          <table>
+          <table class="table">
             <thead>
               <tr><th scope="col">Gemeldet von</th><th scope="col">Status</th><th scope="col">Erstellt</th><th scope="col">Geschlossen</th><th scope="col">Thread</th></tr>
             </thead>
@@ -254,36 +264,36 @@
             <h2 id="announcement-form-title">Neue Ankündigung</h2>
             <p class="muted small" id="announcement-sent-note" hidden>Diese Ankündigung ist schon gesendet: Nur der Inhalt lässt sich ändern, Kanal und Erwähnung bleiben, und es gibt keinen neuen Ping.</p>
             <label for="announcement-channel">Kanal</label>
-            <select id="announcement-channel" required></select>
+            <select class="select" id="announcement-channel" required></select>
             <label for="announcement-ping">Erwähnung</label>
-            <select id="announcement-ping"><option value="">Niemand</option></select>
+            <select class="select" id="announcement-ping"><option value="">Niemand</option></select>
             <label for="announcement-title">Titel</label>
-            <input id="announcement-title" maxlength="256">
+            <input class="input" id="announcement-title" maxlength="256">
             <label for="announcement-description">Text (Discord-Markdown)</label>
-            <textarea id="announcement-description" rows="8" maxlength="4096"></textarea>
+            <textarea class="textarea" id="announcement-description" rows="8" maxlength="4096"></textarea>
             <label for="announcement-color">Farbe</label>
-            <input type="color" id="announcement-color" value="#6e46ff">
+            <input class="color-input" type="color" id="announcement-color" value="#eb1b29">
             <label for="announcement-image">Bild (https-Adresse, optional)</label>
-            <input id="announcement-image" type="url" placeholder="https://…">
+            <input class="input" id="announcement-image" type="url" placeholder="https://…">
             <label for="announcement-thumbnail">Vorschaubild oben rechts (https-Adresse, optional)</label>
-            <input id="announcement-thumbnail" type="url" placeholder="https://…">
+            <input class="input" id="announcement-thumbnail" type="url" placeholder="https://…">
             <label for="announcement-footer">Fußzeile (optional)</label>
-            <input id="announcement-footer" maxlength="2048">
-            <fieldset class="fieldset">
+            <input class="input" id="announcement-footer" maxlength="2048">
+            <fieldset class="fieldset-box">
               <legend>Felder (optional, höchstens 10)</legend>
               <div id="announcement-fields"></div>
-              <button type="button" class="small" id="announcement-add-field">Feld hinzufügen</button>
+              <button type="button" class="btn btn-sm" id="announcement-add-field">Feld hinzufügen</button>
             </fieldset>
-            <fieldset class="fieldset" id="announcement-when">
+            <fieldset class="fieldset-box" id="announcement-when">
               <legend>Zeitpunkt</legend>
-              <label><input type="radio" name="announcement-when" value="now" checked> Sofort senden</label>
-              <label><input type="radio" name="announcement-when" value="later"> Planen für (Berliner Zeit)</label>
-              <input type="datetime-local" id="announcement-send-at" aria-label="Geplanter Zeitpunkt (Berliner Zeit)">
+              <label><input class="radio radio-sm" type="radio" name="announcement-when" value="now" checked> Sofort senden</label>
+              <label><input class="radio radio-sm" type="radio" name="announcement-when" value="later"> Planen für (Berliner Zeit)</label>
+              <input class="input" type="datetime-local" id="announcement-send-at" aria-label="Geplanter Zeitpunkt (Berliner Zeit)">
             </fieldset>
             <p class="form-error" id="announcement-error" role="alert"></p>
             <div class="actions">
-              <button type="button" id="announcement-clear">Neu beginnen</button>
-              <button type="submit" class="primary" id="announcement-submit">Senden …</button>
+              <button class="btn" type="button" id="announcement-clear">Neu beginnen</button>
+              <button type="submit" class="btn btn-primary" id="announcement-submit">Senden …</button>
             </div>
             <p class="small" id="announcement-message" role="status"></p>
           </form>
@@ -297,7 +307,7 @@
         </div>
         <h2 class="spaced">Geplant und gesendet</h2>
         <div class="card table-wrap">
-          <table>
+          <table class="table">
             <thead>
               <tr><th scope="col">Status</th><th scope="col">Kanal</th><th scope="col">Titel</th><th scope="col">Zeitpunkt</th><th scope="col">Von</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr>
             </thead>
@@ -311,21 +321,21 @@
         <p class="muted">Feste Nachrichten in #willkommen, #regeln und #bewerbung werden nach dem Speichern direkt in Discord bearbeitet; Buttons bleiben erhalten.</p>
         <div class="toolbar">
           <label for="text-select">Text</label>
-          <select id="text-select"></select>
+          <select class="select" id="text-select"></select>
           <span class="muted small" id="text-meta"></span>
         </div>
         <div class="text-layout">
           <form class="card form-grid" id="text-form">
             <label for="text-editor">Inhalt (Discord-Markdown)</label>
-            <textarea id="text-editor" rows="18" aria-describedby="text-counter text-placeholders"></textarea>
+            <textarea class="textarea" id="text-editor" rows="18" aria-describedby="text-counter text-placeholders"></textarea>
             <div class="toolbar">
               <span class="small" id="text-counter" aria-live="polite"></span>
               <span class="muted small" id="text-placeholders"></span>
             </div>
             <p class="form-error" id="text-error" role="alert"></p>
             <div class="actions">
-              <button type="button" id="text-reset">Auf Standard zurücksetzen …</button>
-              <button type="submit" class="primary" id="text-save">Speichern</button>
+              <button class="btn" type="button" id="text-reset">Auf Standard zurücksetzen …</button>
+              <button type="submit" class="btn btn-primary" id="text-save">Speichern</button>
             </div>
             <p class="small" id="text-message" role="status"></p>
           </form>
@@ -352,15 +362,15 @@
           Ins Audit-Log kommt nur, dass und von wem eine Auskunft oder Löschung erfolgte, nie die Daten selbst.</p>
         <form class="toolbar" id="privacy-search-form" role="search">
           <label for="privacy-query">Name oder User-ID</label>
-          <input type="search" id="privacy-query" required minlength="2" placeholder="z. B. Max oder 123456789012345678">
-          <button type="submit" class="primary">Suchen</button>
+          <input class="input" type="search" id="privacy-query" required minlength="2" placeholder="z. B. Max oder 123456789012345678">
+          <button type="submit" class="btn btn-primary">Suchen</button>
           <span class="muted small" id="privacy-search-message" role="status"></span>
         </form>
         <ul class="alert-list card" id="privacy-results" hidden></ul>
         <article class="card spaced" id="privacy-detail" hidden aria-labelledby="privacy-person">
           <h2 id="privacy-person"></h2>
           <div class="table-wrap">
-            <table>
+            <table class="table">
               <thead><tr><th scope="col">Bereich</th><th scope="col">Einträge</th></tr></thead>
               <tbody id="privacy-sections"></tbody>
             </table>
@@ -370,7 +380,7 @@
             <pre class="log" id="privacy-json"></pre>
           </details>
           <div class="toolbar spaced">
-            <a class="button" id="privacy-download" download>Als JSON herunterladen</a>
+            <a class="btn" id="privacy-download" download>Als JSON herunterladen</a>
           </div>
           <form class="form-grid spaced" id="privacy-delete-form">
             <h3>Daten löschen</h3>
@@ -378,9 +388,9 @@
               Tickets und Staff-Stimmen bleiben als Nachweis; bei Änderungen im Panel wird nur der Name entfernt. Discord-Rollen und Nachrichten bleiben.
               In Datenbank-Backups stehen die Daten noch, bis diese nach ihrer Aufbewahrungsfrist (Standard 14 Tage) gelöscht werden.</p>
             <label for="privacy-reason">Grund / Anfrage vom (Pflicht)</label>
-            <input id="privacy-reason" required minlength="3" maxlength="300" placeholder="z. B. Mail vom 21.10.2026">
+            <input class="input" id="privacy-reason" required minlength="3" maxlength="300" placeholder="z. B. Mail vom 21.10.2026">
             <p class="form-error" id="privacy-error" role="alert"></p>
-            <div class="actions"><button type="submit" class="danger">Daten löschen …</button></div>
+            <div class="actions"><button type="submit" class="btn btn-error btn-outline">Daten löschen …</button></div>
             <p class="small" id="privacy-message" role="status"></p>
           </form>
         </article>
@@ -391,8 +401,8 @@
         <p class="muted">Vorschau dessen, was <code>main.py --apply</code> am Server ändern würde: fehlende Rollen und Kanäle, Rechte,
           Aufräumschritte und die festen Nachrichten. Anwenden darf nur der Owner.</p>
         <div class="toolbar">
-          <button type="button" id="setup-refresh">Vorschau neu laden</button>
-          <button type="button" class="danger" id="setup-apply" data-level="3" disabled>Anwenden …</button>
+          <button class="btn" type="button" id="setup-refresh">Vorschau neu laden</button>
+          <button type="button" class="btn btn-error btn-outline" id="setup-apply" data-level="3" disabled>Anwenden …</button>
           <span class="muted" id="setup-summary" role="status"></span>
         </div>
         <p class="form-error" id="setup-error" role="alert"></p>
@@ -404,11 +414,11 @@
         <p class="muted">Jeden Tag um 4:00 Uhr sichert der Bot die Datenbank; alte Backups löscht er nach der eingestellten Frist.
           Zurückspielen geht nur direkt auf dem Server (README, „Backup zurückspielen“). Jeder Download wird im Audit-Log vermerkt.</p>
         <div class="toolbar">
-          <button type="button" class="primary" id="backup-create">Jetzt Backup erstellen</button>
+          <button type="button" class="btn btn-primary" id="backup-create">Jetzt Backup erstellen</button>
           <span id="backup-message" role="status"></span>
         </div>
         <div class="card table-wrap">
-          <table>
+          <table class="table">
             <thead>
               <tr><th scope="col">Datei</th><th scope="col">Erstellt</th><th scope="col">Größe</th><th scope="col"><span class="visually-hidden">Aktion</span></th></tr>
             </thead>
@@ -423,58 +433,57 @@
           <div class="console-toolbar">
             <fieldset>
               <legend>Angezeigte Level</legend>
-              <label><input type="checkbox" name="log-level" value="DEBUG"> Debug</label>
-              <label><input type="checkbox" name="log-level" value="INFO" checked> Info</label>
-              <label><input type="checkbox" name="log-level" value="WARNING" checked> Warnung</label>
-              <label><input type="checkbox" name="log-level" value="ERROR" checked> Fehler</label>
+              <label><input class="checkbox checkbox-sm" type="checkbox" name="log-level" value="DEBUG"> Debug</label>
+              <label><input class="checkbox checkbox-sm" type="checkbox" name="log-level" value="INFO" checked> Info</label>
+              <label><input class="checkbox checkbox-sm" type="checkbox" name="log-level" value="WARNING" checked> Warnung</label>
+              <label><input class="checkbox checkbox-sm" type="checkbox" name="log-level" value="ERROR" checked> Fehler</label>
             </fieldset>
             <label class="visually-hidden" for="log-search">Im Log suchen</label>
-            <input type="search" id="log-search" placeholder="Im Log suchen …">
-            <button type="button" id="log-pause" aria-pressed="false">Auto-Scroll pausieren</button>
+            <input class="input" type="search" id="log-search" placeholder="Im Log suchen …">
+            <button class="btn" type="button" id="log-pause" aria-pressed="false">Auto-Scroll pausieren</button>
           </div>
           <ol class="log" id="log" aria-label="Log-Ausgabe"></ol>
           <form class="command-line" id="command-form" autocomplete="off">
             <label class="visually-hidden" for="command-input">Befehl</label>
-            <input id="command-input" list="command-list" placeholder="Befehl, z. B. help (Tab ergänzt, ↑/↓ Verlauf)"
+            <input class="input" id="command-input" list="command-list" placeholder="Befehl, z. B. help (Tab ergänzt, ↑/↓ Verlauf)"
                    spellcheck="false" autocapitalize="off" maxlength="2100">
             <datalist id="command-list"></datalist>
-            <button type="submit" class="primary">Ausführen</button>
+            <button type="submit" class="btn btn-primary">Ausführen</button>
           </form>
         </div>
       </section>
     </main>
   </div>
 
-  <dialog id="event-dialog" aria-labelledby="event-dialog-title">
-    <form id="event-form" class="form-grid">
+  <dialog class="modal" id="event-dialog" aria-labelledby="event-dialog-title">
+    <form id="event-form" class="modal-box form-grid">
       <h2 id="event-dialog-title">Neuer Termin</h2>
       <label for="event-title">Titel</label>
-      <input id="event-title" required maxlength="100">
+      <input class="input" id="event-title" required maxlength="100">
       <label for="event-start">Datum und Uhrzeit (Berliner Zeit)</label>
-      <input id="event-start" type="datetime-local" required>
+      <input class="input" id="event-start" type="datetime-local" required>
       <label for="event-details">Infos (optional)</label>
-      <textarea id="event-details" rows="4" maxlength="1000"></textarea>
-      <label id="event-notify-row" hidden><input type="checkbox" id="event-notify"> Zusagen über eine Verschiebung benachrichtigen (erwähnt nur sie)</label>
+      <textarea class="textarea" id="event-details" rows="4" maxlength="1000"></textarea>
+      <label id="event-notify-row" hidden><input class="checkbox checkbox-sm" type="checkbox" id="event-notify"> Zusagen über eine Verschiebung benachrichtigen (erwähnt nur sie)</label>
       <p class="form-error" id="event-error" role="alert"></p>
-      <div class="actions">
-        <button type="button" id="event-cancel-dialog">Abbrechen</button>
-        <button type="submit" class="primary" id="event-save">Veröffentlichen</button>
+      <div class="modal-action">
+        <button class="btn" type="button" id="event-cancel-dialog">Abbrechen</button>
+        <button type="submit" class="btn btn-primary" id="event-save">Veröffentlichen</button>
       </div>
     </form>
   </dialog>
 
-  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
-    <form method="dialog">
+  <dialog class="modal" id="confirm-dialog" aria-labelledby="confirm-title">
+    <form class="modal-box" method="dialog">
       <h2 id="confirm-title">Wirklich ausführen?</h2>
       <p id="confirm-text"></p>
       <p class="mono" id="confirm-command"></p>
-      <label id="confirm-option-row" hidden><input type="checkbox" id="confirm-option"> <span id="confirm-option-text"></span></label>
-      <div class="actions">
-        <button value="cancel" type="submit" autofocus>Abbrechen</button>
-        <button value="ok" type="submit" class="danger" id="confirm-ok">Ausführen</button>
+      <label id="confirm-option-row" hidden><input class="checkbox checkbox-sm" type="checkbox" id="confirm-option"> <span id="confirm-option-text"></span></label>
+      <div class="modal-action">
+        <button class="btn" value="cancel" type="submit" autofocus>Abbrechen</button>
+        <button value="ok" type="submit" class="btn btn-error btn-outline" id="confirm-ok">Ausführen</button>
       </div>
     </form>
   </dialog>
-  </div>
 </body>
 </html>

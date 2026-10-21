@@ -78,6 +78,7 @@ function showPage() {
   const current = links.find((link) => link.dataset.page === wanted) || links[0];
   if (!current) return;
   for (const link of links) {
+    link.classList.toggle("menu-active", link === current);
     if (link === current) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
@@ -119,8 +120,10 @@ function formatDuration(seconds) {
   return `${minutes} min`;
 }
 
+const BADGES = { ok: "badge-success", warn: "badge-warning", bad: "badge-error", neutral: "badge-neutral" };
+
 function pill(text, kind) {
-  return span(`pill ${kind}`, text);
+  return span(`badge badge-soft badge-sm ${BADGES[kind] || BADGES.neutral}`, text);
 }
 
 function fillList(list, rows) {
@@ -251,7 +254,7 @@ async function loadBackups() {
   const data = await api("/api/backups");
   $("#backup-list").replaceChildren(...(data.backups.length ? data.backups.map((backup) => {
     const link = document.createElement("a");
-    link.className = "button small";
+    link.className = "btn btn-sm";
     link.href = `/api/backups/${encodeURIComponent(backup.name)}`;
     link.download = backup.name;
     link.textContent = "Herunterladen";
@@ -346,7 +349,7 @@ function renderPlayers() {
       if (state.me.level >= 2 && player.riot_id && player.user.on_server) {
         action = document.createElement("button");
         action.type = "button";
-        action.className = "small";
+        action.className = "btn btn-sm";
         action.textContent = "Rang abgleichen";
         action.setAttribute("aria-label", `Rang von ${player.user.name} jetzt abgleichen`);
         action.addEventListener("click", () => syncPlayerRank(player, action));
@@ -427,13 +430,13 @@ function eventActions(event) {
   if (event.upcoming && !event.cancelled_at) {
     const editButton = document.createElement("button");
     editButton.type = "button";
-    editButton.className = "small";
+    editButton.className = "btn btn-sm";
     editButton.textContent = "Bearbeiten";
     editButton.setAttribute("aria-label", `${event.title} bearbeiten`);
     editButton.addEventListener("click", () => openEventDialog(event));
     const cancelButton = document.createElement("button");
     cancelButton.type = "button";
-    cancelButton.className = "small danger";
+    cancelButton.className = "btn btn-sm btn-error btn-outline";
     cancelButton.textContent = "Absagen";
     cancelButton.setAttribute("aria-label", `${event.title} absagen`);
     cancelButton.addEventListener("click", () => cancelEvent(event));
@@ -742,16 +745,18 @@ function fieldRow(field = { name: "", value: "", inline: false }) {
   const row = document.createElement("div");
   row.className = "field-row";
   const name = document.createElement("input");
+  name.className = "input input-sm";
   name.placeholder = "Feldname";
   name.maxLength = 256;
   name.value = field.name;
   name.setAttribute("aria-label", "Feldname");
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "small";
+  remove.className = "btn btn-sm";
   remove.textContent = "Entfernen";
   remove.addEventListener("click", () => { row.remove(); updateAnnouncementPreview(); });
   const value = document.createElement("textarea");
+  value.className = "textarea textarea-sm";
   value.rows = 2;
   value.maxLength = 1024;
   value.placeholder = "Inhalt";
@@ -760,6 +765,7 @@ function fieldRow(field = { name: "", value: "", inline: false }) {
   const inline = document.createElement("label");
   const box = document.createElement("input");
   box.type = "checkbox";
+  box.className = "checkbox checkbox-sm";
   box.checked = field.inline;
   inline.append(box, " nebeneinander");
   for (const input of [name, value, box]) input.addEventListener("input", updateAnnouncementPreview);
@@ -834,7 +840,7 @@ function updateAnnouncementSubmit() {
 
 function fillAnnouncementForm(entry = null) {
   state.editingAnnouncement = entry;
-  const payload = entry ? entry.payload : { title: "", description: "", color: "#6e46ff", image_url: "", thumbnail_url: "", footer: "", fields: [], ping_role: null };
+  const payload = entry ? entry.payload : { title: "", description: "", color: "#eb1b29", image_url: "", thumbnail_url: "", footer: "", fields: [], ping_role: null };
   const sent = entry && entry.status === "sent";
   $("#announcement-form-title").textContent = entry ? (sent ? "Gesendete Ankündigung bearbeiten" : "Geplante Ankündigung bearbeiten") : "Neue Ankündigung";
   $("#announcement-sent-note").hidden = !sent;
@@ -863,7 +869,7 @@ function announcementActions(entry) {
   if (entry.url) actions.append(discordLink(entry.url, "Discord"));
   const editButton = document.createElement("button");
   editButton.type = "button";
-  editButton.className = "small";
+  editButton.className = "btn btn-sm";
   editButton.textContent = "Bearbeiten";
   editButton.addEventListener("click", () => {
     fillAnnouncementForm(entry);
@@ -873,7 +879,7 @@ function announcementActions(entry) {
   if (entry.status !== "sent") {
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.className = "small danger";
+    remove.className = "btn btn-sm btn-error btn-outline";
     remove.textContent = "Löschen";
     remove.addEventListener("click", () => deleteAnnouncement(entry));
     actions.append(remove);
@@ -1062,7 +1068,7 @@ async function searchPrivacy(event) {
     $("#privacy-results").replaceChildren(...(results.length ? results.map((result) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "small";
+      button.className = "btn btn-sm";
       button.textContent = "Auskunft anzeigen";
       button.addEventListener("click", () => showPrivacy(result.user));
       return listItem(personCell(result.user), span("muted small", `${result.stored} gespeicherte Einträge`), button);
@@ -1159,7 +1165,7 @@ async function loadTextHistory(entry) {
   $("#text-history").replaceChildren(...(history.length ? history.map((version) => {
     const load = document.createElement("button");
     load.type = "button";
-    load.className = "small";
+    load.className = "btn btn-sm";
     load.textContent = "In den Editor laden";
     load.addEventListener("click", () => {
       $("#text-editor").value = version.is_default ? entry.default : version.value;
@@ -1221,6 +1227,7 @@ async function resetText() {
 function settingInput(entry, id) {
   const input = document.createElement("input");
   input.id = id;
+  input.className = entry.kind === "bool" ? "toggle toggle-primary" : "input input-sm";
   if (entry.kind === "bool") {
     input.type = "checkbox";
     input.checked = entry.value;
@@ -1267,11 +1274,11 @@ function renderSetting(entry) {
   const input = settingInput(entry, id);
   const save = document.createElement("button");
   save.type = "submit";
-  save.className = "primary small";
+  save.className = "btn btn-sm btn-primary";
   save.textContent = "Speichern";
   const reset = document.createElement("button");
   reset.type = "button";
-  reset.className = "small";
+  reset.className = "btn btn-sm";
   reset.textContent = "Standard";
   reset.disabled = entry.is_default;
   const message = span("small", "");
