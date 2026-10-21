@@ -166,6 +166,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 ## Neue Features (Wunsch von Arvids, 21.10.2026)
 - [x] Spieler-Statistiken: HenrikDev `stored-matches` beim täglichen Rang-Abgleich, Tabelle `match_stats` (90 Tage, in Auskunft/Löschung, neue Riot-ID löscht alte Matches), Seite „Statistiken“ (Team-Tabelle sortierbar, Detail mit Kennzahlen, Agents, Maps, letzten Matches), „Bewerber prüfen“ ohne Speichern (6/min je Staff), „Jetzt aktualisieren“ ab Admin, Einstellungen `stats_match_count` (20) und `stats_only_competitive` (an) — fertig (6f4919e)
 - [x] Server-Wachstum: Tabelle `member_flow` nur mit Tageszahlen (keine User-IDs, 400 Tage), Zählung bei Beitritt/Abgang, beim Start Mitgliederzahl + Nachtrag der Beitritte vor Zählbeginn aus `joined_at`; Dashboard-Karte mit Kacheln und SVG-Balkendiagramm (12 Wochen, Beitritte grün, Abgänge rot) — fertig (e17879c)
+- [x] Bewerbung, Schritt 2: Spielzeiten als Button-Raster statt Dropdowns (Zeilen = Stundenblöcke 19–20, 20–21, 21–22, 22–23 ohne Überlappung, Spalten = Mi–So, grün = gewählt, letzte Zeile Zurück/Abschicken); zusammenhängende Stunden erscheinen in der Bewerbung als ein Zeitraum (z. B. „Mi · 19:00–22:00“). Standardtext in #bewerbung angepasst (ein im Panel geänderter Text bleibt) — fertig (Commit folgt)
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |

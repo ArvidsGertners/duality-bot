@@ -2029,8 +2029,8 @@ TEXT_DEFINITIONS = {definition.key: definition for definition in (
         "danach ist dieser Kanal für dich bis zur nächsten Saison nicht mehr sichtbar.\n\n"
         "Du brauchst deinen Tracker.gg-Profillink und bestätigst, dass du mindestens 16 bist. "
         "Außerdem wählst du deine Main-Rolle (Duelist, Initiator, Controller oder Sentinel), alle Rollen, "
-        "die du spielen kannst, sowie deine Verfügbarkeit pro Abend von Mittwoch bis Sonntag aus. "
-        "Du kannst zum Beispiel Mittwoch 19–22 Uhr und Freitag 20–23 Uhr getrennt auswählen. "
+        "die du spielen kannst, sowie deine Verfügbarkeit von Mittwoch bis Sonntag zwischen 19 und 23 Uhr aus. "
+        "Dafür klickst du die passenden Stunden an, zum Beispiel Mittwoch 19–22 Uhr und Freitag 20–23 Uhr. "
         "Wir fragen auch deinen bevorzugten Namen und optional Kurs/Ausbildung ab.\n\n"
         "Deine Angaben werden privat an den Staff geschickt. Nach dem Absenden erhältst du Zugang zu `#bewerber-chat`, "
         "wo du Fragen zum Ablauf stellen kannst. "
@@ -2579,10 +2579,34 @@ class ApplicationChoiceSelect(discord.ui.Select):
 
 AGE_CONFIRMED = "16+"
 AGE_TOO_YOUNG = "unter-16"
-# Discord erlaubt 25 Optionen pro Dropdown und 5 Zeilen pro Nachricht. In
-# Schritt 2 braucht die Button-Zeile eine davon, bleiben 4 Dropdowns für Spielzeiten.
-MAX_OPTIONS_PER_SELECT = 25
-MAX_AVAILABILITY_SELECTS = 4
+# Discord erlaubt 5 Zeilen mit je 5 Buttons pro Nachricht. Die Spielzeiten sind ein Raster aus einer Zeile
+# pro Stundenblock und einer Spalte pro Abend; die letzte Zeile bleibt für „Zurück“ und „Abschicken“.
+MAX_BUTTONS_PER_ROW = 5
+MAX_AVAILABILITY_ROWS = 4
+
+
+class AvailabilityButton(discord.ui.Button):
+    """Ein Stundenblock an einem Abend; ein Klick wählt ihn aus oder ab."""
+
+    def __init__(self, value: str, label: str, selected: bool, row: int):
+        super().__init__(
+            label=f"✓ {label}" if selected else label,
+            style=discord.ButtonStyle.success if selected else discord.ButtonStyle.secondary,
+            custom_id=f"duality:application:slot:{value}",
+            row=row,
+        )
+        self.value = value
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, ApplicationSelectionView):
+            await interaction.response.send_message("Diese Bewerbungsauswahl ist abgelaufen.", ephemeral=True)
+            return
+        if not view.owns(interaction):
+            await interaction.response.send_message("Diese Bewerbungsangaben gehören einem anderen Mitglied.", ephemeral=True)
+            return
+        view.toggle_slot(self.value)
+        await interaction.response.edit_message(content=view.step_text(), view=view)
 
 
 class ApplicationSelectionView(DualityView):
@@ -2593,7 +2617,8 @@ class ApplicationSelectionView(DualityView):
         ("Samstag", "Sa"),
         ("Sonntag", "So"),
     )
-    TIME_WINDOWS = ("19:00–20:00", "19:00–21:00", "19:00–22:00", "20:00–23:00", "ab 19:00 flexibel")
+    # Stundenblöcke ohne Überlappung; nebeneinanderliegende fasst die Bewerbung zusammen.
+    TIME_BLOCKS = ("19:00–20:00", "20:00–21:00", "21:00–22:00", "22:00–23:00")
 
     def __init__(self, member_id: int, draft: dict[str, int | str]):
         super().__init__(timeout=600)
@@ -2604,12 +2629,32 @@ class ApplicationSelectionView(DualityView):
         self.show_profile_step()
 
     @classmethod
-    def availability_slots(cls) -> list[tuple[str, str, str]]:
+    def availability_slots(cls) -> list[tuple[str, str]]:
+        """(Button-Text, Wert) je Abend und Stundenblock, sortiert nach Tag und Uhrzeit."""
         return [
-            (f"{short_day} · {window}", f"{day}|{window}", f"Typische Spielzeit am {day}")
+            (f"{short_day} {block.replace(':00', '')}", f"{day}|{block}")
             for day, short_day in cls.DAYS
-            for window in cls.TIME_WINDOWS
+            for block in cls.TIME_BLOCKS
         ]
+
+    @classmethod
+    def availability_text(cls, selected) -> str:
+        """Eine Zeile pro Abend; zusammenhängende Stunden als ein Zeitraum, z. B. „Mi · 19:00–22:00“."""
+        chosen = set(selected)
+        lines = []
+        for day, short_day in cls.DAYS:
+            ranges: list[list[int]] = []
+            for index, block in enumerate(cls.TIME_BLOCKS):
+                if f"{day}|{block}" not in chosen:
+                    continue
+                if ranges and ranges[-1][1] == index - 1:
+                    ranges[-1][1] = index
+                else:
+                    ranges.append([index, index])
+            if ranges:
+                spans = [f"{cls.TIME_BLOCKS[start].split('–')[0]}–{cls.TIME_BLOCKS[end].split('–')[1]}" for start, end in ranges]
+                lines.append(f"{short_day} · {', '.join(spans)}")
+        return "\n".join(lines)
 
     def owns(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.member_id and interaction.guild_id == self.draft.get("guild_id")
@@ -2621,9 +2666,11 @@ class ApplicationSelectionView(DualityView):
                 "die du im Team spielen kannst, einschließlich deiner Main-Rolle. Deine Angaben bleiben privat. "
                 "Die Auswahl läuft nach 10 Minuten ohne Klick ab."
             )
+        chosen = self.availability_text(self.availability())
         return (
-            "**Schritt 2 von 2:** Wähle für jeden passenden Abend deine typische Spielzeit aus. "
-            "Du kannst mehrere Abende auswählen."
+            "**Schritt 2 von 2:** Klicke alle Stunden an, in denen du an diesen Abenden meistens spielen kannst. "
+            "Ausgewählte Stunden werden grün; ein zweiter Klick nimmt sie wieder heraus.\n"
+            + (f"Deine Auswahl:\n{chosen}" if chosen else "Noch keine Stunde ausgewählt.")
         )
 
     def options(self, state_key: str, entries) -> list[discord.SelectOption]:
@@ -2635,12 +2682,14 @@ class ApplicationSelectionView(DualityView):
         ]
 
     def availability(self) -> list[str]:
-        return [
-            value
-            for key, values in self.selections.items()
-            if key.startswith("availability:")
-            for value in values
-        ]
+        chosen = set(self.selections.get("availability", ()))
+        return [value for _, value in self.availability_slots() if value in chosen]
+
+    def toggle_slot(self, value: str) -> None:
+        chosen = set(self.selections.get("availability", ()))
+        chosen.symmetric_difference_update({value})
+        self.selections["availability"] = list(chosen)
+        self.show_availability_step()
 
     def add_button(self, label: str, style: discord.ButtonStyle, row: int, handler) -> None:
         button = discord.ui.Button(label=label, style=style, row=row)
@@ -2682,23 +2731,16 @@ class ApplicationSelectionView(DualityView):
     def show_availability_step(self) -> None:
         self.step = 2
         self.clear_items()
-        slots = self.availability_slots()
-        chunks = [slots[start:start + MAX_OPTIONS_PER_SELECT] for start in range(0, len(slots), MAX_OPTIONS_PER_SELECT)]
-        for index, chunk in enumerate(chunks):
-            placeholder = "Spielzeiten auswählen (Mehrfachauswahl)"
-            if len(chunks) > 1:
-                first_day, last_day = chunk[0][0].split(" · ")[0], chunk[-1][0].split(" · ")[0]
-                placeholder = f"Spielzeiten {first_day}–{last_day} auswählen (Mehrfachauswahl)"
-            self.add_item(ApplicationChoiceSelect(
-                state_key=f"availability:{index}",
-                placeholder=placeholder,
-                options=self.options(f"availability:{index}", chunk),
-                minimum=0,
-                maximum=len(chunk),
-                row=index,
-            ))
-        self.add_button("Zurück", discord.ButtonStyle.secondary, len(chunks), self.go_to_profile)
-        self.add_button("Bewerbung abschicken", discord.ButtonStyle.success, len(chunks), self.submit_application)
+        chosen = set(self.availability())
+        labels = dict((value, label) for label, value in self.availability_slots())
+        # Eine Zeile pro Stundenblock, darin die Abende von Mittwoch bis Sonntag.
+        for row, block in enumerate(self.TIME_BLOCKS):
+            for day, _ in self.DAYS:
+                value = f"{day}|{block}"
+                self.add_item(AvailabilityButton(value, labels[value], value in chosen, row))
+        last_row = len(self.TIME_BLOCKS)
+        self.add_button("Zurück", discord.ButtonStyle.secondary, last_row, self.go_to_profile)
+        self.add_button("Bewerbung abschicken", discord.ButtonStyle.primary, last_row, self.submit_application)
 
     async def on_timeout(self):
         self.draft.clear()
@@ -2808,11 +2850,7 @@ class ApplicationSelectionView(DualityView):
             application_embed.add_field(
                 name="Spielbare Rollen (inkl. Main-Rolle)", value=", ".join(playable_roles), inline=True
             )
-            slot_order = [value for _, value, _ in self.availability_slots()]
-            short_days = dict(self.DAYS)
-            selected_times = [value.split("|", 1) for value in sorted(availability, key=slot_order.index)]
-            availability_text = "\n".join(f"{short_days[day]} · {window}" for day, window in selected_times)
-            application_embed.add_field(name="Spielzeiten", value=availability_text[:1024], inline=False)
+            application_embed.add_field(name="Spielzeiten", value=self.availability_text(availability)[:1024], inline=False)
             application_embed.add_field(name="Tracker.gg", value=str(self.draft["tracker_url"])[:1024], inline=False)
             application_embed.set_footer(text=f"Status: {APPLICATION_STATUS_LABELS['pending']}")
             try:
@@ -2865,9 +2903,9 @@ class ApplicationSelectionView(DualityView):
             self.stop()
 
 
-if len(ApplicationSelectionView.availability_slots()) > MAX_OPTIONS_PER_SELECT * MAX_AVAILABILITY_SELECTS:
+if len(ApplicationSelectionView.DAYS) > MAX_BUTTONS_PER_ROW or len(ApplicationSelectionView.TIME_BLOCKS) > MAX_AVAILABILITY_ROWS:
     raise RuntimeError(
-        f"Höchstens {MAX_OPTIONS_PER_SELECT * MAX_AVAILABILITY_SELECTS} Kombinationen aus Spieltagen und Zeitfenstern möglich."
+        f"Höchstens {MAX_BUTTONS_PER_ROW} Spieltage und {MAX_AVAILABILITY_ROWS} Stundenblöcke passen in die Button-Auswahl."
     )
 
 

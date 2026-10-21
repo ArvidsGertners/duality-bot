@@ -725,6 +725,60 @@ class MemberFlowTests(unittest.TestCase):
         self.assertEqual(main.member_flow_weeks(1, 3, today)["weeks"][1]["joins"], 0)
 
 
+class AvailabilityTests(unittest.IsolatedAsyncioTestCase):
+    def view(self):
+        return main.ApplicationSelectionView(42, {"guild_id": 1, "real_name": "Zoe", "course": "", "tracker_url": "x"})
+
+    def test_blocks_do_not_overlap(self):
+        blocks = main.ApplicationSelectionView.TIME_BLOCKS
+        for earlier, later in zip(blocks, blocks[1:]):
+            self.assertEqual(earlier.split("–")[1], later.split("–")[0])
+
+    async def test_button_grid(self):
+        view = self.view()
+        view.show_availability_step()
+        slots = [item for item in view.children if isinstance(item, main.AvailabilityButton)]
+        days, blocks = len(view.DAYS), len(view.TIME_BLOCKS)
+        self.assertEqual(len(slots), days * blocks)
+        # Eine Zeile pro Stundenblock mit allen Abenden, dazu eine Zeile für Zurück/Abschicken.
+        self.assertEqual({item.row for item in slots}, set(range(blocks)))
+        self.assertEqual([item.label for item in slots if item.row == 0], ["Mi 19–20", "Do 19–20", "Fr 19–20", "Sa 19–20", "So 19–20"])
+        self.assertEqual(len(view.children), days * blocks + 2)
+        self.assertEqual(len({item.custom_id for item in view.children if item.custom_id}), len(view.children))
+
+    async def test_toggle_and_summary(self):
+        view = self.view()
+        view.show_availability_step()
+        for value in ("Mittwoch|19:00–20:00", "Mittwoch|20:00–21:00", "Mittwoch|22:00–23:00", "Freitag|21:00–22:00"):
+            view.toggle_slot(value)
+        button = next(item for item in view.children if getattr(item, "value", None) == "Mittwoch|19:00–20:00")
+        self.assertEqual((button.label, button.style), ("✓ Mi 19–20", discord.ButtonStyle.success))
+        self.assertEqual(view.availability_text(view.availability()), "Mi · 19:00–21:00, 22:00–23:00\nFr · 21:00–22:00")
+        self.assertIn("Mi · 19:00–21:00", view.step_text())
+        view.toggle_slot("Freitag|21:00–22:00")
+        self.assertEqual(view.availability(), ["Mittwoch|19:00–20:00", "Mittwoch|20:00–21:00", "Mittwoch|22:00–23:00"])
+        # Zurück zu Schritt 1 und wieder vor: Die Auswahl bleibt.
+        view.show_profile_step()
+        view.show_availability_step()
+        self.assertEqual(sum(item.style == discord.ButtonStyle.success for item in view.children if isinstance(item, main.AvailabilityButton)), 3)
+
+    async def test_button_click(self):
+        view = self.view()
+        view.show_availability_step()
+        button = next(item for item in view.children if isinstance(item, main.AvailabilityButton))
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=42), guild_id=1,
+            response=SimpleNamespace(edit_message=mock.AsyncMock(), send_message=mock.AsyncMock()),
+        )
+        await button.callback(interaction)
+        self.assertEqual(view.availability(), [button.value])
+        self.assertIs(interaction.response.edit_message.await_args.kwargs["view"], view)
+        stranger = SimpleNamespace(user=SimpleNamespace(id=7), guild_id=1, response=SimpleNamespace(send_message=mock.AsyncMock()))
+        await next(item for item in view.children if isinstance(item, main.AvailabilityButton)).callback(stranger)
+        stranger.response.send_message.assert_awaited_once()
+        self.assertEqual(view.availability(), [button.value])
+
+
 class SettingsTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
