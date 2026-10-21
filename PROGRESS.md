@@ -22,8 +22,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 ### Phase 2 – Betrieb
 - [x] B1 Fehler-Benachrichtigung (Webhook, Entprellung, „wieder in Ordnung“, Dashboard-Karte) — fertig (fc281ab)
-- [x] B2 Datenbank-Backups (SQLite-Backup-API, Aufbewahrung, Download für Owner, Konsolenbefehl `backup`, Warnung `backup`) — fertig (Commit „Tägliche Datenbank-Backups …“)
-- [ ] B4 Live-Ansicht der Voice-Kanäle — offen
+- [x] B2 Datenbank-Backups (SQLite-Backup-API, Aufbewahrung, Download für Owner, Konsolenbefehl `backup`, Warnung `backup`) — fertig (6323545)
+- [x] B4 Live-Ansicht der Voice-Kanäle — fertig (Commit „Panel: Live-Ansicht der Voice-Kanäle“)
 - [ ] A3 Bewerbungen lesen + „Neue Saison“ — offen
 - [ ] A4 Spieler & Profile + „Rang jetzt abgleichen“ — offen
 - [ ] A5 Tickets — offen
@@ -91,6 +91,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Frontend: `api()` leitet nur bei 401 zur Startseite; 403 zeigt die Meldung (z. B. Admin auf Owner-Endpunkt). Beim Wiederverbinden führt 403 zur Startseite.
 - Backup zurückspielen (für README, Phase 7): `systemctl stop duality-bot`, aktuelle DB wegsichern, Backup nach `/home/duality-bot/app/duality_bot_data.sqlite3` kopieren, `chown dualitybot:dualitybot` + `chmod 600`, `systemctl start duality-bot`.
 
+- **B4 Voice:** `main.STATE_LISTENERS` + `notify_listeners(topic)`; `on_voice_state_update` meldet jetzt jede Voice-Änderung („voice“), Temp-Voice-Logik weiter nur bei Kanalwechsel. Panel trägt sich beim Start ein, entprellt 0,3 s und schickt nur, wenn sich die Momentaufnahme geändert hat; der 5-s-Takt fängt Kanal-Änderungen ohne Voice-Ereignis ab. Nur Anzeige, keine Moderation. Besitzer temporärer Kanäle aus `temp_voice_channels` (neu: `temp_voice_owners()`).
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -128,4 +130,4 @@ _(noch keine)_
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Nächstes Feature: B4 Live-Ansicht der Voice-Kanäle (Snapshot aus `guild.voice_channels`, temporäre Kanäle + Besitzer aus `temp_voice_channels`, Push über WS bei `on_voice_state_update` und bei Änderungen im 5-s-Takt). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Nächstes Feature: A3 Bewerbungen im Panel (Tabelle aus `applications` + Stimmen, Filter, Link zur Nachricht, „Neue Saison“ für Admin mit Bestätigung + Audit, keine Annehmen/Ablehnen-Knöpfe). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

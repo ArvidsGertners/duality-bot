@@ -203,6 +203,17 @@ th { color: var(--muted); font-weight: 600; font-size: .85rem; }
 .toolbar { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; margin-bottom: 1rem; }
 .empty { color: var(--muted); text-align: center; padding: 1rem; }
 
+/* Voice */
+.voice-grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.voice-category { grid-column: 1 / -1; margin: .5rem 0 0; font-size: .85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.voice-channel.empty-channel { opacity: .6; }
+.voice-channel h2 { font-size: 1rem; margin: 0 0 .35rem; }
+.voice-channel ul { list-style: none; margin: .5rem 0 0; padding: 0; display: grid; gap: .35rem; }
+.voice-channel li { display: flex; align-items: center; gap: .5rem; }
+.voice-channel img { border-radius: 50%; flex: none; }
+.voice-flags { margin-left: auto; display: flex; gap: .3rem; }
+.voice-flags .pill { font-size: .7rem; }
+
 /* Konsole */
 .console { display: flex; flex-direction: column; gap: .75rem; height: calc(100vh - 7rem); min-height: 420px; }
 .console-toolbar { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; }

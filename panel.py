@@ -581,6 +581,9 @@ class PanelHooks:
     run_backup: Callable[[], Awaitable[dict]]
     list_backups: Callable[[], list[dict]]
     backup_state: dict
+    # Live-Ansicht: main.py ruft jeden Eintrag mit einem Thema auf (z. B. „voice“).
+    listeners: list[Callable[[str], None]]
+    temp_voice_owners: Callable[[int], dict[int, int]]
 
 
 class Panel:
@@ -596,6 +599,8 @@ class Panel:
         self.connections: set[Connection] = set()
         self.tasks: set[asyncio.Task] = set()
         self.commit = "unbekannt"
+        self.last_voice: list[dict] | None = None
+        self.voice_push: asyncio.TimerHandle | None = None
         ws_origin = config.origin.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
         self.csp = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -614,6 +619,7 @@ class Panel:
             web.post("/auth/logout", self.logout),
             web.get("/api/me", self.api_me),
             web.get("/api/status", self.api_status),
+            web.get("/api/voice", self.api_voice),
             web.get("/api/backups", self.api_backups),
             web.post("/api/backups", self.api_create_backup),
             web.get("/api/backups/{name}", self.api_download_backup),
@@ -634,6 +640,7 @@ class Panel:
             logging.getLogger(name).addHandler(self.log_handler)
         # print()-Ausgaben bleiben im Terminal unverändert und erscheinen zusätzlich in der Konsole.
         sys.stdout = ConsoleStdout(sys.stdout, self.console)
+        self.hooks.listeners.append(self.on_bot_event)
         self.spawn(self.watch_connections())
 
     async def close_connections(self, app: web.Application | None = None) -> None:
@@ -671,6 +678,10 @@ class Panel:
             sys.stdout = sys.stdout.stream
         if self.broadcast_log in self.console.listeners:
             self.console.listeners.remove(self.broadcast_log)
+        if self.on_bot_event in self.hooks.listeners:
+            self.hooks.listeners.remove(self.on_bot_event)
+        if self.voice_push:
+            self.voice_push.cancel()
         if self.http and not self.http.closed:
             await self.http.close()
 
@@ -743,6 +754,57 @@ class Panel:
                     await connection.ws.close(code=WS_CLOSE_NO_ACCESS, message=b"Kein Zugriff mehr")
                 else:
                     connection.send({"type": "status", "status": status})
+            # Fängt auch neue, umbenannte oder gelöschte Kanäle ab, für die es kein Voice-Ereignis gibt.
+            self.push_voice()
+
+    def on_bot_event(self, topic: str) -> None:
+        if topic == "voice" and self.voice_push is None:
+            # Mehrere Änderungen kurz hintereinander gehen als eine Nachricht raus.
+            self.voice_push = asyncio.get_running_loop().call_later(0.3, self.push_voice)
+
+    def push_voice(self) -> None:
+        self.voice_push = None
+        if not self.connections:
+            return
+        channels = self.voice_snapshot()
+        if channels != self.last_voice:
+            self.last_voice = channels
+            for connection in list(self.connections):
+                connection.send({"type": "voice", "channels": channels})
+
+    def voice_snapshot(self) -> list[dict]:
+        guild = self.guild()
+        if guild is None:
+            return []
+        owners = self.hooks.temp_voice_owners(guild.id)
+        channels = []
+        ordered = sorted(
+            guild.voice_channels,
+            key=lambda channel: (channel.category.position if channel.category else -1, channel.position),
+        )
+        for channel in ordered:
+            owner = guild.get_member(owners[channel.id]) if channel.id in owners else None
+            members = []
+            for member in channel.members:
+                voice = member.voice
+                members.append({
+                    "id": str(member.id),
+                    "name": member.display_name,
+                    "avatar": member.display_avatar.url,
+                    "muted": bool(voice and (voice.self_mute or voice.mute)),
+                    "deafened": bool(voice and (voice.self_deaf or voice.deaf)),
+                    "streaming": bool(voice and voice.self_stream),
+                    "video": bool(voice and voice.self_video),
+                })
+            channels.append({
+                "id": str(channel.id),
+                "name": channel.name,
+                "category": channel.category.name if channel.category else None,
+                "temporary": channel.id in owners,
+                "owner": (owner.display_name if owner else "unbekannt") if channel.id in owners else None,
+                "members": members,
+            })
+        return channels
 
     def status(self) -> dict:
         hooks = self.hooks
@@ -949,6 +1011,10 @@ class Panel:
         self.authenticate(request)
         return web.json_response(self.status())
 
+    async def api_voice(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        return web.json_response({"channels": self.voice_snapshot()})
+
     def backup_summary(self) -> dict:
         try:
             backups = self.hooks.list_backups()
@@ -1029,6 +1095,7 @@ class Panel:
                 "logs": self.console.snapshot(),
                 "commands": self.command_list(level),
                 "status": self.status(),
+                "voice": self.voice_snapshot(),
             })
             async for message in ws:
                 if message.type == aiohttp.WSMsgType.TEXT:

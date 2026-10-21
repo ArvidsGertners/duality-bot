@@ -73,6 +73,7 @@ class FakeGuild:
         self.me = FakeMember(1, "Duality-Bot")
         self.members = {member.id: member for member in members}
         self.text_channels = [FakeChannel(111111111111111111, "allgemein"), FakeChannel(222222222222222222, "Orga", can_send=False)]
+        self.voice_channels = []
 
     def get_member(self, user_id: int):
         return self.members.get(user_id)
@@ -132,6 +133,8 @@ def make_hooks(client=None) -> panel.PanelHooks:
         run_backup=mock.AsyncMock(return_value={"name": "duality-backup-2026-10-21_040000.sqlite3", "size": 2048, "removed": 1}),
         list_backups=lambda: [],
         backup_state={"last_error": None, "last_error_at": None},
+        listeners=[],
+        temp_voice_owners=lambda guild_id: {},
     )
 
 
@@ -813,6 +816,70 @@ class BackupPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(panel.COMMANDS["backup"].level, panel.ADMIN)
         summary = self.panel.status()["backup"]
         self.assertEqual((summary["count"], summary["last"]["size"]), (1, 26))
+
+
+def voice_member(user_id: int, name: str, **flags) -> FakeMember:
+    member = FakeMember(user_id, name)
+    state = {"self_mute": False, "mute": False, "self_deaf": False, "deaf": False, "self_stream": False, "self_video": False}
+    member.voice = SimpleNamespace(**{**state, **flags})
+    return member
+
+
+def voice_channel(channel_id: int, name: str, category: tuple[str, int] | None, position: int, members=()):
+    return SimpleNamespace(
+        id=channel_id,
+        name=name,
+        category=SimpleNamespace(name=category[0], position=category[1]) if category else None,
+        position=position,
+        members=list(members),
+    )
+
+
+class VoiceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.guild = self.hooks.client.guild
+        lounge, valorant = ("💬 LOUNGE", 1), ("🎯 VALORANT", 2)
+        self.guild.voice_channels = [
+            voice_channel(3, "Valorant 1", valorant, 0, [voice_member(PLAYER_ID, "Spielerin", self_mute=True, self_stream=True)]),
+            voice_channel(2, "🔊 Max", lounge, 5, [voice_member(OWNER_ID, "Max", deaf=True, self_video=True)]),
+            voice_channel(1, "Community Voice", lounge, 0),
+        ]
+        self.hooks.temp_voice_owners = lambda guild_id: {2: OWNER_ID}
+        self.panel = panel.Panel(CONFIG, self.hooks)
+
+    def test_snapshot(self):
+        channels = self.panel.voice_snapshot()
+        self.assertEqual([channel["name"] for channel in channels], ["Community Voice", "🔊 Max", "Valorant 1"])
+        community, temporary, valorant = channels
+        self.assertEqual((community["temporary"], community["owner"], community["members"]), (False, None, []))
+        self.assertEqual((temporary["temporary"], temporary["owner"]), (True, f"Person {OWNER_ID}"))
+        flags = {key: valorant["members"][0][key] for key in ("muted", "deafened", "streaming", "video")}
+        self.assertEqual(flags, {"muted": True, "deafened": False, "streaming": True, "video": False})
+        self.assertTrue(temporary["members"][0]["deafened"] and temporary["members"][0]["video"])
+        self.assertEqual(valorant["members"][0]["id"], str(PLAYER_ID))
+
+    async def test_live_push_over_websocket(self):
+        client = TestClient(TestServer(self.panel.build_app()))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        session, cookie = session_cookie(COACH_ID)
+        ws = await client.ws_connect(f"/ws?csrf={session['csrf']}", headers={"Cookie": cookie, "Origin": ORIGIN})
+        self.addAsyncCleanup(ws.close)
+        hello = await ws.receive_json(timeout=2)
+        self.assertEqual(len(hello["voice"]), 3)
+        self.assertEqual(self.hooks.listeners, [self.panel.on_bot_event])
+        self.guild.voice_channels[2].members.append(voice_member(ADMIN_ID, "Neu"))
+        for listener in self.hooks.listeners:
+            listener("voice")
+            listener("voice")
+        while True:
+            message = await ws.receive_json(timeout=2)
+            if message["type"] == "voice":
+                break
+        self.assertEqual(message["channels"][0]["members"][0]["name"], "Neu")
+        await client.close()
+        self.assertEqual(self.hooks.listeners, [])
 
 
 if __name__ == "__main__":

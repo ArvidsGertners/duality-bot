@@ -16,6 +16,7 @@
         <ul id="nav">
           <li><a href="#dashboard" data-page="dashboard" data-level="1">Dashboard</a></li>
           <li><a href="#konsole" data-page="konsole" data-level="1">Konsole</a></li>
+          <li><a href="#voice" data-page="voice" data-level="1">Voice</a></li>
           <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
         </ul>
       </nav>
@@ -71,6 +72,15 @@
           </div>
         </article>
         <p class="muted small" id="dash-updated">Warte auf Daten vom Bot …</p>
+      </section>
+
+      <section id="page-voice" class="page" aria-labelledby="title-voice" hidden>
+        <h1 id="title-voice">Voice-Kanäle</h1>
+        <div class="toolbar">
+          <p class="muted" id="voice-summary" role="status">Warte auf Daten vom Bot …</p>
+          <label><input type="checkbox" id="voice-hide-empty"> Leere Kanäle ausblenden</label>
+        </div>
+        <div class="voice-grid" id="voice-list"></div>
       </section>
 
       <section id="page-backups" class="page" aria-labelledby="title-backups" hidden>

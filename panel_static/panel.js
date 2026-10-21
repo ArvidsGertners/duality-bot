@@ -18,6 +18,7 @@ const state = {
   nextRequestId: 1,
   pending: new Map(),
   status: null,
+  voice: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -263,6 +264,50 @@ async function createBackup() {
 
 const pageLoaders = { backups: loadBackups };
 
+function renderVoice(channels) {
+  state.voice = channels;
+  const hideEmpty = $("#voice-hide-empty").checked;
+  const people = channels.reduce((sum, channel) => sum + channel.members.length, 0);
+  const active = channels.filter((channel) => channel.members.length).length;
+  $("#voice-summary").textContent = `${people} ${people === 1 ? "Person" : "Personen"} in ${active} von ${channels.length} Kanälen`;
+  const items = [];
+  let category;
+  for (const channel of channels) {
+    if (hideEmpty && !channel.members.length) continue;
+    if (channel.category !== category) {
+      category = channel.category;
+      const heading = document.createElement("h2");
+      heading.className = "voice-category";
+      heading.textContent = category || "Ohne Kategorie";
+      items.push(heading);
+    }
+    const card = document.createElement("article");
+    card.className = `card voice-channel${channel.members.length ? "" : " empty-channel"}`;
+    const title = document.createElement("h2");
+    title.textContent = `🔊 ${channel.name}`;
+    card.append(title);
+    if (channel.temporary) card.append(pill(`Temporär · gehört ${channel.owner}`, "warn"));
+    const list = document.createElement("ul");
+    for (const member of channel.members) {
+      const avatar = document.createElement("img");
+      avatar.src = member.avatar;
+      avatar.alt = "";
+      avatar.width = 24;
+      avatar.height = 24;
+      const flags = span("voice-flags", "");
+      if (member.muted) flags.append(pill("stumm", "warn"));
+      if (member.deafened) flags.append(pill("taub", "warn"));
+      if (member.streaming) flags.append(pill("streamt", "bad"));
+      if (member.video) flags.append(pill("Kamera", "ok"));
+      list.append(listItem(avatar, member.name, flags));
+    }
+    if (!channel.members.length) list.append(listItem(span("muted small", "leer")));
+    card.append(list);
+    items.push(card);
+  }
+  $("#voice-list").replaceChildren(...items);
+}
+
 /* Konsole: Log-Anzeige */
 
 function selectedLevels() {
@@ -388,8 +433,11 @@ function handleMessage(message) {
     }));
     renderLog();
     renderDashboard(message.status);
+    renderVoice(message.voice);
   } else if (message.type === "status") {
     renderDashboard(message.status);
+  } else if (message.type === "voice") {
+    renderVoice(message.channels);
   } else if (message.type === "log") {
     if (message.entry.id <= state.lastLogId) return;
     state.lastLogId = message.entry.id;
@@ -504,6 +552,7 @@ async function init() {
   $("#command-input").addEventListener("keydown", handleCommandKeys);
   $("#log-pause").addEventListener("click", togglePause);
   $("#backup-create").addEventListener("click", createBackup);
+  $("#voice-hide-empty").addEventListener("change", () => renderVoice(state.voice));
   $("#log-search").addEventListener("input", renderLog);
   for (const box of document.querySelectorAll("input[name=log-level]")) box.addEventListener("change", renderLog);
   window.addEventListener("hashchange", showPage);

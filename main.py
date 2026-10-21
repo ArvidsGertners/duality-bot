@@ -23,7 +23,7 @@ import time
 import sys
 import weakref
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, time as day_time
 from pathlib import Path
@@ -96,6 +96,8 @@ STARTED_AT = time.time()
 # Für Panel und Alarme: Verbindungszustand und wann jeder Hintergrund-Task zuletzt lief oder scheiterte.
 GATEWAY_STATE = {"connected": False, "changed_at": int(STARTED_AT)}
 LOOP_STATUS: dict[str, dict] = {}
+# Wer live über Änderungen im Server Bescheid wissen will (das Panel), trägt sich hier ein.
+STATE_LISTENERS: list[Callable[[str], None]] = []
 
 CATEGORIES = [
     {
@@ -473,6 +475,13 @@ def save_temp_voice(channel_id: int, guild_id: int, owner_id: int) -> None:
             "INSERT OR IGNORE INTO temp_voice_channels (channel_id, guild_id, owner_id, created_at) VALUES (?, ?, ?, ?)",
             (channel_id, guild_id, owner_id, int(time.time())),
         )
+
+
+def temp_voice_owners(guild_id: int) -> dict[int, int]:
+    with open_db() as connection:
+        return dict(connection.execute(
+            "SELECT channel_id, owner_id FROM temp_voice_channels WHERE guild_id = ?", (guild_id,)
+        ).fetchall())
 
 
 def temp_voice_ids(guild_id: int) -> set[int]:
@@ -1044,6 +1053,14 @@ def tracked(name: str):
 def set_gateway_connected(connected: bool) -> None:
     if GATEWAY_STATE["connected"] != connected:
         GATEWAY_STATE.update(connected=connected, changed_at=int(time.time()))
+
+
+def notify_listeners(topic: str) -> None:
+    for listener in list(STATE_LISTENERS):
+        try:
+            listener(topic)
+        except Exception:
+            log.exception("Fehler beim Benachrichtigen über %s", topic)
 
 
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -3562,8 +3579,10 @@ async def main(apply: bool) -> int | None:
 
     @client.event
     async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        if apply and member.guild.id == target_id and before.channel != after.channel:
-            await handle_temp_voice(member, before, after)
+        if apply and member.guild.id == target_id:
+            notify_listeners("voice")
+            if before.channel != after.channel:
+                await handle_temp_voice(member, before, after)
 
     @client.event
     async def on_ready():
@@ -3638,6 +3657,8 @@ async def main(apply: bool) -> int | None:
                     run_backup=lambda: run_backup(backup_dir, backup_retention),
                     list_backups=lambda: list_backups(backup_dir),
                     backup_state=BACKUP_STATE,
+                    listeners=STATE_LISTENERS,
+                    temp_voice_owners=temp_voice_owners,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

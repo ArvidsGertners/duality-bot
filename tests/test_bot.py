@@ -204,6 +204,25 @@ class BackupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((self.backups / result["name"]).exists())
 
 
+class ListenerTests(unittest.TestCase):
+    def test_failing_listener_does_not_stop_others(self):
+        calls = []
+
+        def broken(topic):
+            raise RuntimeError("kaputt")
+
+        with mock.patch.object(main, "STATE_LISTENERS", [broken, calls.append]), mock.patch.object(main.log, "exception"):
+            main.notify_listeners("voice")
+        self.assertEqual(calls, ["voice"])
+
+    def test_temp_voice_owners(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(main, "DATA_PATH", Path(directory) / "bot.sqlite3"):
+            main.initialize_storage()
+            main.save_temp_voice(10, 1, 100)
+            main.save_temp_voice(11, 2, 200)
+            self.assertEqual(main.temp_voice_owners(1), {10: 100})
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):
