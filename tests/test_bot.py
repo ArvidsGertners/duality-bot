@@ -497,11 +497,13 @@ class RankTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(main, "RANK_CLIENT", rank_client), \
                 mock.patch.object(main, "RANK_CONGRATS_ENABLED", enabled), \
                 mock.patch.object(main, "update_profile"), \
+                mock.patch.object(main, "record_rank") as record_rank, \
                 mock.patch.object(main, "find_role", return_value=None), \
                 mock.patch.object(main, "set_exclusive_role", mock.AsyncMock()), \
                 mock.patch.object(main, "member_has_role", return_value=is_player), \
                 mock.patch.object(main, "find_text_channel", return_value=channel) as find_channel:
             self.assertEqual(await main.sync_member_rank(member, profile), new_tier)
+        self.assertEqual(record_rank.call_args.args[:3], (1, 5, new_tier))
         return channel, find_channel
 
     async def test_congratulates_player_on_promotion(self):
@@ -526,6 +528,63 @@ class RankTests(unittest.IsolatedAsyncioTestCase):
         for old_tier, synced_at, new_tier, is_player, enabled in cases:
             channel, _ = await self.sync(old_tier, synced_at, new_tier, is_player, enabled)
             channel.send.assert_not_awaited()
+
+
+class RankHistoryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        main.initialize_storage()
+
+    def test_history_only_on_change_and_privacy(self):
+        self.assertTrue(main.record_rank(1, 5, "Gold 1", 100))
+        self.assertFalse(main.record_rank(1, 5, "Gold 1", 200))
+        self.assertTrue(main.record_rank(1, 5, "Gold 2", 300))
+        self.assertTrue(main.record_rank(1, 6, "Iron 1", 300))
+        self.assertEqual(main.rank_histories(1)[5], [("Gold 1", 100), ("Gold 2", 300)])
+        data = main.collect_user_data(1, 5)
+        self.assertEqual(data["rangverlauf"], [{"rank_tier": "Gold 1", "recorded_at": 100}, {"rank_tier": "Gold 2", "recorded_at": 300}])
+        main.delete_user_data(1, 5)
+        self.assertEqual(main.collect_user_data(1, 5)["rangverlauf"], [])
+        self.assertEqual(list(main.rank_histories(1)), [6])
+
+    def leaderboard_guild(self):
+        members = {
+            user_id: SimpleNamespace(id=user_id, display_name=name)
+            for user_id, name in ((1, "Zoe"), (2, "Anna"), (3, "Ben"), (4, "Cem"), (5, "Kein Spieler"))
+        }
+        for user_id, riot, tier in ((1, "Zoe", "Gold 2"), (2, "Anna", "Diamond 1"), (3, "Ben", None), (4, "Cem", "Gold 2"), (5, "X", "Radiant")):
+            main.update_profile(1, user_id, riot_name=riot, riot_tag="EUW", rank_tier=tier)
+        main.update_profile(1, 6, main_role="Duelist")
+        main.save_roster_name(1, 4, "Cem (Kapitän)")
+        role = SimpleNamespace(members=[members[user_id] for user_id in (1, 2, 3, 4)])
+        return SimpleNamespace(id=1), role
+
+    def test_leaderboard_order(self):
+        guild, role = self.leaderboard_guild()
+        with mock.patch.object(main, "find_role", return_value=role):
+            entries = main.rank_leaderboard(guild)
+        self.assertEqual([name for _, _, name in entries], ["Anna", "Cem (Kapitän)", "Zoe", "Ben"])
+
+    async def test_commands(self):
+        guild, role = self.leaderboard_guild()
+        client = discord.Client(intents=discord.Intents.none())
+        tree = discord.app_commands.CommandTree(client)
+        main.register_app_commands(tree)
+        interaction = SimpleNamespace(guild=guild, response=SimpleNamespace(send_message=mock.AsyncMock()))
+        with mock.patch.object(main, "find_role", return_value=role):
+            await tree.get_command("rangliste").callback(interaction)
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        self.assertTrue(interaction.response.send_message.await_args.kwargs["ephemeral"])
+        self.assertEqual(embed.description.splitlines()[0], "1. **Anna** – Diamond 1")
+        self.assertIn("4. **Ben** – noch kein Abgleich", embed.description)
+        await tree.get_command("help").callback(interaction)
+        help_embed = interaction.response.send_message.await_args.kwargs["embed"]
+        self.assertTrue(any("/rangliste" in field.value for field in help_embed.fields))
+        self.assertTrue(all(len(field.value) <= 1024 for field in help_embed.fields))
 
 
 class EnvIntTests(unittest.TestCase):

@@ -152,6 +152,9 @@ def make_hooks(client=None) -> panel.PanelHooks:
         publish_event=mock.AsyncMock(),
         edit_event=mock.AsyncMock(return_value="Termin geändert."),
         cancel_event=mock.AsyncMock(return_value="Termin abgesagt."),
+        rank_leaderboard=lambda guild: [],
+        rank_histories=lambda guild_id: {},
+        rank_value=main.rank_value,
         attendance_events=lambda guild_id, since, until: ([], {}),
         summarize_attendance=main.summarize_attendance,
         attendance_rules={"threshold": 50, "missing_limit": 2, "retention_days": 90},
@@ -1183,6 +1186,26 @@ class AttendancePanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(panel.spreadsheet_safe("+49 Max"), "'+49 Max")
         self.assertEqual(panel.spreadsheet_safe("@max"), "'@max")
         self.assertEqual(panel.spreadsheet_safe("Max"), "Max")
+
+
+class RankingPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ranking(self):
+        hooks = make_hooks()
+        guild = hooks.client.guild
+        hooks.rank_leaderboard = lambda guild: [
+            (guild.get_member(PLAYER_ID), profile(PLAYER_ID, ("Zoe", "EUW"), "Platinum 1"), "Zoe (Kader)"),
+            (guild.get_member(COACH_ID), profile(COACH_ID, ("Coach", "1234")), f"Person {COACH_ID}"),
+        ]
+        hooks.rank_histories = lambda guild_id: {PLAYER_ID: [("Gold 3", 100), ("Platinum 1", 200)]}
+        client = TestClient(TestServer(panel.Panel(CONFIG, hooks).build_app()))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        _, cookie = session_cookie(COACH_ID)
+        players = (await (await client.get("/api/ranking", headers={"Cookie": cookie})).json())["players"]
+        first, second = players
+        self.assertEqual((first["position"], first["name"], first["rank_value"]), (1, "Zoe (Kader)", [4, 1]))
+        self.assertEqual([entry["rank_tier"] for entry in first["history"]], ["Gold 3", "Platinum 1"])
+        self.assertEqual((second["rank_tier"], second["rank_value"], second["history"]), (None, None, []))
 
 
 if __name__ == "__main__":

@@ -609,6 +609,10 @@ class PanelHooks:
     publish_event: Callable[[discord.Guild, str, str, int], Awaitable[discord.Message]]
     edit_event: Callable[..., Awaitable[str]]
     cancel_event: Callable[..., Awaitable[str]]
+    # Rangliste wie /rangliste: (Mitglied, Profil, Name); Verlauf je Person; Rang → vergleichbarer Wert
+    rank_leaderboard: Callable[[discord.Guild], list[tuple[discord.Member, Any, str]]]
+    rank_histories: Callable[[int], dict[int, list[tuple[str, int]]]]
+    rank_value: Callable[[str | None], tuple[int, int] | None]
     # Anwesenheit: Termine + Antworten im Zeitraum, Auswertung je Person, Schwellen und Löschfrist
     attendance_events: Callable[[int, int, int], tuple[list, dict[int, dict[int, str]]]]
     summarize_attendance: Callable[[list, dict, dict[int, int]], dict[int, dict]]
@@ -655,6 +659,7 @@ class Panel:
             web.get("/api/tickets", self.api_tickets),
             web.get("/api/events", self.api_events),
             web.get("/api/attendance", self.api_attendance),
+            web.get("/api/ranking", self.api_ranking),
             web.get("/api/attendance.csv", self.api_attendance_csv),
             web.post("/api/events", self.api_create_event),
             web.post("/api/events/{message_id}", self.api_edit_event),
@@ -1217,6 +1222,32 @@ class Panel:
             })
         rows.sort(key=lambda row: row["user"]["name"].casefold())
         return {"days": days, "since": since, "until": until, "events": len(events), "rules": rules, "players": rows}
+
+    async def api_ranking(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        histories = self.hooks.rank_histories(guild.id)
+
+        def value(tier: str | None) -> list[int] | None:
+            rank = self.hooks.rank_value(tier)
+            return list(rank) if rank else None
+
+        players = []
+        for position, (member, profile, name) in enumerate(self.hooks.rank_leaderboard(guild), 1):
+            players.append({
+                "position": position,
+                "user": self.person(guild, member.id),
+                "name": name,
+                "riot_id": profile.riot_id,
+                "rank_tier": profile.rank_tier,
+                "rank_value": value(profile.rank_tier),
+                "rank_synced_at": profile.rank_synced_at,
+                "history": [
+                    {"rank_tier": tier, "recorded_at": recorded_at, "rank_value": value(tier)}
+                    for tier, recorded_at in histories.get(member.id, [])
+                ],
+            })
+        return web.json_response({"players": players})
 
     async def api_attendance(self, request: web.Request) -> web.Response:
         self.authenticate(request)

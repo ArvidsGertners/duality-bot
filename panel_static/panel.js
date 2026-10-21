@@ -632,6 +632,62 @@ function sortAttendance(key) {
   if (state.attendance) renderAttendance();
 }
 
+/* Rangliste */
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function rankScore(value) {
+  return value ? value[0] * 4 + value[1] : 0;
+}
+
+function rankSparkline(history) {
+  const points = history.filter((entry) => entry.rank_value);
+  if (points.length < 2) return points.length ? span("muted small", "seit dem Verknüpfen unverändert") : "–";
+  const width = 140;
+  const height = 32;
+  const scores = points.map((entry) => rankScore(entry.rank_value));
+  const low = Math.min(...scores);
+  const span_ = Math.max(...scores) - low || 1;
+  const coordinates = points.map((entry, index) => [
+    4 + (index * (width - 8)) / (points.length - 1),
+    height - 4 - ((rankScore(entry.rank_value) - low) * (height - 8)) / span_,
+  ]);
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "sparkline");
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `Verlauf: ${points.map((entry) => `${entry.rank_tier} (${formatTime(entry.recorded_at)})`).join(", ")}`);
+  const line = document.createElementNS(SVG_NS, "polyline");
+  line.setAttribute("points", coordinates.map(([x, y]) => `${x},${y}`).join(" "));
+  svg.append(line);
+  coordinates.forEach(([x, y], index) => {
+    const dot = document.createElementNS(SVG_NS, "circle");
+    dot.setAttribute("cx", x);
+    dot.setAttribute("cy", y);
+    dot.setAttribute("r", 2.5);
+    const title = document.createElementNS(SVG_NS, "title");
+    title.textContent = `${points[index].rank_tier} · ${formatTime(points[index].recorded_at)}`;
+    dot.append(title);
+    svg.append(dot);
+  });
+  return svg;
+}
+
+async function loadRanking() {
+  const { players } = await api("/api/ranking");
+  const rows = players.map((player) => {
+    const name = span("person", "");
+    name.append(personCell(player.user));
+    if (player.name !== player.user.name) name.append(span("muted small", `(Kader: ${player.name})`));
+    return tableRow(
+      `${player.position}.`, name, player.rank_tier || "noch kein Abgleich", formatTime(player.rank_synced_at),
+      rankSparkline(player.history),
+    );
+  });
+  $("#ranking-list").replaceChildren(...(rows.length ? rows : [emptyRow(5, "Noch kein Spieler hat seine Riot-ID verknüpft.")]));
+}
+
 async function loadTickets() {
   const filter = $("#ticket-filter").value;
   const { tickets } = await api(`/api/tickets?state=${filter}`);
@@ -648,7 +704,7 @@ async function loadTickets() {
 
 const pageLoaders = {
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
-  anwesenheit: loadAttendance,
+  anwesenheit: loadAttendance, rangliste: loadRanking,
 };
 
 function renderVoice(channels) {

@@ -231,6 +231,11 @@ th[aria-sort="descending"] button.sort::after { content: " ▼"; }
 tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* Rangliste */
+.sparkline { display: block; }
+.sparkline polyline { fill: none; stroke: var(--accent-text); stroke-width: 2; }
+.sparkline circle { fill: var(--accent-text); }
+
 /* Voice */
 .voice-grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
 .voice-category { grid-column: 1 / -1; margin: .5rem 0 0; font-size: .85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }

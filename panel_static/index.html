@@ -19,6 +19,7 @@
           <li><a href="#voice" data-page="voice" data-level="1">Voice</a></li>
           <li><a href="#termine" data-page="termine" data-level="1">Termine</a></li>
           <li><a href="#anwesenheit" data-page="anwesenheit" data-level="1">Anwesenheit</a></li>
+          <li><a href="#rangliste" data-page="rangliste" data-level="1">Rangliste</a></li>
           <li><a href="#bewerbungen" data-page="bewerbungen" data-level="1">Bewerbungen</a></li>
           <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
           <li><a href="#tickets" data-page="tickets" data-level="1">Tickets</a></li>
@@ -157,6 +158,19 @@
               </tr>
             </thead>
             <tbody id="attendance-list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="page-rangliste" class="page" aria-labelledby="title-rangliste" hidden>
+        <h1 id="title-rangliste">Rangliste</h1>
+        <p class="muted">Wie <code>/rangliste</code>: alle Spieler mit verknüpfter Riot-ID, höchster Rang zuerst. Der Verlauf zeigt jede Rangänderung seit dem Verknüpfen.</p>
+        <div class="card table-wrap">
+          <table>
+            <thead>
+              <tr><th scope="col">Platz</th><th scope="col">Spieler</th><th scope="col">Rang</th><th scope="col">Letzter Abgleich</th><th scope="col">Verlauf</th></tr>
+            </thead>
+            <tbody id="ranking-list"></tbody>
           </table>
         </div>
       </section>

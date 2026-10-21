@@ -235,6 +235,12 @@ def initialize_storage() -> None:
             "channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL, "
             "created_at INTEGER NOT NULL)"
         )
+        # Rangverlauf für die Rangliste; ein Eintrag nur, wenn sich der Rang ändert.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS rank_history ("
+            "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank_tier TEXT NOT NULL, recorded_at INTEGER NOT NULL)"
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS rank_history_member ON rank_history (guild_id, user_id, recorded_at)")
         # Spalten, die spätere Versionen ergänzt haben; bestehende Zeilen behalten ihre Daten.
         event_columns = {row[1] for row in connection.execute("PRAGMA table_info(scheduled_events)")}
         for column, definition in (("title", "TEXT"), ("details", "TEXT"), ("cancelled_at", "INTEGER")):
@@ -469,6 +475,33 @@ def list_profiles(guild_id: int) -> list[Profile]:
         ]
 
 
+def record_rank(guild_id: int, user_id: int, rank_tier: str, recorded_at: int) -> bool:
+    """Neuen Rang in den Verlauf schreiben, aber nur, wenn er sich geändert hat."""
+    with open_db() as connection:
+        last = connection.execute(
+            "SELECT rank_tier FROM rank_history WHERE guild_id = ? AND user_id = ? ORDER BY recorded_at DESC, rowid DESC LIMIT 1",
+            (guild_id, user_id),
+        ).fetchone()
+        if last and last[0] == rank_tier:
+            return False
+        connection.execute(
+            "INSERT INTO rank_history (guild_id, user_id, rank_tier, recorded_at) VALUES (?, ?, ?, ?)",
+            (guild_id, user_id, rank_tier, recorded_at),
+        )
+    return True
+
+
+def rank_histories(guild_id: int) -> dict[int, list[tuple[str, int]]]:
+    histories: dict[int, list[tuple[str, int]]] = {}
+    with open_db() as connection:
+        for user_id, rank_tier, recorded_at in connection.execute(
+            "SELECT user_id, rank_tier, recorded_at FROM rank_history WHERE guild_id = ? ORDER BY recorded_at, rowid",
+            (guild_id,),
+        ):
+            histories.setdefault(user_id, []).append((rank_tier, recorded_at))
+    return histories
+
+
 def attendance(guild_id: int, user_id: int, since: int, until: int) -> tuple[int, int]:
     """(Zusagen, Termine) für vergangene Termine im Zeitraum."""
     with open_db() as connection:
@@ -622,6 +655,10 @@ def collect_user_data(guild_id: int, user_id: int) -> dict:
             "eigene_voice_channels": rows(
                 "SELECT * FROM temp_voice_channels WHERE guild_id = ? AND owner_id = ?", (guild_id, user_id)
             ),
+            "rangverlauf": rows(
+                "SELECT rank_tier, recorded_at FROM rank_history WHERE guild_id = ? AND user_id = ? ORDER BY recorded_at",
+                (guild_id, user_id),
+            ),
         }
 
 
@@ -632,6 +669,7 @@ def delete_user_data(guild_id: int, user_id: int) -> None:
         connection.execute("DELETE FROM player_profiles WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         connection.execute("DELETE FROM player_roster_names WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         connection.execute("DELETE FROM event_rsvps WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM rank_history WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
 
 
 def write_rsvp(message_id: int, user_id: int, choice: str) -> None:
@@ -1199,6 +1237,21 @@ def is_rank_promotion(old_tier: str | None, new_tier: str | None) -> bool:
     return old_value is not None and new_value is not None and new_value[0] > old_value[0]
 
 
+def rank_leaderboard(guild: discord.Guild) -> list[tuple[discord.Member, Profile, str]]:
+    """Spieler mit verknüpfter Riot-ID, höchster Rang zuerst; Name wie bei /team."""
+    player_role = find_role(guild, "Spieler")
+    players = {member.id: member for member in player_role.members} if player_role else {}
+    roster_names = get_roster_names(guild.id)
+    entries = [
+        (players[profile.user_id], profile, roster_names.get(profile.user_id, players[profile.user_id].display_name))
+        for profile in linked_profiles(guild.id)
+        if profile.user_id in players
+    ]
+    entries.sort(key=lambda entry: entry[2].casefold())
+    entries.sort(key=lambda entry: rank_value(entry[1].rank_tier) or (-1, -1), reverse=True)
+    return entries
+
+
 async def congratulate_rank_up(member: discord.Member, old_tier: str, new_tier: str) -> None:
     if not RANK_CONGRATS_ENABLED or not member_has_role(member, "Spieler"):
         return
@@ -1219,7 +1272,9 @@ async def sync_member_rank(member: discord.Member, profile: Profile) -> str:
     if RANK_CLIENT is None:
         raise RankLookupError("Die automatische Rangabfrage ist nicht eingerichtet (HENRIKDEV_API_KEY fehlt).")
     tier_name, region = await RANK_CLIENT.current_rank(profile.riot_name, profile.riot_tag, profile.region)
-    update_profile(member.guild.id, member.id, region=region, rank_tier=tier_name, rank_synced_at=int(time.time()))
+    synced_at = int(time.time())
+    update_profile(member.guild.id, member.id, region=region, rank_tier=tier_name, rank_synced_at=synced_at)
+    record_rank(member.guild.id, member.id, tier_name, synced_at)
     role_name = rank_role_name(tier_name)
     selected_role = find_role(member.guild, role_name) if role_name else None
     await set_exclusive_role(member, VALORANT_RANKS, selected_role, "Valorant-Rang automatisch über Riot-ID aktualisiert")
@@ -2541,7 +2596,7 @@ class MyDataView(DualityView):
             self.confirmed = True
             button.label = "Ja, endgültig löschen"
             await interaction.response.edit_message(
-                content="Sicher? Gelöscht werden Profil (Riot-ID, Rollen, Rang-Sync), Teamname, Terminantworten und "
+                content="Sicher? Gelöscht werden Profil (Riot-ID, Rollen, Rang-Sync), Rangverlauf, Teamname, Terminantworten und "
                 "deine Bewerbungen samt Nachricht im Staff-Kanal. Deine Discord-Rollen bleiben bestehen. "
                 "Tickets und Staff-Stimmen bleiben als Nachweis erhalten.",
                 view=self,
@@ -3013,7 +3068,8 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             value="`/report` öffnet ein privates Ticket mit dem Staff (oder der Button in `#tickets`) · `/feedback` sendet eine Idee · "
             "`/profil` zeigt Rang, Rollen und Hochschule · `/riot-id` verknüpft deine Riot-ID für den automatischen Rang · "
             "`/hochschule` ändert deine Hochschule · "
-            "`/team` zeigt den aktuellen Kader · `/teamname` setzt optional deinen Namen für den Kader · "
+            "`/team` zeigt den aktuellen Kader · `/rangliste` sortiert ihn nach Valorant-Rang · "
+            "`/teamname` setzt optional deinen Namen für den Kader · "
             "`/meine-daten` zeigt, exportiert oder löscht deine gespeicherten Daten · "
             "`/termin` erstellt einen Teamtermin (Staff) · `/neue-saison` öffnet die Bewerbungen wieder (Staff).",
             inline=False,
@@ -3089,6 +3145,23 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
         if len(value) > 3900:
             value = value[:3890] + "…"
         embed = discord.Embed(title="Duality Mannheim – Team", description=value, color=discord.Color.from_rgb(110, 70, 255))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @tree.command(name="rangliste", description="Zeigt alle Spieler mit verknüpfter Riot-ID, sortiert nach Rang.")
+    async def leaderboard_command(interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Dieser Befehl funktioniert nur im Server.", ephemeral=True)
+            return
+        lines = []
+        for position, (member, profile, name) in enumerate(rank_leaderboard(interaction.guild), 1):
+            rank = profile.rank_tier or "noch kein Abgleich"
+            synced = f" · <t:{profile.rank_synced_at}:d>" if profile.rank_synced_at else ""
+            lines.append(f"{position}. **{discord.utils.escape_markdown(name)}** – {rank}{synced}")
+        value = "\n".join(lines) if lines else "Noch kein Spieler hat seine Riot-ID mit `/riot-id` verknüpft."
+        if len(value) > 3900:
+            value = value[:3890] + "…"
+        embed = discord.Embed(title="Duality Mannheim – Rangliste", description=value, color=discord.Color.from_rgb(110, 70, 255))
+        embed.set_footer(text="Ränge werden täglich über die Riot-ID abgeglichen.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @tree.command(name="teamname", description="Legt optional fest, welcher Name im Teamkader angezeigt wird.")
@@ -4041,6 +4114,9 @@ async def main(apply: bool) -> int | None:
                     cancel_event=cancel_event,
                     attendance_events=attendance_events,
                     summarize_attendance=summarize_attendance,
+                    rank_leaderboard=rank_leaderboard,
+                    rank_histories=rank_histories,
+                    rank_value=rank_value,
                     attendance_rules={
                         "threshold": ATTENDANCE_THRESHOLD_PERCENT,
                         "missing_limit": ATTENDANCE_MISSING_LIMIT,
