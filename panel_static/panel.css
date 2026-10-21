@@ -250,6 +250,19 @@ tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .embed-preview .embed-title { font-weight: 700; margin-bottom: .35rem; color: #fff; }
 .embed-preview img { max-width: 100%; border-radius: 4px; margin-top: .5rem; }
 @media (max-width: 960px) { .text-layout { grid-template-columns: 1fr; } }
+.fieldset { border: 1px solid var(--border); border-radius: 8px; padding: .5rem .75rem; display: grid; gap: .4rem; }
+.fieldset legend { color: var(--muted); font-size: .9rem; padding: 0 .3rem; }
+.field-row { display: grid; gap: .3rem; grid-template-columns: 1fr auto; border-bottom: 1px dashed var(--border); padding-bottom: .5rem; }
+.field-row textarea { grid-column: 1 / -1; }
+.preview-content { margin-bottom: .35rem; }
+.mention { background: rgba(88, 101, 242, .3); color: #c9cdfb; border-radius: 3px; padding: 0 .2rem; }
+.embed-preview.with-thumbnail { display: grid; grid-template-columns: minmax(0, 1fr) 80px; gap: .5rem; }
+.embed-preview .embed-thumbnail { width: 80px; height: 80px; object-fit: cover; margin: 0; }
+.embed-preview .embed-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem; margin-top: .5rem; }
+.embed-preview .embed-field { grid-column: 1 / -1; }
+.embed-preview .embed-field.inline { grid-column: auto; }
+.embed-preview .embed-field-name { font-weight: 700; }
+.embed-preview .embed-footer { font-size: .75rem; color: #b5bac1; margin-top: .5rem; }
 
 /* Einstellungen */
 .settings-list { display: grid; gap: .75rem; }

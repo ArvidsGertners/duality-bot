@@ -27,6 +27,8 @@ const state = {
   attendance: null,
   attendanceSort: { key: "name", ascending: true },
   texts: [],
+  announcementData: null,
+  editingAnnouncement: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -730,6 +732,233 @@ function discordMarkdown(text) {
   return fragment;
 }
 
+/* Ankündigungen */
+
+function fieldRow(field = { name: "", value: "", inline: false }) {
+  const row = document.createElement("div");
+  row.className = "field-row";
+  const name = document.createElement("input");
+  name.placeholder = "Feldname";
+  name.maxLength = 256;
+  name.value = field.name;
+  name.setAttribute("aria-label", "Feldname");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "small";
+  remove.textContent = "Entfernen";
+  remove.addEventListener("click", () => { row.remove(); updateAnnouncementPreview(); });
+  const value = document.createElement("textarea");
+  value.rows = 2;
+  value.maxLength = 1024;
+  value.placeholder = "Inhalt";
+  value.value = field.value;
+  value.setAttribute("aria-label", "Feldinhalt");
+  const inline = document.createElement("label");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = field.inline;
+  inline.append(box, " nebeneinander");
+  for (const input of [name, value, box]) input.addEventListener("input", updateAnnouncementPreview);
+  row.append(name, remove, value, inline);
+  return row;
+}
+
+function announcementPayload() {
+  return {
+    title: $("#announcement-title").value,
+    description: $("#announcement-description").value,
+    color: $("#announcement-color").value,
+    image_url: $("#announcement-image").value.trim(),
+    thumbnail_url: $("#announcement-thumbnail").value.trim(),
+    footer: $("#announcement-footer").value,
+    ping_role: $("#announcement-ping").value || null,
+    fields: [...document.querySelectorAll("#announcement-fields .field-row")].map((row) => ({
+      name: row.querySelector("input").value,
+      value: row.querySelector("textarea").value,
+      inline: row.querySelector("input[type=checkbox]").checked,
+    })),
+  };
+}
+
+function previewImage(url, className) {
+  if (!/^https:\/\//.test(url)) return null;
+  const image = document.createElement("img");
+  image.src = url;
+  image.alt = "";
+  if (className) image.className = className;
+  return image;
+}
+
+function updateAnnouncementPreview() {
+  const payload = announcementPayload();
+  const content = $("#announcement-preview-content");
+  content.replaceChildren(payload.ping_role ? span("mention", `@${payload.ping_role}`) : "");
+  const preview = $("#announcement-preview");
+  preview.style.borderLeftColor = payload.color;
+  const body = document.createElement("div");
+  if (payload.title) body.append(span("embed-title", payload.title));
+  if (payload.title) body.append(document.createElement("br"));
+  if (payload.description) body.append(discordMarkdown(payload.description));
+  const filledFields = payload.fields.filter((field) => field.name || field.value);
+  if (filledFields.length) {
+    const fields = span("embed-fields", "");
+    for (const field of filledFields) {
+      const item = span(`embed-field${field.inline ? " inline" : ""}`, "");
+      item.append(span("embed-field-name", field.name), document.createElement("br"), discordMarkdown(field.value));
+      fields.append(item);
+    }
+    body.append(fields);
+  }
+  const image = previewImage(payload.image_url);
+  if (image) body.append(image);
+  if (payload.footer) body.append(span("embed-footer", payload.footer));
+  const thumbnail = previewImage(payload.thumbnail_url, "embed-thumbnail");
+  preview.classList.toggle("with-thumbnail", Boolean(thumbnail));
+  preview.replaceChildren(body, ...(thumbnail ? [thumbnail] : []));
+}
+
+function announcementWhen() {
+  return document.querySelector("input[name=announcement-when]:checked").value;
+}
+
+function updateAnnouncementSubmit() {
+  const later = announcementWhen() === "later";
+  $("#announcement-send-at").disabled = !later;
+  const sent = state.editingAnnouncement && state.editingAnnouncement.status === "sent";
+  $("#announcement-submit").textContent = sent ? "Änderung speichern" : later ? "Planen" : "Senden …";
+}
+
+function fillAnnouncementForm(entry = null) {
+  state.editingAnnouncement = entry;
+  const payload = entry ? entry.payload : { title: "", description: "", color: "#6e46ff", image_url: "", thumbnail_url: "", footer: "", fields: [], ping_role: null };
+  const sent = entry && entry.status === "sent";
+  $("#announcement-form-title").textContent = entry ? (sent ? "Gesendete Ankündigung bearbeiten" : "Geplante Ankündigung bearbeiten") : "Neue Ankündigung";
+  $("#announcement-sent-note").hidden = !sent;
+  $("#announcement-title").value = payload.title;
+  $("#announcement-description").value = payload.description;
+  $("#announcement-color").value = payload.color;
+  $("#announcement-image").value = payload.image_url || "";
+  $("#announcement-thumbnail").value = payload.thumbnail_url || "";
+  $("#announcement-footer").value = payload.footer;
+  $("#announcement-ping").value = payload.ping_role || "";
+  $("#announcement-fields").replaceChildren(...payload.fields.map(fieldRow));
+  if (entry) $("#announcement-channel").value = entry.channel_id;
+  for (const element of [$("#announcement-channel"), $("#announcement-ping")]) element.disabled = Boolean(sent);
+  $("#announcement-when").disabled = Boolean(sent);
+  const scheduled = entry && entry.status !== "sent" && entry.send_at;
+  document.querySelector(`input[name=announcement-when][value=${scheduled ? "later" : "now"}]`).checked = true;
+  $("#announcement-send-at").value = scheduled ? berlinInputValue(entry.send_at) : "";
+  $("#announcement-send-at").min = berlinInputValue(Date.now() / 1000);
+  $("#announcement-error").textContent = "";
+  updateAnnouncementSubmit();
+  updateAnnouncementPreview();
+}
+
+function announcementActions(entry) {
+  const actions = span("row-actions", "");
+  if (entry.url) actions.append(discordLink(entry.url, "Discord"));
+  const editButton = document.createElement("button");
+  editButton.type = "button";
+  editButton.className = "small";
+  editButton.textContent = "Bearbeiten";
+  editButton.addEventListener("click", () => {
+    fillAnnouncementForm(entry);
+    $("#announcement-title").focus();
+  });
+  actions.append(editButton);
+  if (entry.status !== "sent") {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "small danger";
+    remove.textContent = "Löschen";
+    remove.addEventListener("click", () => deleteAnnouncement(entry));
+    actions.append(remove);
+  }
+  return actions;
+}
+
+const ANNOUNCEMENT_STATUS = { sent: ["Gesendet", "ok"], scheduled: ["Geplant", "warn"], failed: ["Fehlgeschlagen", "bad"] };
+
+async function loadAnnouncements() {
+  const data = await api("/api/announcements");
+  state.announcementData = data;
+  const selectedChannel = $("#announcement-channel").value;
+  $("#announcement-channel").replaceChildren(...data.channels.map((channel) => {
+    const option = document.createElement("option");
+    option.value = channel.id;
+    option.textContent = `#${channel.name}${channel.category ? ` (${channel.category})` : ""}`;
+    return option;
+  }));
+  if (selectedChannel) $("#announcement-channel").value = selectedChannel;
+  const selectedPing = $("#announcement-ping").value;
+  $("#announcement-ping").replaceChildren(new Option("Niemand", ""), ...data.ping_roles.map((role) => new Option(`@${role}`, role)));
+  $("#announcement-ping").value = selectedPing;
+  const rows = data.announcements.map((entry) => {
+    const [label, kind] = ANNOUNCEMENT_STATUS[entry.status];
+    const status = span("", "");
+    status.append(pill(label, kind));
+    if (entry.error) status.append(" ", span("small form-error", entry.error));
+    return tableRow(
+      status, `#${entry.channel_name}`, entry.payload.title || entry.payload.description.slice(0, 60) || "–",
+      formatTime(entry.sent_at || entry.send_at), personCell(entry.created_by), announcementActions(entry),
+    );
+  });
+  $("#announcement-list").replaceChildren(...(rows.length ? rows : [emptyRow(6, "Noch keine Ankündigungen.")]));
+  updateAnnouncementPreview();
+}
+
+async function submitAnnouncement(event) {
+  event.preventDefault();
+  const editing = state.editingAnnouncement;
+  const later = announcementWhen() === "later";
+  const body = {
+    ...announcementPayload(),
+    channel_id: $("#announcement-channel").value,
+    send_at: later ? $("#announcement-send-at").value : null,
+  };
+  if (later && !body.send_at) {
+    $("#announcement-error").textContent = "Bitte Datum und Uhrzeit für den geplanten Versand wählen.";
+    return;
+  }
+  if ((!editing || editing.status !== "sent") && !later) {
+    const channel = $("#announcement-channel").selectedOptions[0];
+    const confirmed = await confirmAction(
+      `Die Ankündigung wird sofort in ${channel ? channel.textContent : "dem Kanal"} veröffentlicht${body.ping_role ? ` und erwähnt @${body.ping_role}` : ", ohne jemanden zu erwähnen"}.`,
+      null,
+      "Jetzt senden",
+    );
+    if (!confirmed) return;
+  }
+  $("#announcement-submit").disabled = true;
+  $("#announcement-error").textContent = "";
+  try {
+    const path = editing ? `/api/announcements/${editing.id}` : "/api/announcements";
+    const result = await api(path, { method: "POST", body });
+    fillAnnouncementForm();
+    $("#announcement-message").textContent = result.message;
+    await loadAnnouncements();
+  } catch (error) {
+    $("#announcement-error").textContent = error.message;
+  } finally {
+    $("#announcement-submit").disabled = false;
+  }
+}
+
+async function deleteAnnouncement(entry) {
+  const confirmed = await confirmAction(
+    `Die geplante Ankündigung „${entry.payload.title || "ohne Titel"}“ wird gelöscht und nicht mehr gesendet.`, null, "Löschen",
+  );
+  if (!confirmed) return;
+  try {
+    const result = await api(`/api/announcements/${entry.id}`, { method: "DELETE" });
+    if (state.editingAnnouncement && state.editingAnnouncement.id === entry.id) fillAnnouncementForm();
+    $("#announcement-message").textContent = result.message;
+    await loadAnnouncements();
+  } catch (error) {
+    $("#announcement-message").textContent = error.message;
+  }
+}
+
 /* Texte */
 
 function currentText() {
@@ -940,6 +1169,7 @@ async function loadTickets() {
 const pageLoaders = {
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
   anwesenheit: loadAttendance, rangliste: loadRanking, einstellungen: loadSettings, texte: loadTexts,
+  ankuendigungen: loadAnnouncements,
 };
 
 function renderVoice(channels) {
@@ -1248,6 +1478,15 @@ async function init() {
   for (const button of document.querySelectorAll("#page-anwesenheit button.sort")) {
     button.addEventListener("click", () => sortAttendance(button.dataset.sort));
   }
+  $("#announcement-form").addEventListener("submit", submitAnnouncement);
+  $("#announcement-form").addEventListener("input", updateAnnouncementPreview);
+  $("#announcement-form").addEventListener("change", () => { updateAnnouncementSubmit(); updateAnnouncementPreview(); });
+  $("#announcement-add-field").addEventListener("click", () => {
+    if (document.querySelectorAll("#announcement-fields .field-row").length >= 10) return;
+    $("#announcement-fields").append(fieldRow());
+    updateAnnouncementPreview();
+  });
+  $("#announcement-clear").addEventListener("click", () => fillAnnouncementForm());
   $("#text-select").addEventListener("change", showText);
   $("#text-editor").addEventListener("input", updateTextPreview);
   $("#text-form").addEventListener("submit", saveText);

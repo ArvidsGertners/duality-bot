@@ -765,6 +765,97 @@ class TextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.application_message_embed().footer.text, main.APPLICATION_MARKER)
 
 
+def announcement(**changes) -> dict:
+    data = {"title": "Neue Saison", "description": "Bewerbt euch!", "color": "#6E46FF", "image_url": "", "thumbnail_url": "",
+            "footer": "", "fields": [], "ping_role": None}
+    data.update(changes)
+    return data
+
+
+class AnnouncementValidationTests(unittest.TestCase):
+    def test_valid(self):
+        payload = main.validate_announcement(announcement(
+            title="  Titel ", fields=[{"name": "Wann", "value": "Fr 19:30", "inline": True}],
+            image_url="https://example.com/bild.png", ping_role="Ping Events",
+        ))
+        self.assertEqual((payload["title"], payload["color"], payload["ping_role"]), ("Titel", "#6e46ff", "Ping Events"))
+        self.assertEqual(payload["fields"], [{"name": "Wann", "value": "Fr 19:30", "inline": True}])
+        embed = main.announcement_embed(payload)
+        self.assertEqual((embed.title, embed.color.value, embed.image.url), ("Titel", 0x6E46FF, "https://example.com/bild.png"))
+        self.assertTrue(embed.fields[0].inline)
+
+    def test_invalid(self):
+        cases = [
+            announcement(title="", description=""),
+            announcement(title="x" * 257),
+            announcement(description="x" * 4097),
+            announcement(color="red"),
+            announcement(image_url="http://example.com/a.png"),
+            announcement(thumbnail_url="javascript:alert(1)"),
+            announcement(fields=[{"name": "a", "value": "b"}] * 11),
+            announcement(fields=[{"name": "", "value": "b"}]),
+            announcement(fields=[{"name": "a", "value": "x" * 1025}]),
+            announcement(description="x" * 4000, fields=[{"name": "a", "value": "x" * 1000}] * 3),
+            announcement(ping_role="@everyone"),
+            announcement(ping_role="Admin"),
+            "kein Objekt",
+        ]
+        for data in cases:
+            with self.assertRaises(ValueError):
+                main.validate_announcement(data)
+
+
+class AnnouncementSendingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        main.initialize_storage()
+        allowed = SimpleNamespace(view_channel=True, send_messages=True, embed_links=True)
+        self.channel = SimpleNamespace(id=20, permissions_for=lambda member: allowed, send=mock.AsyncMock(return_value=SimpleNamespace(id=900)))
+        self.readonly = SimpleNamespace(id=21, permissions_for=lambda member: SimpleNamespace(view_channel=True, send_messages=False, embed_links=True))
+        self.guild = SimpleNamespace(id=10, me=object(), text_channels=[self.channel, self.readonly])
+        self.role = SimpleNamespace(id=5, mention="<@&5>")
+
+    async def test_ping_only_selected_role(self):
+        with mock.patch.object(main, "find_role", return_value=self.role):
+            await main.send_announcement(self.guild, 20, main.validate_announcement(announcement(ping_role="Ping Valorant")))
+        kwargs = self.channel.send.await_args.kwargs
+        self.assertEqual(kwargs["content"], "<@&5>")
+        self.assertEqual(kwargs["allowed_mentions"].roles, [self.role])
+        self.assertFalse(kwargs["allowed_mentions"].everyone)
+        self.assertFalse(kwargs["allowed_mentions"].users)
+        await main.send_announcement(self.guild, 20, main.validate_announcement(announcement()))
+        kwargs = self.channel.send.await_args.kwargs
+        self.assertIsNone(kwargs["content"])
+        self.assertFalse(kwargs["allowed_mentions"].roles)
+        self.assertEqual(main.announcement_channels(self.guild), [self.channel])
+        with self.assertRaises(ValueError):
+            await main.send_announcement(self.guild, 21, main.validate_announcement(announcement()))
+
+    async def test_scheduled_sending(self):
+        payload = main.validate_announcement(announcement())
+        due = main.create_announcement(10, 20, payload, 100, created_by=1)
+        broken = main.create_announcement(10, 21, payload, 100, created_by=1)
+        later = main.create_announcement(10, 20, payload, 2**40, created_by=1)
+        with mock.patch.object(main, "audit", mock.AsyncMock()) as audit, mock.patch.object(main.log, "warning"):
+            self.assertEqual(await main.send_due_announcements(self.guild), 1)
+            # Die fehlgeschlagene wird nicht jede Minute erneut versucht.
+            self.assertEqual(await main.send_due_announcements(self.guild), 0)
+        audit.assert_awaited_once()
+        self.assertEqual((main.get_announcement(due).sent_at is not None, main.get_announcement(due).message_id), (True, 900))
+        self.assertIn("nicht schreiben", main.get_announcement(broken).error)
+        self.assertIsNone(main.get_announcement(later).sent_at)
+        main.update_announcement(broken, 20, payload, 100, updated_by=2)
+        self.assertIsNone(main.get_announcement(broken).error)
+        self.assertFalse(main.delete_announcement(due))
+        self.assertTrue(main.delete_announcement(later))
+        statuses = [(entry.id, entry.sent_at is not None) for entry in main.list_announcements(10)]
+        self.assertEqual(statuses, [(broken, False), (due, True)])
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):

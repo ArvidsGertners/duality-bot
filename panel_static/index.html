@@ -23,6 +23,7 @@
           <li><a href="#bewerbungen" data-page="bewerbungen" data-level="1">Bewerbungen</a></li>
           <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
           <li><a href="#tickets" data-page="tickets" data-level="1">Tickets</a></li>
+          <li><a href="#ankuendigungen" data-page="ankuendigungen" data-level="2">Ankündigungen</a></li>
           <li><a href="#texte" data-page="texte" data-level="2">Texte</a></li>
           <li><a href="#einstellungen" data-page="einstellungen" data-level="2">Einstellungen</a></li>
           <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
@@ -240,6 +241,65 @@
               <tr><th scope="col">Gemeldet von</th><th scope="col">Status</th><th scope="col">Erstellt</th><th scope="col">Geschlossen</th><th scope="col">Thread</th></tr>
             </thead>
             <tbody id="ticket-list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="page-ankuendigungen" class="page" aria-labelledby="title-ankuendigungen" hidden>
+        <h1 id="title-ankuendigungen">Ankündigungen</h1>
+        <div class="text-layout">
+          <form class="card form-grid" id="announcement-form">
+            <h2 id="announcement-form-title">Neue Ankündigung</h2>
+            <p class="muted small" id="announcement-sent-note" hidden>Diese Ankündigung ist schon gesendet: Nur der Inhalt lässt sich ändern, Kanal und Erwähnung bleiben, und es gibt keinen neuen Ping.</p>
+            <label for="announcement-channel">Kanal</label>
+            <select id="announcement-channel" required></select>
+            <label for="announcement-ping">Erwähnung</label>
+            <select id="announcement-ping"><option value="">Niemand</option></select>
+            <label for="announcement-title">Titel</label>
+            <input id="announcement-title" maxlength="256">
+            <label for="announcement-description">Text (Discord-Markdown)</label>
+            <textarea id="announcement-description" rows="8" maxlength="4096"></textarea>
+            <label for="announcement-color">Farbe</label>
+            <input type="color" id="announcement-color" value="#6e46ff">
+            <label for="announcement-image">Bild (https-Adresse, optional)</label>
+            <input id="announcement-image" type="url" placeholder="https://…">
+            <label for="announcement-thumbnail">Vorschaubild oben rechts (https-Adresse, optional)</label>
+            <input id="announcement-thumbnail" type="url" placeholder="https://…">
+            <label for="announcement-footer">Fußzeile (optional)</label>
+            <input id="announcement-footer" maxlength="2048">
+            <fieldset class="fieldset">
+              <legend>Felder (optional, höchstens 10)</legend>
+              <div id="announcement-fields"></div>
+              <button type="button" class="small" id="announcement-add-field">Feld hinzufügen</button>
+            </fieldset>
+            <fieldset class="fieldset" id="announcement-when">
+              <legend>Zeitpunkt</legend>
+              <label><input type="radio" name="announcement-when" value="now" checked> Sofort senden</label>
+              <label><input type="radio" name="announcement-when" value="later"> Planen für (Berliner Zeit)</label>
+              <input type="datetime-local" id="announcement-send-at" aria-label="Geplanter Zeitpunkt (Berliner Zeit)">
+            </fieldset>
+            <p class="form-error" id="announcement-error" role="alert"></p>
+            <div class="actions">
+              <button type="button" id="announcement-clear">Neu beginnen</button>
+              <button type="submit" class="primary" id="announcement-submit">Senden …</button>
+            </div>
+            <p class="small" id="announcement-message" role="status"></p>
+          </form>
+          <div>
+            <h2 class="small muted">Vorschau</h2>
+            <div class="discord-preview">
+              <div class="preview-content" id="announcement-preview-content"></div>
+              <div class="embed-preview" id="announcement-preview"></div>
+            </div>
+          </div>
+        </div>
+        <h2 class="spaced">Geplant und gesendet</h2>
+        <div class="card table-wrap">
+          <table>
+            <thead>
+              <tr><th scope="col">Status</th><th scope="col">Kanal</th><th scope="col">Titel</th><th scope="col">Zeitpunkt</th><th scope="col">Von</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr>
+            </thead>
+            <tbody id="announcement-list"></tbody>
           </table>
         </div>
       </section>

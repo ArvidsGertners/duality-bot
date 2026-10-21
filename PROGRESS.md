@@ -37,8 +37,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 ### Phase 4 – Konfiguration & Kommunikation
 - [x] D3 Einstellungen (`bot_settings`, `setting()`-Helfer mit Cache) — fertig (283261a)
-- [x] D2 Texte bearbeiten (`bot_texts`, Verlauf, Discord-Nachrichten aktualisieren) — fertig (Commit „Texte im Panel …“)
-- [ ] D1 Ankündigungs-Editor (sofort/zeitgesteuert, `scheduled_announcements`) — offen
+- [x] D2 Texte bearbeiten (`bot_texts`, Verlauf, Discord-Nachrichten aktualisieren) — fertig (08bf42d)
+- [x] D1 Ankündigungs-Editor (sofort/zeitgesteuert, `scheduled_announcements`) — fertig (Commit „Ankündigungen …“)
 - [ ] E1 Datenschutz-Seite (Auskunft/Löschung) — offen
 
 ### Phase 5 – Setup-Diff
@@ -115,6 +115,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 - **D2 Texte:** `TEXT_DEFINITIONS` (Willkommen, Regeln, Bewerbungs-Infotext, DM Annahme/Ablehnung, /help in drei Feldern) mit den bisherigen Texten als Standard (per Skript verschoben und gegen die alten Ausdrücke geprüft: wortgleich). Grenzen 4096/2000/1024, geprüft inkl. eingesetzter Platzhalter. Platzhalter `{loeschfrist}` im Bewerbungstext = Einstellung `application_retention_days`. Tabelle `bot_texts` mit Verlauf: neuester Eintrag je Schlüssel gilt, `value NULL` = Standard (Zurücksetzen bleibt im Verlauf sichtbar), höchstens 20 Fassungen je Text. `bot_text(key)` mit Cache. Gemeinsame Embed-Bauer `welcome_/rules_/application_message_embed()` für `setup_guild` und Panel; `refresh_text_message()` bearbeitet die feste Nachricht (nur `embed=…`, Buttons/custom_ids bleiben). Panel-Seite ab Admin mit vereinfachter Discord-Vorschau, Zeichenzähler, Verlauf („In den Editor laden“), Audit ohne Textinhalt. Hinweis: Eine geänderte Löschfrist erscheint im #bewerbung-Text erst beim nächsten Speichern des Texts oder Neustart.
 
+- **D1 Ankündigungen:** `validate_announcement()` (Titel 256, Text 4096, Fußzeile 2048, ≤ 10 Felder à 256/1024, gesamt ≤ 6000, Farbe #RRGGBB, Bilder nur https), `announcement_embed()`, `send_announcement()` (nur Kanäle mit view/send/embed_links, Erwähnung höchstens der gewählten Rolle aus `ANNOUNCEMENT_PING_ROLES` = Ping Valorant/Ping Events, nie @everyone/@here), `edit_sent_announcement()` (nur Embed, Kanal und Ping bleiben, kein neuer Ping). Tabelle `scheduled_announcements` (sofort gesendete werden auch gespeichert, damit man sie später bearbeiten kann; `sent_at NULL` = offen). Minuten-Task `announcements` sendet fällige; Fehler bleiben als `error` stehen statt minütlicher Wiederholung, Bearbeiten löscht den Fehler. Panel-Seite ab Admin mit Live-Vorschau, Bestätigung vor „sofort senden“, Liste mit Bearbeiten/Löschen (nur ungesendete). CSP `img-src` erlaubt jetzt `https:` für die Bildvorschau.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -148,6 +150,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - `rank_history` (C4)
 - `bot_settings` (D3)
 - `bot_texts` (D2, mit Verlauf)
+- `scheduled_announcements` (D1)
 - `scheduled_events`: neue Spalten `title`, `details`, `cancelled_at` (per `ALTER TABLE`, C2)
 
 ## Offene Fragen an Arvids
@@ -157,4 +160,4 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Nächstes Feature: D1 Ankündigungen (Embed-Editor mit Live-Vorschau, Zielkanal nur wo der Bot schreiben darf, optional Ping-Rolle aus NotificationView, nie @everyone/@here, sofort oder geplant über `scheduled_announcements` + Minuten-Task, geplante bearbeiten/löschen, gesendete bearbeiten, Admin+, Audit). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Nächstes Feature: E1 Datenschutz (Suche nach Name oder User-ID auch für Ausgetretene, Auskunft als JSON wie /meine-daten über gemeinsame Funktion, Löschung mit Pflichtfeld „Grund / Anfrage vom“ + Bestätigung, Audit nur „dass“ und „wer“; alle neuen Tabellen in `collect_user_data`/`delete_user_data`: `bot_settings.updated_by`, `bot_texts.updated_by`, `scheduled_announcements.created_by/updated_by` (anonymisieren statt löschen), `rank_history` schon drin). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

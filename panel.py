@@ -625,6 +625,19 @@ class PanelHooks:
     attendance_events: Callable[[int, int, int], tuple[list, dict[int, dict[int, str]]]]
     summarize_attendance: Callable[[list, dict, dict[int, int]], dict[int, dict]]
     attendance_rules: Callable[[], dict]
+    # Ankündigungen (D1): erlaubte Kanäle und Ping-Rollen, Prüfen (ValueError), Senden/Bearbeiten in Discord,
+    # Speicherung geplanter und gesendeter Ankündigungen (main.Announcement)
+    announcement_channels: Callable[[discord.Guild], list[discord.TextChannel]]
+    announcement_ping_roles: tuple[str, ...]
+    validate_announcement: Callable[[Any], dict]
+    send_announcement: Callable[[discord.Guild, int, dict], Awaitable[discord.Message]]
+    edit_sent_announcement: Callable[[discord.Guild, Any, dict], Awaitable[None]]
+    create_announcement: Callable[[int, int, dict, int | None, int], int]
+    get_announcement: Callable[[int], Any]
+    list_announcements: Callable[[int], list]
+    update_announcement: Callable[[int, int, dict, int | None, int], None]
+    delete_announcement: Callable[[int], bool]
+    mark_announcement_sent: Callable[[int, int], None]
     # Texte (D2): Übersicht, Verlauf, speichern (ValueError bei ungültigem Text), zurücksetzen,
     # feste Nachricht in Discord nachziehen (True, wenn eine gefunden und bearbeitet wurde)
     texts_overview: Callable[[], list[dict]]
@@ -656,7 +669,8 @@ class Panel:
         ws_origin = config.origin.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
         self.csp = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "img-src 'self' data: https://cdn.discordapp.com https://media.discordapp.net; "
+            # Beliebige https-Bilder, damit die Vorschau im Ankündigungs-Editor Bild-URLs zeigen kann.
+            "img-src 'self' data: https:; "
             f"connect-src 'self' {ws_origin}; frame-ancestors 'none'; base-uri 'none'; "
             "form-action 'self'; object-src 'none'"
         )
@@ -679,6 +693,10 @@ class Panel:
             web.get("/api/events", self.api_events),
             web.get("/api/attendance", self.api_attendance),
             web.get("/api/ranking", self.api_ranking),
+            web.get("/api/announcements", self.api_announcements),
+            web.post("/api/announcements", self.api_create_announcement),
+            web.post("/api/announcements/{announcement_id}", self.api_edit_announcement),
+            web.delete("/api/announcements/{announcement_id}", self.api_delete_announcement),
             web.get("/api/texts", self.api_texts),
             web.get("/api/texts/{key}/history", self.api_text_history),
             web.post("/api/texts/{key}", self.api_save_text),
@@ -1248,6 +1266,136 @@ class Panel:
             })
         rows.sort(key=lambda row: row["user"]["name"].casefold())
         return {"days": days, "since": since, "until": until, "events": len(events), "rules": rules, "players": rows}
+
+    def announcement_json(self, guild: discord.Guild, announcement) -> dict:
+        channel = guild.get_channel(announcement.channel_id)
+        status = "sent" if announcement.sent_at else ("failed" if announcement.error else "scheduled")
+        return {
+            "id": announcement.id,
+            "channel_id": str(announcement.channel_id),
+            "channel_name": channel.name if channel else "gelöschter Kanal",
+            "payload": announcement.payload,
+            "status": status,
+            "send_at": announcement.send_at,
+            "sent_at": announcement.sent_at,
+            "error": announcement.error,
+            "created_by": self.person(guild, announcement.created_by),
+            "updated_by": self.person(guild, announcement.updated_by),
+            "url": f"https://discord.com/channels/{guild.id}/{announcement.channel_id}/{announcement.message_id}" if announcement.message_id else None,
+        }
+
+    async def api_announcements(self, request: web.Request) -> web.Response:
+        self.authenticate(request, ADMIN)
+        guild = self.guild()
+        return web.json_response({
+            "channels": [
+                {"id": str(channel.id), "name": channel.name, "category": channel.category.name if channel.category else None}
+                for channel in self.hooks.announcement_channels(guild)
+            ],
+            "ping_roles": list(self.hooks.announcement_ping_roles),
+            "announcements": [self.announcement_json(guild, entry) for entry in self.hooks.list_announcements(guild.id)],
+        })
+
+    async def announcement_form(self, request: web.Request) -> tuple[dict, dict, int | None, int | None]:
+        """(Rohdaten, geprüfte Ankündigung, Kanal-ID, geplanter Zeitpunkt oder None für sofort)."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise json_error(400, "Ungültige Anfrage.")
+        try:
+            payload = self.hooks.validate_announcement(body)
+        except ValueError as error:
+            raise json_error(400, str(error)) from None
+        channel_id = parse_user_id(str(body.get("channel_id", "")))
+        send_at = None
+        if body.get("send_at"):
+            try:
+                moment = datetime.strptime(str(body["send_at"]), "%Y-%m-%dT%H:%M").replace(tzinfo=BERLIN)
+            except ValueError:
+                raise json_error(400, "Datum und Uhrzeit sind ungültig.") from None
+            send_at = int(moment.timestamp())
+            if send_at <= time.time():
+                raise json_error(400, "Der geplante Zeitpunkt muss in der Zukunft liegen.")
+        return body, payload, channel_id, send_at
+
+    def allowed_channel(self, channel_id: int | None) -> discord.TextChannel:
+        channel = next((channel for channel in self.hooks.announcement_channels(self.guild()) if channel.id == channel_id), None)
+        if channel is None:
+            raise json_error(400, "Bitte einen Kanal wählen, in dem der Bot schreiben darf.")
+        return channel
+
+    @staticmethod
+    def ping_text(payload: dict) -> str:
+        return f" mit Erwähnung von @{payload['ping_role']}" if payload["ping_role"] else ""
+
+    async def send_now(self, member: discord.Member, channel: discord.TextChannel, payload: dict, announcement_id: int | None) -> web.Response:
+        try:
+            message = await self.hooks.send_announcement(self.guild(), channel.id, payload)
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=400)
+        except discord.HTTPException:
+            log.exception("Ankündigung konnte nicht gesendet werden")
+            return web.json_response({"error": "Discord hat die Ankündigung abgelehnt. Details stehen im Log."}, status=502)
+        if announcement_id is None:
+            announcement_id = self.hooks.create_announcement(self.guild().id, channel.id, payload, int(time.time()), member.id)
+        else:
+            self.hooks.update_announcement(announcement_id, channel.id, payload, int(time.time()), member.id)
+        self.hooks.mark_announcement_sent(announcement_id, message.id)
+        await self.audit_action(member, f"hat eine Ankündigung in {channel.mention} gesendet{self.ping_text(payload)}")
+        return web.json_response({"message": f"In #{channel.name} gesendet.", "id": announcement_id})
+
+    async def api_create_announcement(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        _, payload, channel_id, send_at = await self.announcement_form(request)
+        channel = self.allowed_channel(channel_id)
+        if send_at is None:
+            return await self.send_now(member, channel, payload, None)
+        announcement_id = self.hooks.create_announcement(self.guild().id, channel.id, payload, send_at, member.id)
+        await self.audit_action(member, f"hat eine Ankündigung in {channel.mention} für <t:{send_at}:F> geplant{self.ping_text(payload)}")
+        return web.json_response({"message": f"Für #{channel.name} geplant.", "id": announcement_id})
+
+    def own_announcement(self, request: web.Request):
+        try:
+            announcement = self.hooks.get_announcement(int(request.match_info["announcement_id"]))
+        except ValueError:
+            announcement = None
+        if announcement is None or announcement.guild_id != self.hooks.guild_id:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Diese Ankündigung gibt es nicht."}), content_type="application/json")
+        return announcement
+
+    async def api_edit_announcement(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        announcement = self.own_announcement(request)
+        _, payload, channel_id, send_at = await self.announcement_form(request)
+        if announcement.sent_at:
+            # Gesendete: nur der Inhalt ändert sich, Kanal und Erwähnung bleiben wie verschickt.
+            payload["ping_role"] = announcement.payload.get("ping_role")
+            try:
+                await self.hooks.edit_sent_announcement(self.guild(), announcement, payload)
+            except ValueError as error:
+                return web.json_response({"error": str(error)}, status=400)
+            except discord.HTTPException:
+                log.exception("Ankündigung konnte nicht bearbeitet werden")
+                return web.json_response({"error": "Discord hat die Änderung abgelehnt. Details stehen im Log."}, status=502)
+            self.hooks.update_announcement(announcement.id, announcement.channel_id, payload, announcement.send_at, member.id)
+            await self.audit_action(member, f"hat eine gesendete Ankündigung in <#{announcement.channel_id}> bearbeitet")
+            return web.json_response({"message": "Die Nachricht in Discord wurde bearbeitet."})
+        channel = self.allowed_channel(channel_id)
+        if send_at is None:
+            return await self.send_now(member, channel, payload, announcement.id)
+        self.hooks.update_announcement(announcement.id, channel.id, payload, send_at, member.id)
+        await self.audit_action(member, f"hat eine geplante Ankündigung geändert ({channel.mention}, <t:{send_at}:F>)")
+        return web.json_response({"message": "Geplante Ankündigung gespeichert."})
+
+    async def api_delete_announcement(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        announcement = self.own_announcement(request)
+        if not self.hooks.delete_announcement(announcement.id):
+            raise json_error(400, "Gesendete Ankündigungen lassen sich hier nicht löschen.")
+        await self.audit_action(member, f"hat eine geplante Ankündigung für <#{announcement.channel_id}> gelöscht")
+        return web.json_response({"message": "Geplante Ankündigung gelöscht."})
 
     async def api_texts(self, request: web.Request) -> web.Response:
         self.authenticate(request, ADMIN)

@@ -239,6 +239,13 @@ def initialize_storage() -> None:
             "CREATE TABLE IF NOT EXISTS bot_settings ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_by INTEGER, updated_at INTEGER NOT NULL)"
         )
+        # Ankündigungen aus dem Panel: sofort gesendete und geplante (sent_at NULL = noch offen).
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS scheduled_announcements ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, "
+            "payload TEXT NOT NULL, send_at INTEGER, created_by INTEGER, created_at INTEGER NOT NULL, "
+            "updated_by INTEGER, updated_at INTEGER, sent_at INTEGER, message_id INTEGER, error TEXT)"
+        )
         # Texte mit Verlauf: der neueste Eintrag je Schlüssel gilt, value NULL heißt „Standard“.
         connection.execute(
             "CREATE TABLE IF NOT EXISTS bot_texts ("
@@ -1912,6 +1919,241 @@ async def refresh_text_message(guild: discord.Guild, key: str) -> bool:
             await message.edit(embed=build())
             return True
     return False
+
+
+# Rollen, die Mitglieder über die Buttons in #willkommen selbst abonnieren; nur diese dürfen gepingt werden.
+ANNOUNCEMENT_PING_ROLES = ("Ping Valorant", "Ping Events")
+ANNOUNCEMENT_MAX_FIELDS = 10
+ANNOUNCEMENT_COLOR = 0x6E46FF
+
+
+class Announcement(NamedTuple):
+    id: int
+    guild_id: int
+    channel_id: int
+    payload: dict
+    send_at: int | None
+    created_by: int | None
+    created_at: int
+    updated_by: int | None
+    updated_at: int | None
+    sent_at: int | None
+    message_id: int | None
+    error: str | None
+
+
+ANNOUNCEMENT_COLUMNS = (
+    "id, guild_id, channel_id, payload, send_at, created_by, created_at, updated_by, updated_at, sent_at, message_id, error"
+)
+
+
+def https_url(value, label: str) -> str | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or len(value) > 2048:
+        raise ValueError(f"{label}: Bitte eine gültige Adresse angeben.")
+    parsed = urlparse(value.strip())
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError(f"{label}: Nur https-Adressen sind erlaubt.")
+    return value.strip()
+
+
+def validate_announcement(data) -> dict:
+    """Prüft die Angaben aus dem Editor gegen die Grenzen von Discord und gibt sie bereinigt zurück."""
+    if not isinstance(data, dict):
+        raise ValueError("Ungültige Ankündigung.")
+
+    def clean(name: str, limit: int, label: str) -> str:
+        value = data.get(name) or ""
+        if not isinstance(value, str):
+            raise ValueError(f"{label}: Ungültiger Wert.")
+        value = value.strip()
+        if len(value) > limit:
+            raise ValueError(f"{label} darf höchstens {limit} Zeichen haben (jetzt {len(value)}).")
+        return value
+
+    title = clean("title", 256, "Der Titel")
+    description = clean("description", 4096, "Der Text")
+    footer = clean("footer", 2048, "Die Fußzeile")
+    if not title and not description:
+        raise ValueError("Bitte mindestens einen Titel oder Text eingeben.")
+    color = data.get("color") or f"#{ANNOUNCEMENT_COLOR:06x}"
+    if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise ValueError("Die Farbe muss im Format #RRGGBB angegeben werden.")
+    fields = data.get("fields") or []
+    if not isinstance(fields, list) or len(fields) > ANNOUNCEMENT_MAX_FIELDS:
+        raise ValueError(f"Höchstens {ANNOUNCEMENT_MAX_FIELDS} Felder sind möglich.")
+    clean_fields = []
+    for number, field in enumerate(fields, 1):
+        if not isinstance(field, dict):
+            raise ValueError(f"Feld {number} ist ungültig.")
+        name = field.get("name") if isinstance(field.get("name"), str) else ""
+        value = field.get("value") if isinstance(field.get("value"), str) else ""
+        name, value = name.strip(), value.strip()
+        if not name or not value:
+            raise ValueError(f"Feld {number}: Name und Inhalt dürfen nicht leer sein.")
+        if len(name) > 256 or len(value) > 1024:
+            raise ValueError(f"Feld {number}: Name höchstens 256, Inhalt höchstens 1024 Zeichen.")
+        clean_fields.append({"name": name, "value": value, "inline": field.get("inline") is True})
+    total = len(title) + len(description) + len(footer) + sum(len(field["name"]) + len(field["value"]) for field in clean_fields)
+    if total > 6000:
+        raise ValueError(f"Die ganze Ankündigung darf höchstens 6000 Zeichen haben (jetzt {total}).")
+    ping_role = data.get("ping_role") or None
+    if ping_role is not None and ping_role not in ANNOUNCEMENT_PING_ROLES:
+        raise ValueError("Diese Rolle darf nicht erwähnt werden.")
+    return {
+        "title": title,
+        "description": description,
+        "color": color.lower(),
+        "image_url": https_url(data.get("image_url"), "Bild"),
+        "thumbnail_url": https_url(data.get("thumbnail_url"), "Vorschaubild"),
+        "footer": footer,
+        "fields": clean_fields,
+        "ping_role": ping_role,
+    }
+
+
+def announcement_embed(payload: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=payload["title"] or None,
+        description=payload["description"] or None,
+        color=int(payload["color"][1:], 16),
+    )
+    for field in payload["fields"]:
+        embed.add_field(name=field["name"], value=field["value"], inline=field["inline"])
+    if payload["image_url"]:
+        embed.set_image(url=payload["image_url"])
+    if payload["thumbnail_url"]:
+        embed.set_thumbnail(url=payload["thumbnail_url"])
+    if payload["footer"]:
+        embed.set_footer(text=payload["footer"])
+    return embed
+
+
+def announcement_channels(guild: discord.Guild) -> list[discord.TextChannel]:
+    """Textkanäle, in denen der Bot schreiben und Embeds senden darf."""
+    return [
+        channel for channel in guild.text_channels
+        if (permissions := channel.permissions_for(guild.me)).view_channel and permissions.send_messages and permissions.embed_links
+    ]
+
+
+async def send_announcement(guild: discord.Guild, channel_id: int, payload: dict) -> discord.Message:
+    channel = next((channel for channel in announcement_channels(guild) if channel.id == channel_id), None)
+    if channel is None:
+        raise ValueError("In diesem Kanal darf der Bot nicht schreiben.")
+    role = find_role(guild, payload["ping_role"]) if payload["ping_role"] else None
+    if payload["ping_role"] and role is None:
+        raise ValueError(f"Die Rolle „{payload['ping_role']}“ gibt es nicht mehr.")
+    # Erwähnt wird höchstens die gewählte Ping-Rolle, nie @everyone oder @here.
+    return await channel.send(
+        content=role.mention if role else None,
+        embed=announcement_embed(payload),
+        allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=[role] if role else False),
+    )
+
+
+async def edit_sent_announcement(guild: discord.Guild, announcement: Announcement, payload: dict) -> None:
+    """Gesendete Ankündigung in Discord bearbeiten; der Ping wird dabei nicht wiederholt."""
+    channel = guild.get_channel(announcement.channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        raise ValueError("Der Kanal der Ankündigung existiert nicht mehr.")
+    try:
+        message = await channel.fetch_message(announcement.message_id)
+    except discord.NotFound:
+        raise ValueError("Die Ankündigung wurde in Discord gelöscht.") from None
+    await message.edit(embed=announcement_embed(payload), allowed_mentions=discord.AllowedMentions.none())
+
+
+def create_announcement(guild_id: int, channel_id: int, payload: dict, send_at: int | None, created_by: int) -> int:
+    with open_db() as connection:
+        cursor = connection.execute(
+            "INSERT INTO scheduled_announcements (guild_id, channel_id, payload, send_at, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (guild_id, channel_id, json.dumps(payload, ensure_ascii=False), send_at, created_by, int(time.time())),
+        )
+    return cursor.lastrowid
+
+
+def get_announcement(announcement_id: int) -> Announcement | None:
+    with open_db() as connection:
+        row = connection.execute(
+            f"SELECT {ANNOUNCEMENT_COLUMNS} FROM scheduled_announcements WHERE id = ?", (announcement_id,)
+        ).fetchone()
+    return Announcement(*row[:3], json.loads(row[3]), *row[4:]) if row else None
+
+
+def list_announcements(guild_id: int) -> list[Announcement]:
+    with open_db() as connection:
+        rows = connection.execute(
+            f"SELECT {ANNOUNCEMENT_COLUMNS} FROM scheduled_announcements WHERE guild_id = ? "
+            "ORDER BY sent_at IS NOT NULL, COALESCE(sent_at, send_at) DESC LIMIT 100",
+            (guild_id,),
+        ).fetchall()
+    return [Announcement(*row[:3], json.loads(row[3]), *row[4:]) for row in rows]
+
+
+def update_announcement(announcement_id: int, channel_id: int, payload: dict, send_at: int | None, updated_by: int) -> None:
+    # Bearbeiten löscht einen alten Fehler, damit der nächste Versuch wieder läuft.
+    with open_db() as connection:
+        connection.execute(
+            "UPDATE scheduled_announcements SET channel_id = ?, payload = ?, send_at = ?, updated_by = ?, updated_at = ?, error = NULL "
+            "WHERE id = ?",
+            (channel_id, json.dumps(payload, ensure_ascii=False), send_at, updated_by, int(time.time()), announcement_id),
+        )
+
+
+def delete_announcement(announcement_id: int) -> bool:
+    with open_db() as connection:
+        cursor = connection.execute(
+            "DELETE FROM scheduled_announcements WHERE id = ? AND sent_at IS NULL", (announcement_id,)
+        )
+    return cursor.rowcount == 1
+
+
+def mark_announcement_sent(announcement_id: int, message_id: int) -> None:
+    with open_db() as connection:
+        connection.execute(
+            "UPDATE scheduled_announcements SET sent_at = ?, message_id = ?, error = NULL WHERE id = ?",
+            (int(time.time()), message_id, announcement_id),
+        )
+
+
+def mark_announcement_failed(announcement_id: int, error: str) -> None:
+    with open_db() as connection:
+        connection.execute("UPDATE scheduled_announcements SET error = ? WHERE id = ?", (error[:500], announcement_id))
+
+
+def due_announcements(guild_id: int, now: int) -> list[Announcement]:
+    with open_db() as connection:
+        rows = connection.execute(
+            f"SELECT {ANNOUNCEMENT_COLUMNS} FROM scheduled_announcements WHERE guild_id = ? AND sent_at IS NULL "
+            "AND error IS NULL AND send_at <= ? ORDER BY send_at",
+            (guild_id, now),
+        ).fetchall()
+    return [Announcement(*row[:3], json.loads(row[3]), *row[4:]) for row in rows]
+
+
+ANNOUNCEMENT_LOCK = asyncio.Lock()
+
+
+async def send_due_announcements(guild: discord.Guild | None) -> int:
+    """Geplante Ankündigungen senden. Scheitert eine, bleibt sie mit Fehler stehen statt es jede Minute neu zu versuchen."""
+    if guild is None:
+        return 0
+    sent = 0
+    async with ANNOUNCEMENT_LOCK:
+        for announcement in due_announcements(guild.id, int(time.time())):
+            try:
+                message = await send_announcement(guild, announcement.channel_id, announcement.payload)
+            except (ValueError, discord.HTTPException) as error:
+                mark_announcement_failed(announcement.id, str(error))
+                log.warning("Geplante Ankündigung %s konnte nicht gesendet werden: %s", announcement.id, error)
+                continue
+            mark_announcement_sent(announcement.id, message.id)
+            sent += 1
+            await audit(guild, f"📣 Geplante Ankündigung in <#{announcement.channel_id}> gesendet", discord.Color.from_rgb(110, 70, 255))
+    return sent
 
 
 def collect_problems(loops: dict, now: float) -> dict[str, str | None]:
@@ -4312,6 +4554,15 @@ async def main(apply: bool) -> int | None:
             pass
 
     @tasks.loop(minutes=1)
+    @tracked("announcements")
+    async def scheduled_announcements():
+        await send_due_announcements(client.get_guild(target_id))
+
+    @scheduled_announcements.error
+    async def scheduled_announcements_error(error: Exception):
+        log.error("Fehler bei geplanten Ankündigungen", exc_info=error)
+
+    @tasks.loop(minutes=1)
     @tracked("check_alerts")
     async def check_alerts():
         # Darf nie stehen bleiben, sonst meldet niemand mehr Probleme.
@@ -4329,6 +4580,7 @@ async def main(apply: bool) -> int | None:
         "purge_declined_applications": ("Löschfristen", purge_declined_applications),
         "event_reminders": ("Termin-Erinnerungen", event_reminders),
         "backups": ("Backups", daily_backup),
+        "announcements": ("Geplante Ankündigungen", scheduled_announcements),
         "check_alerts": ("Warnungen prüfen", check_alerts),
     }
 
@@ -4419,6 +4671,8 @@ async def main(apply: bool) -> int | None:
                 event_reminders.start()
             if not daily_backup.is_running():
                 daily_backup.start()
+            if not scheduled_announcements.is_running():
+                scheduled_announcements.start()
             print("Onboarding-Bot läuft. Mit Ctrl+C beenden.")
         else:
             await client.close()
@@ -4484,6 +4738,17 @@ async def main(apply: bool) -> int | None:
                         "missing_limit": setting("attendance_missing_limit"),
                         "retention_days": setting("event_retention_days"),
                     },
+                    announcement_channels=announcement_channels,
+                    announcement_ping_roles=ANNOUNCEMENT_PING_ROLES,
+                    validate_announcement=validate_announcement,
+                    send_announcement=send_announcement,
+                    edit_sent_announcement=edit_sent_announcement,
+                    create_announcement=create_announcement,
+                    get_announcement=get_announcement,
+                    list_announcements=list_announcements,
+                    update_announcement=update_announcement,
+                    delete_announcement=delete_announcement,
+                    mark_announcement_sent=mark_announcement_sent,
                     texts_overview=texts_overview,
                     text_history=text_history,
                     save_text=save_text,

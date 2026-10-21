@@ -67,6 +67,8 @@ class FakeChannel:
     def __init__(self, channel_id: int, name: str, can_send: bool = True):
         self.id = channel_id
         self.name = name
+        self.mention = f"<#{channel_id}>"
+        self.category = None
         self.can_send = can_send
         self.send = mock.AsyncMock()
 
@@ -164,6 +166,17 @@ def make_hooks(client=None) -> panel.PanelHooks:
         attendance_events=lambda guild_id, since, until: ([], {}),
         summarize_attendance=main.summarize_attendance,
         attendance_rules=lambda: {"threshold": 50, "missing_limit": 2, "retention_days": 90},
+        announcement_channels=lambda guild: [channel for channel in guild.text_channels if channel.can_send],
+        announcement_ping_roles=main.ANNOUNCEMENT_PING_ROLES,
+        validate_announcement=main.validate_announcement,
+        send_announcement=mock.AsyncMock(return_value=SimpleNamespace(id=4242)),
+        edit_sent_announcement=mock.AsyncMock(),
+        create_announcement=mock.Mock(return_value=7),
+        get_announcement=lambda announcement_id: None,
+        list_announcements=lambda guild_id: [],
+        update_announcement=mock.Mock(),
+        delete_announcement=mock.Mock(return_value=True),
+        mark_announcement_sent=mock.Mock(),
         texts_overview=lambda: [
             {"key": "rules", "label": "Regeln (#regeln)", "limit": 4096, "value": "Regeln", "default": "Regeln",
              "is_default": True, "placeholders": {}, "posted_message": True, "updated_by": None, "updated_at": None},
@@ -1318,6 +1331,86 @@ class TextPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("nächsten Neustart", (await response.json())["message"])
         self.assertEqual(self.hooks.reset_text.call_args.args, ("rules", ADMIN_ID))
         self.assertIn("zurückgesetzt", self.hooks.audit.await_args.args[1])
+
+
+def stored_announcement(announcement_id: int, sent: bool, guild_id: int = 1) -> main.Announcement:
+    payload = main.validate_announcement({"title": "Alt", "description": "Text", "ping_role": "Ping Events"})
+    return main.Announcement(
+        announcement_id, guild_id, 111111111111111111, payload, 2**40, ADMIN_ID, 1000, None, None,
+        2000 if sent else None, 5555 if sent else None, None,
+    )
+
+
+class AnnouncementPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.stored = {1: stored_announcement(1, sent=False), 2: stored_announcement(2, sent=True), 3: stored_announcement(3, False, guild_id=99)}
+        self.hooks.get_announcement = self.stored.get
+        self.hooks.list_announcements = lambda guild_id: [entry for entry in self.stored.values() if entry.guild_id == guild_id]
+        self.client = TestClient(TestServer(panel.Panel(CONFIG, self.hooks).build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def request(self, method: str, path: str, body=None, user_id: int = ADMIN_ID):
+        session, cookie = session_cookie(user_id)
+        return await self.client.request(method, path, json=body, headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]})
+
+    def body(self, **changes) -> dict:
+        data = {"channel_id": "111111111111111111", "title": "Neue Saison", "description": "Los geht's", "send_at": None}
+        data.update(changes)
+        return data
+
+    async def test_overview(self):
+        self.assertEqual((await self.request("GET", "/api/announcements", user_id=COACH_ID)).status, 403)
+        data = await (await self.request("GET", "/api/announcements")).json()
+        self.assertEqual([channel["name"] for channel in data["channels"]], ["allgemein"])
+        self.assertEqual(data["ping_roles"], ["Ping Valorant", "Ping Events"])
+        self.assertEqual([(entry["id"], entry["status"]) for entry in data["announcements"]], [(1, "scheduled"), (2, "sent")])
+        self.assertEqual(data["announcements"][1]["url"], "https://discord.com/channels/1/111111111111111111/5555")
+
+    async def test_send_now(self):
+        response = await self.request("POST", "/api/announcements", self.body(ping_role="Ping Valorant"))
+        self.assertEqual(await response.json(), {"message": "In #allgemein gesendet.", "id": 7})
+        guild, channel_id, payload = self.hooks.send_announcement.await_args.args
+        self.assertEqual((channel_id, payload["ping_role"]), (111111111111111111, "Ping Valorant"))
+        self.hooks.mark_announcement_sent.assert_called_once_with(7, 4242)
+        self.assertIn("mit Erwähnung von @Ping Valorant", self.hooks.audit.await_args.args[1])
+
+    async def test_schedule_and_validation(self):
+        future = (datetime.now(main.BERLIN) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")
+        response = await self.request("POST", "/api/announcements", self.body(send_at=future))
+        self.assertEqual(response.status, 200)
+        self.hooks.send_announcement.assert_not_awaited()
+        self.assertIsNotNone(self.hooks.create_announcement.call_args.args[3])
+        for body, status in (
+            (self.body(send_at="2020-01-01T10:00"), 400),
+            (self.body(channel_id="222222222222222222"), 400),
+            (self.body(title="", description=""), 400),
+            (self.body(ping_role="@everyone"), 400),
+        ):
+            self.assertEqual((await self.request("POST", "/api/announcements", body)).status, status)
+        self.assertEqual((await self.request("POST", "/api/announcements", self.body(), user_id=COACH_ID)).status, 403)
+        self.hooks.send_announcement.assert_not_awaited()
+
+    async def test_edit(self):
+        response = await self.request("POST", "/api/announcements/2", self.body(title="Neu", ping_role=None))
+        self.assertEqual(response.status, 200)
+        guild, announcement, payload = self.hooks.edit_sent_announcement.await_args.args
+        self.assertEqual((announcement.id, payload["title"], payload["ping_role"]), (2, "Neu", "Ping Events"))
+        self.hooks.send_announcement.assert_not_awaited()
+        future = (datetime.now(main.BERLIN) + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M")
+        await self.request("POST", "/api/announcements/1", self.body(send_at=future))
+        self.assertEqual(self.hooks.update_announcement.call_args.args[0], 1)
+        await self.request("POST", "/api/announcements/1", self.body())
+        self.hooks.mark_announcement_sent.assert_called_once_with(1, 4242)
+        self.assertEqual((await self.request("POST", "/api/announcements/3", self.body())).status, 404)
+
+    async def test_delete(self):
+        self.assertEqual((await self.request("DELETE", "/api/announcements/1")).status, 200)
+        self.hooks.delete_announcement.return_value = False
+        self.assertEqual((await self.request("DELETE", "/api/announcements/2")).status, 400)
+        self.assertEqual((await self.request("DELETE", "/api/announcements/3")).status, 404)
+        self.assertEqual((await self.request("DELETE", "/api/announcements/abc")).status, 404)
 
 
 if __name__ == "__main__":
