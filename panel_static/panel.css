@@ -174,6 +174,18 @@ label:has(> .checkbox), label:has(> .radio), label:has(> .toggle) { display: inl
 .sidebar .brand { padding: 0 .5rem; }
 .sidebar .menu { width: 100%; padding: 0; gap: 1px; }
 .sidebar .menu a { color: inherit; text-decoration: none; }
+.sidebar .menu ul { margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.sidebar .menu ul::before { display: none; }
+.sidebar .menu .menu-title {
+  display: block;
+  padding: .9rem .75rem .3rem;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.sidebar .menu .nav-group:first-child .menu-title { padding-top: 0; }
 .sidebar .menu a.menu-active {
   background-color: color-mix(in oklab, var(--color-primary) 16%, transparent);
   color: var(--color-base-content);
@@ -361,6 +373,11 @@ tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--color-error); }
   }
   .brand { margin-bottom: 0; }
   .sidebar .menu { flex-flow: row nowrap; overflow-x: auto; padding-bottom: 2px; }
+  /* Auf dem Handy eine Zeile: Gruppentitel weg, ein Trenner zwischen den Gruppen. */
+  .sidebar .menu .nav-group { display: flex; }
+  .sidebar .menu .nav-group + .nav-group { border-left: var(--border) solid var(--line); margin-left: .35rem; padding-left: .35rem; }
+  .sidebar .menu .menu-title { display: none; }
+  .sidebar .menu ul { flex-direction: row; }
   .sidebar .menu a { white-space: nowrap; }
   .sidebar .menu a.menu-active { box-shadow: inset 0 -3px 0 var(--color-primary); }
   .user { margin-top: 0; }

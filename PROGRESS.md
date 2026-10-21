@@ -155,6 +155,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Statt shadcn (braucht React + Build, verboten) auf Wunsch daisyUI 5.7.50: nur die genutzten Komponenten als `panel_static/daisyui.css`, unverändert von jsDelivr zusammengefügt, ohne Tailwind und ohne Build. Eigene Klassen nur für Layout und Discord-Vorschau.
 - Kontrast: Primärrot `#eb1b29` mit weißer Schrift hat 4,45:1 (knapp unter 4,5); roter Text nutzt daher den Akzent (`#ff4d58` dunkel, `#c8101c` hell). Fehler-Knöpfe sind umrandet, damit sie sich vom roten Primärknopf abheben.
 - Standardfarbe neuer Ankündigungen ist jetzt `#eb1b29`.
+- [x] Navigation in Kategorien: Übersicht (Dashboard, Voice), Team (Termine, Anwesenheit, Rangliste, Spieler), Community (Bewerbungen, Tickets, Ankündigungen), Inhalte & Regeln (Texte, Einstellungen, Datenschutz), System (Konsole, Server-Setup, Backups). Gruppen ohne erlaubte Seite werden ausgeblendet; auf dem Handy eine Zeile mit Trennern statt Überschriften — fertig (Commit folgt)
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |

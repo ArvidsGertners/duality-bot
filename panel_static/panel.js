@@ -73,7 +73,7 @@ function setBanner(text) {
 /* Navigation */
 
 function showPage() {
-  const links = [...document.querySelectorAll("#nav a")].filter((link) => !link.parentElement.hidden);
+  const links = [...document.querySelectorAll("#nav a")].filter((link) => !link.closest("[hidden]"));
   const wanted = window.location.hash.slice(1);
   const current = links.find((link) => link.dataset.page === wanted) || links[0];
   if (!current) return;
@@ -1622,8 +1622,11 @@ async function init() {
   state.historyIndex = state.history.length;
   // Menüpunkte ohne Berechtigung ausblenden; der Server prüft die Rechte trotzdem bei jeder Anfrage.
   for (const element of document.querySelectorAll("[data-level]")) {
-    const target = element.closest("#nav") ? element.parentElement : element;
+    const target = element.closest("#nav") ? element.closest("li") : element;
     target.hidden = Number(element.dataset.level) > state.me.level;
+  }
+  for (const group of document.querySelectorAll("#nav .nav-group")) {
+    group.hidden = [...group.querySelectorAll("li")].every((item) => item.hidden);
   }
   $("#logout").addEventListener("click", logout);
   $("#command-form").addEventListener("submit", submitCommand);
