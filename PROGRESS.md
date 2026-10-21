@@ -152,6 +152,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - **21.10.2026, 15:30 UTC: Navigation in Kategorien deployt (241b998)**, vorher Backup `duality-backup-2026-10-21_173025.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, neue Navigation (5 Gruppen) wird ausgeliefert, gzip weiter aktiv.
 - **21.10.2026, 16:02 UTC: Design nach Variant-Entwurf deployt (46e9a8a)**, vorher Backup `duality-backup-2026-10-21_180201.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, neuer Stil (Theme-Knopf, dunkle Seitenleiste, Überzeilen) wird ausgeliefert, gzip aktiv.
 - **21.10.2026, 16:07 UTC: Duality-Logo deployt (b169451)**, vorher Backup `duality-backup-2026-10-21_180709.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, Logo auf Anmeldeseite und im Panel, Favicon wird als `image/svg+xml` ausgeliefert.
+- **21.10.2026, 16:38 UTC: Statistiken + Server-Wachstum deployt (e17879c)**, vorher Backup `duality-backup-2026-10-21_183845.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, neue Endpunkte ohne Login 401. Erster Match-Abruf beim Start: 2 Spieler mit je 20 Competitive-Matches (der dritte verknüpfte Account gehört jemandem, der den Server verlassen hat, wird übersprungen), Werte plausibel (gesamt K/D 1,11, HS 28,4 %, ACS 243, ADR 162). Wachstum: Zählbeginn 21.10. mit 9 Mitgliedern, 6 Beitritte vom 20.10. nachgetragen.
 
 ## Design-Update (Wunsch von Arvids, 21.10.2026)
 - [x] Panel in den Farben der Palette (`palette.ase`: `#eb1b29`, Schwarz, Weiß), Themes `duality-dark`/`duality-light`, Umschalter System/Hell/Dunkel in der Seitenleiste (Wahl nur im Browser gespeichert, `panel_static/theme.js`) — fertig (c827c7f)
@@ -164,7 +165,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 ## Neue Features (Wunsch von Arvids, 21.10.2026)
 - [x] Spieler-Statistiken: HenrikDev `stored-matches` beim täglichen Rang-Abgleich, Tabelle `match_stats` (90 Tage, in Auskunft/Löschung, neue Riot-ID löscht alte Matches), Seite „Statistiken“ (Team-Tabelle sortierbar, Detail mit Kennzahlen, Agents, Maps, letzten Matches), „Bewerber prüfen“ ohne Speichern (6/min je Staff), „Jetzt aktualisieren“ ab Admin, Einstellungen `stats_match_count` (20) und `stats_only_competitive` (an) — fertig (6f4919e)
-- [x] Server-Wachstum: Tabelle `member_flow` nur mit Tageszahlen (keine User-IDs, 400 Tage), Zählung bei Beitritt/Abgang, beim Start Mitgliederzahl + Nachtrag der Beitritte vor Zählbeginn aus `joined_at`; Dashboard-Karte mit Kacheln und SVG-Balkendiagramm (12 Wochen, Beitritte grün, Abgänge rot) — fertig (Commit folgt)
+- [x] Server-Wachstum: Tabelle `member_flow` nur mit Tageszahlen (keine User-IDs, 400 Tage), Zählung bei Beitritt/Abgang, beim Start Mitgliederzahl + Nachtrag der Beitritte vor Zählbeginn aus `joined_at`; Dashboard-Karte mit Kacheln und SVG-Balkendiagramm (12 Wochen, Beitritte grün, Abgänge rot) — fertig (e17879c)
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
