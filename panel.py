@@ -228,16 +228,28 @@ def json_error(status: int, message: str) -> web.HTTPException:
     return error_class(text=json.dumps({"error": message}), content_type="application/json")
 
 
+# Duality-Logo wie in panel_static/index.html; der linke Teil folgt der Textfarbe des Themes.
+LOGO_SVG = (
+    '<svg class="brand-logo" viewBox="190 190 700 700" aria-hidden="true" focusable="false">'
+    '<path class="logo-base" d="M206.5 511.416 L511.416 206.5 L511.416 816.331 Z '
+    'M454.247 344.256 L287.087 511.416 L454.247 678.575 Z"/>'
+    '<path class="logo-red" d="M568.584 873.5 L568.584 263.669 L873.5 568.584 L797.258 644.826 '
+    'L797.258 572.434 L740.09 515.265 L740.09 701.994 L682.921 759.163 L682.921 458.097 '
+    'L625.753 400.928 L625.753 816.331 Z"/></svg>'
+)
+
+
 def page(title: str, body: str, status: int = 200) -> web.Response:
     document = (
         '<!doctype html><html lang="de"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{html.escape(title)} · Duality-Panel</title>"
+        '<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">'
         '<script src="/static/theme.js"></script>'
         '<link rel="stylesheet" href="/static/daisyui.css">'
         '<link rel="stylesheet" href="/static/panel.css"></head>'
         '<body class="center-page"><main class="card narrow">'
-        '<div class="brand"><span class="brand-mark" aria-hidden="true"></span>Duality</div>'
+        f'<div class="brand">{LOGO_SVG}Duality</div>'
         f"<h1>{html.escape(title)}</h1>{body}</main></body></html>"
     )
     return web.Response(text=document, content_type="text/html", status=status, headers={"Cache-Control": "no-store"})

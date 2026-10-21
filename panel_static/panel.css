@@ -235,12 +235,10 @@ label:has(> .checkbox), label:has(> .radio), label:has(> .toggle) { display: inl
   text-transform: uppercase;
   margin-bottom: 1rem;
 }
-.brand-mark {
-  width: 17px;
-  height: 17px;
-  background: var(--color-primary);
-  transform: rotate(45deg);
-}
+/* Duality-Logo als Inline-SVG: linker Teil in Textfarbe (weiß auf dunkel, schwarz auf hell), rechter Teil rot */
+.brand-logo { width: 30px; height: 30px; flex: none; }
+.brand-logo .logo-base { fill: currentColor; }
+.brand-logo .logo-red { fill: var(--color-primary); }
 
 /* Grundlayout: schwarze Seitenleiste (immer dunkel, siehe data-theme im HTML), Inhalt mit Punktraster */
 .layout {

@@ -159,6 +159,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Standardfarbe neuer Ankündigungen ist jetzt `#eb1b29`.
 - [x] Navigation in Kategorien: Übersicht (Dashboard, Voice), Team (Termine, Anwesenheit, Rangliste, Spieler), Community (Bewerbungen, Tickets, Ankündigungen), Inhalte & Regeln (Texte, Einstellungen, Datenschutz), System (Konsole, Server-Setup, Backups). Gruppen ohne erlaubte Seite werden ausgeblendet; auf dem Handy eine Zeile mit Trennern statt Überschriften — fertig (241b998)
 - [x] Stil nach Arvids' Variant-Entwurf: schwarze Seitenleiste (auch im hellen Theme), eckige Flächen, Seitentitel in Großbuchstaben mit rotem „//“ und Überzeile aus der Navigationsgruppe, Kartenköpfe mit rotem Strich, Daten/Tabellen/Felder in Monospace, gefüllte Status-Badges, Punktraster im Hintergrund, Theme-Knopf (System → Hell → Dunkel). Deutsche Texte und echte Funktionen bleiben; Beispielinhalte aus dem Entwurf (Annehmen/Ablehnen, Auto-Moderation, Reset) bewusst nicht übernommen — fertig (46e9a8a)
+- [x] Duality-Logo (DM-Zeichen aus `Duality-DM.svg`/`Duality-DM-LightBG.svg`) statt Raute: als Inline-SVG in Seitenleiste und Anmeldeseite, linker Teil folgt der Textfarbe (weiß auf dunkel, schwarz auf hell), rechter Teil rot; dazu `favicon.svg` auf schwarzem Feld — fertig (Commit folgt)
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
