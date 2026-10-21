@@ -1982,33 +1982,14 @@ async def toggle_notification_role(interaction: discord.Interaction, role_name: 
 
 
 class NotificationView(DualityView):
+    # Rang und Hochschule laufen über /riot-id und /hochschule; hier bleiben nur die Pings.
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(ExclusiveRoleSelect(
-            role_names=VALORANT_RANKS,
-            placeholder="Deinen Valorant-Rang optional auswählen",
-            none_label="Keinen Rang anzeigen",
-            custom_id="duality:rank:set",
-            row=0,
-            saved_text="Dein angegebener Valorant-Rang ist jetzt **{}**. Du kannst ihn jederzeit hier ändern.",
-            cleared_text="Dein Valorant-Rang wird nicht mehr angezeigt.",
-            managed_by_riot_id=True,
-        ))
-        self.add_item(ExclusiveRoleSelect(
-            role_names=UNIVERSITY_ROLES,
-            placeholder="Deine Hochschule optional auswählen",
-            none_label="Keine Angabe",
-            custom_id="duality:university:set",
-            row=1,
-            saved_text="Deine Hochschule ist jetzt **{}**. Du kannst sie jederzeit hier ändern.",
-            cleared_text="Deine Hochschule wird nicht mehr angezeigt.",
-        ))
 
     @discord.ui.button(
         label="Valorant-Updates",
         style=discord.ButtonStyle.secondary,
         custom_id="duality:notify:valorant",
-        row=2,
     )
     async def valorant(self, interaction: discord.Interaction, button: discord.ui.Button):
         await toggle_notification_role(interaction, "Ping Valorant")
@@ -2017,86 +1998,12 @@ class NotificationView(DualityView):
         label="Community-Events",
         style=discord.ButtonStyle.secondary,
         custom_id="duality:notify:events",
-        row=2,
     )
     async def events(self, interaction: discord.Interaction, button: discord.ui.Button):
         await toggle_notification_role(interaction, "Ping Events")
 
 
 NO_ROLE_VALUE = "__none__"
-
-
-class ExclusiveRoleSelect(discord.ui.Select):
-    """Dropdown, bei dem höchstens eine Rolle aus einer Gruppe aktiv ist."""
-
-    def __init__(
-        self,
-        *,
-        role_names,
-        placeholder: str,
-        none_label: str,
-        custom_id: str,
-        row: int,
-        saved_text: str,
-        cleared_text: str,
-        managed_by_riot_id: bool = False,
-    ):
-        self.role_names = tuple(role_names)
-        self.saved_text = saved_text
-        self.cleared_text = cleared_text
-        self.managed_by_riot_id = managed_by_riot_id
-        options = [discord.SelectOption(label=name, value=name) for name in self.role_names]
-        options.append(discord.SelectOption(label=none_label, value=NO_ROLE_VALUE))
-        super().__init__(
-            placeholder=placeholder,
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id=custom_id,
-            row=row,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("Bitte nutze die Auswahl direkt auf dem Server.", ephemeral=True)
-            return
-        if self.managed_by_riot_id:
-            profile = get_profile(interaction.guild.id, interaction.user.id)
-            if profile and profile.riot_id:
-                await interaction.response.send_message(
-                    f"Dein Rang wird automatisch über deine Riot-ID **{discord.utils.escape_markdown(profile.riot_id)}** "
-                    "aktualisiert. Mit `/riot-id` ohne Angabe löst du die Verknüpfung.",
-                    ephemeral=True,
-                )
-                return
-
-        selected_name = self.values[0]
-        selected_role = None
-        if selected_name != NO_ROLE_VALUE:
-            selected_role = find_role(interaction.guild, selected_name)
-            if selected_name not in self.role_names or selected_role is None:
-                await interaction.response.send_message(
-                    "Diese Rolle ist noch nicht eingerichtet. Bitte informiere den Staff.", ephemeral=True
-                )
-                return
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            await set_exclusive_role(interaction.user, self.role_names, selected_role, "Rolle selbst im Dropdown gewählt")
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "Der Bot darf diese Rolle gerade nicht vergeben. Bitte prüfe, ob seine Rolle über den Auswahlrollen steht.",
-                ephemeral=True,
-            )
-            return
-        except discord.HTTPException:
-            await interaction.followup.send(
-                "Deine Auswahl konnte gerade nicht gespeichert werden. Bitte versuche es später erneut.", ephemeral=True
-            )
-            return
-
-        text = self.saved_text.format(selected_name) if selected_role else self.cleared_text
-        await interaction.followup.send(text, ephemeral=True)
 
 
 async def update_event_rsvps(interaction: discord.Interaction, choice: str) -> None:
@@ -2350,13 +2257,14 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
         )
         embed.add_field(
             name="Valorant-Team",
-            value="`#bewerbung` ist für alle sichtbar. Starte dort über den Button das Teamformular. Nach dem Absenden erhältst du `Bewerber` und kannst den Bewerbungskanal bis zur nächsten Saison nicht erneut nutzen. Deinen Rang und deine Hochschule kannst du optional in den Dropdowns in `#willkommen` angeben.",
+            value="`#bewerbung` ist für alle sichtbar. Starte dort über den Button das Teamformular. Nach dem Absenden erhältst du `Bewerber` und kannst den Bewerbungskanal bis zur nächsten Saison nicht erneut nutzen. Deinen Rang holt `/riot-id Name#Tag` automatisch, deine Hochschule änderst du mit `/hochschule`.",
             inline=False,
         )
         embed.add_field(
             name="Bot-Befehle",
             value="`/report` öffnet ein privates Ticket mit dem Staff (oder der Button in `#tickets`) · `/feedback` sendet eine Idee · "
             "`/profil` zeigt Rang, Rollen und Hochschule · `/riot-id` verknüpft deine Riot-ID für den automatischen Rang · "
+            "`/hochschule` ändert deine Hochschule · "
             "`/team` zeigt den aktuellen Kader · `/teamname` setzt optional deinen Namen für den Kader · "
             "`/meine-daten` zeigt, exportiert oder löscht deine gespeicherten Daten · "
             "`/termin` erstellt einen Teamtermin (Staff) · `/neue-saison` öffnet die Bewerbungen wieder (Staff).",
@@ -2585,9 +2493,12 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             await interaction.response.send_message("Dieser Befehl funktioniert nur im Server.", ephemeral=True)
             return
         if not riot_id:
+            await interaction.response.defer(ephemeral=True, thinking=True)
             update_profile(interaction.guild.id, interaction.user.id, riot_name=None, riot_tag=None, region=None, rank_tier=None, rank_synced_at=None)
-            await interaction.response.send_message(
-                "Deine Riot-ID ist nicht mehr verknüpft. Deinen Rang kannst du wieder selbst in `#willkommen` wählen.",
+            await set_exclusive_role(interaction.user, VALORANT_RANKS, None, "Riot-ID-Verknüpfung gelöst")
+            await interaction.followup.send(
+                "Deine Riot-ID ist nicht mehr verknüpft und deine Rangrolle wurde entfernt. "
+                "Mit `/riot-id Name#Tag` kannst du sie jederzeit wieder verknüpfen.",
                 ephemeral=True,
             )
             return
@@ -2611,6 +2522,32 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             + ". Der Bot aktualisiert ihn täglich.",
             ephemeral=True,
         )
+
+    @tree.command(name="hochschule", description="Legt fest oder ändert, an welcher Hochschule du bist.")
+    @app_commands.describe(hochschule="Deine Hochschule; „Keine Angabe“ entfernt die Rolle.")
+    @app_commands.choices(hochschule=[
+        *(app_commands.Choice(name=name, value=name) for name in UNIVERSITY_ROLES),
+        app_commands.Choice(name="Keine Angabe", value=NO_ROLE_VALUE),
+    ])
+    async def university_command(interaction: discord.Interaction, hochschule: app_commands.Choice[str]):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Dieser Befehl funktioniert nur im Server.", ephemeral=True)
+            return
+        selected_role = None
+        if hochschule.value != NO_ROLE_VALUE:
+            selected_role = find_role(interaction.guild, hochschule.value)
+            if selected_role is None:
+                await interaction.response.send_message(
+                    "Diese Hochschulrolle ist noch nicht eingerichtet. Bitte informiere den Staff.", ephemeral=True
+                )
+                return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await set_exclusive_role(interaction.user, UNIVERSITY_ROLES, selected_role, "Hochschule per /hochschule gewählt")
+        text = (
+            f"Deine Hochschule ist jetzt **{hochschule.value}**." if selected_role
+            else "Deine Hochschule wird nicht mehr angezeigt."
+        )
+        await interaction.followup.send(text, ephemeral=True)
 
     @tree.command(name="meine-daten", description="Zeigt, exportiert oder löscht, was der Bot über dich speichert.")
     @app_commands.checks.cooldown(1, 60.0, key=per_member_cooldown)
@@ -3076,12 +3013,19 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 "Für Fragen zum Bewerbungsablauf kannst du anschließend in `#bewerber-chat` schreiben. "
                 "Bewerbungen sind "
                 "ab 16 Jahren möglich; besonders wichtig sind Spielzeiten Mittwoch bis Sonntag ab 19 Uhr. "
-                "Deinen aktuellen Valorant-Rang kannst du optional über das Dropdown unter dieser Nachricht angeben "
-                "oder mit `/riot-id` deine Riot-ID verknüpfen; dann aktualisiert der Bot deinen Rang täglich automatisch.\n\n"
                 "Nach dem Absenden prüft der Staff deine Bewerbung. Zugang zum Teambereich gibt es erst nach einer Annahme.\n\n"
+                "**Rang, Hochschule und Profil**\n"
+                "• `/riot-id Name#Tag`: verknüpft deine Riot-ID. Der Bot holt deinen Valorant-Rang automatisch "
+                "und aktualisiert ihn täglich. `/riot-id` ohne Angabe löst die Verknüpfung wieder.\n"
+                "• `/hochschule`: ändert deine Hochschule (beim Beitritt fragt Discord sie schon ab).\n"
+                "• `/profil`: zeigt dein Profil mit Rang, Hochschule und Rollen.\n\n"
+                "**Eigener Voice-Channel**\n"
+                "Betritt `➕ Neuer Voice` oder `➕ Neuer Valorant-Voice`, dann bekommst du einen eigenen Kanal. "
+                "Er verschwindet, sobald er leer ist.\n\n"
                 "**Benachrichtigungen**\n"
-                "Nutze die Buttons unter dieser Nachricht, um freiwillig Pings für Valorant-Updates oder Community-Events zu erhalten."
-                " Deinen Valorant-Rang und deine Hochschule kannst du optional über die Dropdowns hier angeben, ändern oder wieder entfernen."
+                "Nutze die Buttons unter dieser Nachricht, um freiwillig Pings für Valorant-Updates oder Community-Events zu erhalten. "
+                "Ein zweiter Klick schaltet sie wieder ab.\n\n"
+                "Alle Befehle findest du mit `/help`."
             ),
             color=discord.Color.from_rgb(110, 70, 255),
         )
