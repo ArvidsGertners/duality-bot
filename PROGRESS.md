@@ -9,16 +9,16 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] `update-mac.sh`: PROGRESS.md, PANEL_PROMPT.md, README.md in `FILES`, Prüfung `-f` → `-e` — fertig (746936f)
 
 ### Phase 1 – Grundgerüst (A1, A2)
-- [x] aiohttp-Server in derselben Event-Loop + Healthcheck `/healthz` — fertig (Commit „Panel: Grundgerüst …“)
+- [x] aiohttp-Server in derselben Event-Loop + Healthcheck `/healthz` — fertig (4a8fd5a)
 - [x] Discord-OAuth2-Login (Scope `identify`, `state`-Prüfung) — fertig (dto.)
 - [x] Signierte Session-Cookies (HMAC-SHA256, 12 h, HttpOnly/Secure/SameSite=Lax) — fertig (dto.)
 - [x] Rechte-Stufen Coach/Admin/Owner, live bei jeder Anfrage — fertig (dto.)
-- [x] CSRF-Schutz (Token + Origin) für POST — fertig (dto.); WebSocket folgt mit der Konsole
-- [x] Rate-Limit Login (10 Versuche / 5 min pro IP) — fertig (dto.); Konsolenbefehle folgen mit der Konsole
-- [ ] Log-Handler mit Ringpuffer + `print`-Ausgaben im Panel — offen
-- [ ] WebSocket-Konsole mit Whitelist-Befehlen (A2), CSRF + Rate-Limit für WS — offen
+- [x] CSRF-Schutz (Token + Origin) für POST (4a8fd5a) und WebSocket (Konsolen-Commit)
+- [x] Rate-Limit Login 10/5 min pro IP (4a8fd5a), Konsolenbefehle 20/min pro Person (Konsolen-Commit)
+- [x] Log-Handler mit Ringpuffer (1000) + `print`-Ausgaben im Panel — fertig (Commit „Panel: Live-Konsole …“)
+- [x] WebSocket-Konsole `/ws` mit Whitelist-Befehlen help, sync-ranks, reminders, purge, cleanup-voice, say, restart — fertig (dto.); `status`/`tasks` kommen mit dem Dashboard, `backup` mit B2
 - [ ] Dashboard (A1) — offen
-- [x] Tests ohne Discord-Verbindung: Session, CSRF, Rate-Limit, Konfiguration, Rechte, HTTP-Endpunkte — fertig (dto.); Parser-Tests folgen mit der Konsole
+- [x] Tests ohne Discord-Verbindung: Session, CSRF, Rate-Limit, Konfiguration, Rechte, HTTP-Endpunkte, Parser, Log-Puffer, WebSocket-Befehle (47 Tests)
 
 ### Phase 2 – Betrieb
 - [ ] B1 Fehler-Benachrichtigung (Webhook, Entprellung, „wieder in Ordnung“) — offen
@@ -66,6 +66,14 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - `PANEL_BASE_URL` ohne Pfad; `http://` nur für localhost (SSH-Tunnel), sonst HTTPS. Secure-Cookie nur bei HTTPS.
 - Rate-Limit nutzt `X-Forwarded-For` nur, wenn die Anfrage von 127.0.0.1/::1 kommt (Reverse-Proxy).
 - `aiohttp==3.14.5` in `requirements.txt` gepinnt (lokal getestete Version, passt zu discord.py 2.7.1).
+- `print()` → Panel über schmalen stdout-Wrapper (`ConsoleStdout`) statt Umstellung auf `log.info`: keine der ~120 `print`-Zeilen ändert sich, Terminal-/Journal-Ausgabe bleibt identisch (wichtig für B3), nur eine kleine Klasse. Wird nur mit aktivem Panel installiert und beim Beenden zurückgesetzt.
+- Kein token-ähnlicher Text im Repo (GitHub-Push-Schutz hat einen Fake-Bot-Token im Test blockiert). Der Schwärzungstest für Bot-Tokens liest `DISCORD_BOT_TOKEN` aus der Umgebung oder aus `.env` (gitignored) und wird ohne Token übersprungen. Fehlermeldung gibt den Token nie aus. Der blockierte lokale Commit wurde per `git reset --soft` ersetzt (war nie gepusht).
+- Log-Handler hängt an den Loggern `duality` und `discord`. Bei Fehlern geht nur „Typ: Text“ ans Panel, kein Stacktrace (der bleibt im Journal). Token-, Webhook-, Bearer- und HDEV-Muster werden vor dem Anzeigen geschwärzt.
+- Logik aus den Loops in gemeinsame Funktionen gezogen: `sync_all_ranks`/`sync_ranks_now` (mit `RANK_SYNC_LOCK`), `purge_expired_data`, `send_due_event_reminders` (jetzt mit `REMINDER_LOCK`, gibt Anzahl zurück), `clean_up_temp_voice` gibt Anzahl zurück.
+- Rechte der Befehle: Coach nur `help` (+ später `status`/`tasks`), Admin alle steuernden, Owner zusätzlich `restart`. `say` und `restart` brauchen Bestätigung, der Server lehnt sie ohne `confirm` ab.
+- Steuernde Befehle: vor dem Ausführen Log-Eintrag + Audit-Eintrag „🖥️ Panel-Befehl von @Person: <Befehlszeile>“.
+- `restart`: `client.close()`, Panel und HenrikDev-Client werden sauber beendet, Prozess endet mit Exit-Code 75 (`RESTART_EXIT_CODE`), damit systemd bei `Restart=always` und `Restart=on-failure` neu startet.
+- Offene Konsolen werden alle 5 s geprüft; bei Rollenentzug, Abmelden oder Session-Ablauf schließt der Server mit Code 4403, das Frontend lädt dann neu. Sonst verbindet es sich mit Backoff (1–15 s) neu und lädt den Puffer neu.
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
@@ -82,10 +90,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 _(noch keine)_
 
 ## Offene Fragen an Arvids
-_(noch keine)_
+- Wie ist `Restart=` in der systemd-Unit `duality-bot` gesetzt? Der Neustart aus dem Panel braucht `Restart=always` oder `Restart=on-failure` (Exit-Code 75).
 
 ## Bekannte Probleme
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 1: Live-Konsole (Log-Handler + Ringpuffer, stdout-Tee, WebSocket `/ws` mit CSRF, Whitelist-Befehle, Rate-Limit).
+Phase 1: Dashboard (A1) mit Task-Status (letzter/nächster Lauf, letzter Fehler), Gateway-Status, HenrikDev-Status, Live-Update per WebSocket; Befehle `status` und `tasks`.

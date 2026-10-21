@@ -151,6 +151,9 @@ DEFAULT_GUILD_ID = "1562056155558056027"
 # ändern. Dann setzt das nächste --apply die verwalteten Rechte einmal neu;
 # sonst bleiben manuelle Anpassungen der Admins bei Neustarts erhalten.
 PERMISSIONS_VERSION = 2
+# Exit-Code für „Neustart aus dem Panel“. Nicht 0, damit systemd den Dienst
+# sowohl mit Restart=always als auch mit Restart=on-failure wieder startet.
+RESTART_EXIT_CODE = 75
 
 
 @contextmanager
@@ -955,6 +958,46 @@ async def sync_member_rank(member: discord.Member, profile: Profile) -> str:
     selected_role = find_role(member.guild, role_name) if role_name else None
     await set_exclusive_role(member, VALORANT_RANKS, selected_role, "Valorant-Rang automatisch über Riot-ID aktualisiert")
     return tier_name
+
+
+RANK_SYNC_LOCK = asyncio.Lock()
+
+
+async def sync_all_ranks(guild: discord.Guild) -> int:
+    """Gleicht alle verknüpften Ränge nacheinander ab. Gibt die Zahl der erfolgreichen Abgleiche zurück."""
+    async with RANK_SYNC_LOCK:
+        synced = 0
+        for profile in linked_profiles(guild.id):
+            member = guild.get_member(profile.user_id)
+            if member is None:
+                continue
+            try:
+                await sync_member_rank(member, profile)
+                synced += 1
+            except (RankLookupError, discord.HTTPException) as error:
+                log.warning("Rang von %s konnte nicht aktualisiert werden: %s", profile.user_id, error)
+            # Abstand halten, damit der API-Key nicht ins Rate-Limit läuft.
+            await asyncio.sleep(RANK_SYNC_DELAY_SECONDS)
+        log.info("%s Ränge über Riot-ID aktualisiert", synced)
+        return synced
+
+
+async def sync_ranks_now(guild: discord.Guild, member: discord.Member | None = None) -> str:
+    """Rang-Abgleich auf Befehl aus dem Panel: alle oder eine Person. Gibt eine Rückmeldung zurück."""
+    if RANK_CLIENT is None:
+        return "Die automatische Rangabfrage ist ausgeschaltet (HENRIKDEV_API_KEY fehlt)."
+    if member is None:
+        if RANK_SYNC_LOCK.locked():
+            return "Ein Rang-Abgleich läuft bereits."
+        return f"{await sync_all_ranks(guild)} Ränge aktualisiert."
+    profile = get_profile(guild.id, member.id)
+    if profile is None or profile.riot_id is None:
+        return f"{member.display_name} hat keine Riot-ID verknüpft."
+    try:
+        tier_name = await sync_member_rank(member, profile)
+    except (RankLookupError, discord.HTTPException) as error:
+        return f"Der Rang von {member.display_name} konnte nicht abgeglichen werden: {error}"
+    return f"Rang von {member.display_name}: {tier_name}"
 
 
 def run_in_background(coroutine) -> None:
@@ -1864,8 +1907,9 @@ async def handle_temp_voice(member: discord.Member, before: discord.VoiceState, 
             delete_temp_voice(before.channel.id)
 
 
-async def clean_up_temp_voice(guild: discord.Guild) -> None:
+async def clean_up_temp_voice(guild: discord.Guild) -> int:
     # Nach einem Neustart sind leere Kanäle übrig, deren Verlassen der Bot nicht mitbekommen hat.
+    removed = 0
     for channel_id in temp_voice_ids(guild.id):
         channel = guild.get_channel(channel_id)
         if channel is None:
@@ -1874,8 +1918,10 @@ async def clean_up_temp_voice(guild: discord.Guild) -> None:
             try:
                 await channel.delete(reason="Temporärer Voice-Channel ist leer")
                 delete_temp_voice(channel_id)
+                removed += 1
             except discord.HTTPException:
                 log.warning("Leerer Voice-Channel %s konnte nicht gelöscht werden", channel_id)
+    return removed
 
 
 async def audit(guild: discord.Guild, text: str, color: discord.Color = discord.Color.dark_grey()) -> None:
@@ -1923,6 +1969,30 @@ async def audit_message_delete(guild: discord.Guild, payload: discord.RawMessage
         if message.attachments:
             text += f"\n{len(message.attachments)} Anhang/Anhänge"
     await audit(guild, text, discord.Color.red())
+
+
+async def purge_expired_data(guild: discord.Guild | None) -> tuple[int, int]:
+    """Wendet die Löschfristen an. Gibt (gelöschte Termine, gelöschte Bewerbungen) zurück."""
+    now = int(time.time())
+    removed_events = delete_past_events(now - EVENT_RETENTION_DAYS * 24 * 60 * 60)
+    if removed_events:
+        log.info("%s vergangene Termine aus der Datenbank entfernt", removed_events)
+
+    staff_channel = find_text_channel(guild, "bewerbungen") if guild else None
+    if staff_channel is None:
+        return removed_events, 0
+    removed_applications = 0
+    cutoff = now - APPLICATION_RETENTION_DAYS * 24 * 60 * 60
+    for application in expired_applications(guild.id, cutoff):
+        try:
+            message = await staff_channel.fetch_message(application.message_id)
+            await message.delete()
+        except discord.NotFound:
+            pass
+        delete_application(application.message_id)
+        removed_applications += 1
+        log.info("Bewerbung nach %s Tagen gelöscht", APPLICATION_RETENTION_DAYS)
+    return removed_events, removed_applications
 
 
 async def delete_my_applications(guild: discord.Guild, user_id: int) -> int:
@@ -2077,7 +2147,17 @@ class EventRSVPView(DualityView):
         await update_event_rsvps(interaction, "declined")
 
 
-async def send_due_event_reminders(client: discord.Client) -> None:
+REMINDER_LOCK = asyncio.Lock()
+
+
+async def send_due_event_reminders(client: discord.Client) -> int:
+    # Läuft minütlich und auf Befehl aus dem Panel; der Lock verhindert doppelte Erinnerungen.
+    async with REMINDER_LOCK:
+        return await _send_due_event_reminders_locked(client)
+
+
+async def _send_due_event_reminders_locked(client: discord.Client) -> int:
+    sent = 0
     now = int(time.time())
     for message_id, guild_id, channel_id, starts_at in get_upcoming_events(now):
         seconds_until_start = starts_at - now
@@ -2156,6 +2236,8 @@ async def send_due_event_reminders(client: discord.Client) -> None:
             continue
 
         mark_event_reminder_sent(message_id, reminder_key)
+        sent += 1
+    return sent
 
 
 async def register_existing_scheduled_events(guild: discord.Guild) -> int:
@@ -3051,7 +3133,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             print("  Willkommensnachricht in #willkommen veröffentlicht")
 
 
-async def main(apply: bool) -> None:
+async def main(apply: bool) -> int | None:
     print("Duality-Setup wird gestartet.", flush=True)
     print(f"Python {sys.version.split()[0]} | discord.py {discord.__version__}", flush=True)
     token = os.getenv("DISCORD_BOT_TOKEN")
@@ -3102,19 +3184,7 @@ async def main(apply: bool) -> None:
         guild = client.get_guild(target_id)
         if guild is None or RANK_CLIENT is None:
             return
-        synced = 0
-        for profile in linked_profiles(guild.id):
-            member = guild.get_member(profile.user_id)
-            if member is None:
-                continue
-            try:
-                await sync_member_rank(member, profile)
-                synced += 1
-            except (RankLookupError, discord.HTTPException) as error:
-                log.warning("Rang von %s konnte nicht aktualisiert werden: %s", profile.user_id, error)
-            # Abstand halten, damit der API-Key nicht ins Rate-Limit läuft.
-            await asyncio.sleep(RANK_SYNC_DELAY_SECONDS)
-        log.info("%s Ränge über Riot-ID aktualisiert", synced)
+        await sync_all_ranks(guild)
 
     @sync_ranks.error
     async def sync_ranks_error(error: Exception):
@@ -3122,26 +3192,7 @@ async def main(apply: bool) -> None:
 
     @tasks.loop(hours=24)
     async def purge_declined_applications():
-        now = int(time.time())
-        removed_events = delete_past_events(now - EVENT_RETENTION_DAYS * 24 * 60 * 60)
-        if removed_events:
-            log.info("%s vergangene Termine aus der Datenbank entfernt", removed_events)
-
-        guild = client.get_guild(target_id)
-        if guild is None:
-            return
-        staff_channel = find_text_channel(guild, "bewerbungen")
-        if staff_channel is None:
-            return
-        cutoff = now - APPLICATION_RETENTION_DAYS * 24 * 60 * 60
-        for application in expired_applications(guild.id, cutoff):
-            try:
-                message = await staff_channel.fetch_message(application.message_id)
-                await message.delete()
-            except discord.NotFound:
-                pass
-            delete_application(application.message_id)
-            log.info("Bewerbung nach %s Tagen gelöscht", APPLICATION_RETENTION_DAYS)
+        await purge_expired_data(client.get_guild(target_id))
 
     @purge_declined_applications.error
     async def purge_declined_applications_error(error: Exception):
@@ -3238,6 +3289,14 @@ async def main(apply: bool) -> None:
         else:
             await client.close()
 
+    restart_requested = False
+
+    async def request_restart() -> None:
+        nonlocal restart_requested
+        restart_requested = True
+        log.warning("Neustart über das Web-Panel angefordert")
+        await client.close()
+
     panel_runner = None
     try:
         if os.getenv("PANEL_ENABLED") == "1":
@@ -3249,6 +3308,11 @@ async def main(apply: bool) -> None:
                     guild_id=target_id,
                     staff_level=staff_level,
                     audit=audit,
+                    sync_ranks=sync_ranks_now,
+                    send_reminders=lambda: send_due_event_reminders(client),
+                    purge=purge_expired_data,
+                    cleanup_voice=clean_up_temp_voice,
+                    restart=request_restart,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)
@@ -3260,6 +3324,10 @@ async def main(apply: bool) -> None:
             await panel_runner.cleanup()
         if RANK_CLIENT:
             await RANK_CLIENT.close()
+    if restart_requested:
+        print("Bot beendet sich für den Neustart; systemd startet ihn wieder.", flush=True)
+        return RESTART_EXIT_CODE
+    return None
 
 
 if __name__ == "__main__":
@@ -3271,6 +3339,6 @@ if __name__ == "__main__":
         logging.getLogger("discord.gateway").setLevel(logging.DEBUG)
         print("Gateway-Diagnose ist aktiviert.", flush=True)
     try:
-        asyncio.run(main(args.apply))
+        sys.exit(asyncio.run(main(args.apply)))
     except KeyboardInterrupt:
         print("Bot beendet.")

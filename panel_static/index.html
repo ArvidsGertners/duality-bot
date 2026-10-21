@@ -15,6 +15,7 @@
       <nav aria-label="Bereiche">
         <ul id="nav">
           <li><a href="#dashboard" data-page="dashboard" data-level="1">Dashboard</a></li>
+          <li><a href="#konsole" data-page="konsole" data-level="1">Konsole</a></li>
         </ul>
       </nav>
       <div class="user">
@@ -34,7 +35,46 @@
         <h1 id="title-dashboard">Dashboard</h1>
         <p class="muted">Willkommen im Panel. Weitere Bereiche folgen.</p>
       </section>
+
+      <section id="page-konsole" class="page" aria-labelledby="title-konsole" hidden>
+        <h1 id="title-konsole">Konsole</h1>
+        <div class="console">
+          <div class="console-toolbar">
+            <fieldset>
+              <legend>Angezeigte Level</legend>
+              <label><input type="checkbox" name="log-level" value="DEBUG"> Debug</label>
+              <label><input type="checkbox" name="log-level" value="INFO" checked> Info</label>
+              <label><input type="checkbox" name="log-level" value="WARNING" checked> Warnung</label>
+              <label><input type="checkbox" name="log-level" value="ERROR" checked> Fehler</label>
+            </fieldset>
+            <label class="visually-hidden" for="log-search">Im Log suchen</label>
+            <input type="search" id="log-search" placeholder="Im Log suchen …">
+            <button type="button" id="log-pause" aria-pressed="false">Auto-Scroll pausieren</button>
+          </div>
+          <ol class="log" id="log" aria-label="Log-Ausgabe"></ol>
+          <form class="command-line" id="command-form" autocomplete="off">
+            <label class="visually-hidden" for="command-input">Befehl</label>
+            <input id="command-input" list="command-list" placeholder="Befehl, z. B. help (Tab ergänzt, ↑/↓ Verlauf)"
+                   spellcheck="false" autocapitalize="off" maxlength="2100">
+            <datalist id="command-list"></datalist>
+            <button type="submit" class="primary">Ausführen</button>
+          </form>
+        </div>
+      </section>
     </main>
+  </div>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title">Wirklich ausführen?</h2>
+      <p id="confirm-text"></p>
+      <p class="mono" id="confirm-command"></p>
+      <div class="actions">
+        <button value="cancel" type="submit" autofocus>Abbrechen</button>
+        <button value="ok" type="submit" class="danger" id="confirm-ok">Ausführen</button>
+      </div>
+    </form>
+  </dialog>
   </div>
 </body>
 </html>

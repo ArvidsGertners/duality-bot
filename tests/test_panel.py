@@ -1,5 +1,9 @@
 """Tests für das Web-Panel ohne Discord-Verbindung: python -m unittest discover -s tests"""
 
+import asyncio
+import io
+import logging
+import os
 import sys
 import tempfile
 import unittest
@@ -16,6 +20,21 @@ import main
 import panel
 
 
+def env_value(name: str) -> str | None:
+    """Wert aus der Umgebung oder aus .env im Projektordner; echte Tokens stehen nie im Code."""
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        lines = (Path(__file__).resolve().parent.parent / ".env").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, separator, value = line.strip().removeprefix("export ").partition("=")
+        if separator and key.strip() == name:
+            return value.strip().strip("'\"") or None
+    return None
+
+
 SECRET = b"x" * 40
 ORIGIN = "http://localhost:8080"
 CONFIG = panel.PanelConfig(client_id="123", client_secret="geheim", base_url=ORIGIN, secret_key=SECRET)
@@ -24,6 +43,7 @@ CONFIG = panel.PanelConfig(client_id="123", client_secret="geheim", base_url=ORI
 class FakeMember:
     def __init__(self, user_id: int, name: str):
         self.id = user_id
+        self.mention = f"<@{user_id}>"
         self.display_name = name
         self.display_avatar = SimpleNamespace(url="https://cdn.discordapp.com/embed/avatars/0.png")
         self.bot = False
@@ -32,14 +52,30 @@ class FakeMember:
         return self.display_name
 
 
+class FakeChannel:
+    def __init__(self, channel_id: int, name: str, can_send: bool = True):
+        self.id = channel_id
+        self.name = name
+        self.can_send = can_send
+        self.send = mock.AsyncMock()
+
+    def permissions_for(self, member):
+        return SimpleNamespace(view_channel=True, send_messages=self.can_send)
+
+
 class FakeGuild:
     def __init__(self, members):
         self.id = 1
         self.name = "Duality Test"
+        self.me = FakeMember(1, "Duality-Bot")
         self.members = {member.id: member for member in members}
+        self.text_channels = [FakeChannel(111111111111111111, "allgemein"), FakeChannel(222222222222222222, "Orga", can_send=False)]
 
     def get_member(self, user_id: int):
         return self.members.get(user_id)
+
+    def get_channel(self, channel_id: int):
+        return next((channel for channel in self.text_channels if channel.id == channel_id), None)
 
 
 class FakeClient:
@@ -54,21 +90,23 @@ class FakeClient:
         return self.ready
 
 
-OWNER_ID, ADMIN_ID, COACH_ID, PLAYER_ID = 10, 20, 30, 40
+OWNER_ID, ADMIN_ID, COACH_ID, PLAYER_ID = 100000000000000010, 100000000000000020, 100000000000000030, 100000000000000040
 LEVELS = {OWNER_ID: panel.OWNER, ADMIN_ID: panel.ADMIN, COACH_ID: panel.COACH}
 
 
 def make_hooks(client=None) -> panel.PanelHooks:
     guild = FakeGuild([FakeMember(user_id, f"Person {user_id}") for user_id in (OWNER_ID, ADMIN_ID, COACH_ID, PLAYER_ID)])
 
-    async def audit(guild, text, color=None):
-        return None
-
     return panel.PanelHooks(
         client=client or FakeClient(guild),
         guild_id=1,
         staff_level=lambda member: LEVELS.get(member.id, 0),
-        audit=audit,
+        audit=mock.AsyncMock(),
+        sync_ranks=mock.AsyncMock(return_value="Rang abgeglichen"),
+        send_reminders=mock.AsyncMock(return_value=1),
+        purge=mock.AsyncMock(return_value=(2, 3)),
+        cleanup_voice=mock.AsyncMock(return_value=4),
+        restart=mock.AsyncMock(),
     )
 
 
@@ -306,6 +344,257 @@ class PanelHttpTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(panel.LOGIN_ATTEMPTS):
             self.assertEqual((await self.client.get("/auth/login", allow_redirects=False)).status, 302)
         self.assertEqual((await self.client.get("/auth/login", allow_redirects=False)).status, 429)
+
+
+class ParserTests(unittest.TestCase):
+    def test_command_line(self):
+        self.assertEqual(panel.parse_command_line("  SAY  #allgemein  Hallo   Welt "), ("say", "#allgemein  Hallo   Welt"))
+        self.assertEqual(panel.parse_command_line("help"), ("help", ""))
+        self.assertEqual(panel.parse_command_line("   "), ("", ""))
+
+    def test_user_id(self):
+        self.assertEqual(panel.parse_user_id("<@123456789012345678>"), 123456789012345678)
+        self.assertEqual(panel.parse_user_id("<@!123456789012345678>"), 123456789012345678)
+        self.assertEqual(panel.parse_user_id(" 123456789012345678 "), 123456789012345678)
+        for invalid in ("@Max", "12", "<@12a>", "123456789012345678 x"):
+            self.assertIsNone(panel.parse_user_id(invalid))
+
+    def test_find_channel(self):
+        guild = FakeGuild([])
+        allgemein = guild.text_channels[0]
+        for text in ("#allgemein", "allgemein", "#ALLGEMEIN", "<#111111111111111111>", "111111111111111111"):
+            self.assertIs(panel.find_channel(guild, text), allgemein)
+        self.assertIsNone(panel.find_channel(guild, "#gibtsnicht"))
+        self.assertIsNone(panel.find_channel(guild, "<#999999999999999999>"))
+
+    def test_command_rights(self):
+        self.assertEqual(panel.COMMANDS["help"].level, panel.COACH)
+        for name in ("sync-ranks", "reminders", "purge", "cleanup-voice", "say"):
+            self.assertEqual(panel.COMMANDS[name].level, panel.ADMIN)
+        self.assertEqual(panel.COMMANDS["restart"].level, panel.OWNER)
+        self.assertIsNotNone(panel.COMMANDS["say"].confirm)
+        self.assertIsNotNone(panel.COMMANDS["restart"].confirm)
+
+
+class ConsoleLogTests(unittest.TestCase):
+    def test_redaction(self):
+        webhook = "https://discord.com/api/webhooks/123456/abcDEF-123_xyz"
+        self.assertEqual(panel.redact(f"Fehler bei {webhook}"), "Fehler bei https://discord.com/api/webhooks/123456/***")
+        self.assertEqual(panel.redact("Authorization: Bearer abc.def"), "Authorization: Bearer ***")
+        self.assertEqual(panel.redact("key HDEV-1234-abcd"), "key HDEV-***")
+
+    def test_bot_token_from_env_is_redacted(self):
+        token = env_value("DISCORD_BOT_TOKEN")
+        if not token:
+            self.skipTest("DISCORD_BOT_TOKEN ist weder gesetzt noch in .env")
+        # Eigene Meldung, damit ein Fehlschlag den Token nicht ausgibt.
+        self.assertTrue(token not in panel.redact(f"Token {token} läuft ab"), "Bot-Token wurde nicht geschwärzt")
+
+    def test_buffer_size_and_handler(self):
+        console = panel.ConsoleLog(size=3)
+        logger = logging.getLogger("duality.test.console")
+        handler = panel.ConsoleLogHandler(console)
+        logger.addHandler(handler)
+        logger.propagate = False
+        try:
+            for number in range(5):
+                logger.warning("Eintrag %s", number)
+            try:
+                raise ValueError("kaputt")
+            except ValueError:
+                logger.exception("Fehler beim Test")
+        finally:
+            logger.removeHandler(handler)
+        entries = console.snapshot()
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[-1]["level"], "ERROR")
+        self.assertEqual(entries[-1]["message"], "Fehler beim Test (ValueError: kaputt)")
+        self.assertNotIn("Traceback", entries[-1]["message"])
+        self.assertEqual([entry["id"] for entry in entries], [4, 5, 6])
+
+    def test_stdout_passthrough(self):
+        console = panel.ConsoleLog()
+        terminal = io.StringIO()
+        stream = panel.ConsoleStdout(terminal, console)
+        print("Server: Duality", file=stream)
+        stream.write("  Rolle vorhanden: ")
+        self.assertEqual(len(console.snapshot()), 1)
+        stream.write("Owner\n\n")
+        self.assertEqual(terminal.getvalue(), "Server: Duality\n  Rolle vorhanden: Owner\n\n")
+        self.assertEqual([entry["message"] for entry in console.snapshot()], ["Server: Duality", "  Rolle vorhanden: Owner"])
+        self.assertEqual(console.snapshot()[0]["name"], "ausgabe")
+
+
+class ConsoleWebSocketTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.panel = panel.Panel(CONFIG, self.hooks)
+        self.client = TestClient(TestServer(self.panel.build_app()))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+
+    async def connect(self, user_id: int, csrf: str | None = None, origin: str = ORIGIN):
+        session, cookie = session_cookie(user_id)
+        ws = await self.client.ws_connect(
+            f"/ws?csrf={csrf if csrf is not None else session['csrf']}",
+            headers={"Cookie": cookie, "Origin": origin},
+        )
+        hello = await ws.receive_json(timeout=2)
+        self.assertEqual(hello["type"], "hello")
+        self.addAsyncCleanup(ws.close)
+        return session, ws, hello
+
+    async def command(self, ws, line: str, confirm: bool = False, request_id: int = 1) -> dict:
+        await ws.send_json({"type": "command", "id": request_id, "line": line, "confirm": confirm})
+        while True:
+            message = await ws.receive_json(timeout=3)
+            if message["type"] == "result" and message["id"] == request_id:
+                return message
+
+    async def test_handshake_requires_session_csrf_and_origin(self):
+        from aiohttp import WSServerHandshakeError
+
+        session, cookie = session_cookie(COACH_ID)
+        cases = [
+            ({"Origin": ORIGIN}, session["csrf"], 401),
+            ({"Cookie": cookie, "Origin": ORIGIN}, "falsch", 403),
+            ({"Cookie": cookie, "Origin": "https://evil.example"}, session["csrf"], 403),
+            ({"Cookie": cookie}, session["csrf"], 403),
+        ]
+        for headers, csrf, status in cases:
+            with self.assertRaises(WSServerHandshakeError) as caught:
+                await self.client.ws_connect(f"/ws?csrf={csrf}", headers=headers)
+            self.assertEqual(caught.exception.status, status)
+
+    async def test_hello_lists_only_allowed_commands_and_old_logs(self):
+        logging.getLogger("duality").info("Vor dem Verbinden")
+        _, _, hello = await self.connect(COACH_ID)
+        self.assertEqual([command["name"] for command in hello["commands"]], ["help"])
+        self.assertIn("Vor dem Verbinden", [entry["message"] for entry in hello["logs"]])
+        _, _, hello = await self.connect(OWNER_ID)
+        self.assertIn("restart", [command["name"] for command in hello["commands"]])
+
+    async def test_live_log_and_print(self):
+        _, ws, _ = await self.connect(COACH_ID)
+        logging.getLogger("discord.gateway").warning("Gateway hustet")
+        print("Ausgabe per print")
+        received = []
+        while len(received) < 2:
+            message = await ws.receive_json(timeout=2)
+            if message["type"] == "log":
+                received.append(message["entry"])
+        self.assertEqual((received[0]["level"], received[0]["name"], received[0]["message"]), ("WARNING", "discord.gateway", "Gateway hustet"))
+        self.assertEqual((received[1]["name"], received[1]["message"]), ("ausgabe", "Ausgabe per print"))
+
+    async def test_unknown_command_is_friendly(self):
+        _, ws, _ = await self.connect(COACH_ID)
+        result = await self.command(ws, "rm -rf /")
+        self.assertFalse(result["ok"])
+        self.assertIn("Unbekannter Befehl „rm“", result["text"])
+
+    async def test_command_without_rights(self):
+        _, ws, _ = await self.connect(COACH_ID)
+        result = await self.command(ws, "sync-ranks")
+        self.assertFalse(result["ok"])
+        self.assertIn("mindestens die Rolle Admin", result["text"])
+        self.hooks.sync_ranks.assert_not_awaited()
+        _, ws, _ = await self.connect(ADMIN_ID)
+        result = await self.command(ws, "restart", confirm=True)
+        self.assertIn("mindestens die Rolle Owner", result["text"])
+        self.hooks.restart.assert_not_awaited()
+
+    async def test_help(self):
+        _, ws, _ = await self.connect(ADMIN_ID)
+        result = await self.command(ws, "help")
+        self.assertTrue(result["ok"])
+        self.assertIn("say #kanal <text>", result["text"])
+        self.assertNotIn("restart", result["text"])
+        self.hooks.audit.assert_not_awaited()
+
+    async def test_controlling_commands_call_hooks_and_audit(self):
+        _, ws, _ = await self.connect(ADMIN_ID)
+        result = await self.command(ws, "reminders")
+        self.assertEqual(result, {"type": "result", "id": 1, "ok": True, "text": "Termin-Erinnerungen geprüft, 1 gesendet."})
+        audit_text = self.hooks.audit.await_args.args[1]
+        self.assertIn("Panel-Befehl", audit_text)
+        self.assertIn(f"<@{ADMIN_ID}>", audit_text)
+        self.assertIn("2 vergangene Termine und 3 Bewerbungen", (await self.command(ws, "purge", request_id=2))["text"])
+        self.assertIn("4 leere", (await self.command(ws, "cleanup-voice", request_id=3))["text"])
+        result = await self.command(ws, f"sync-ranks <@{PLAYER_ID}>", request_id=4)
+        self.assertEqual(result["text"], "Rang abgeglichen")
+        guild, member = self.hooks.sync_ranks.await_args.args
+        self.assertEqual(member.id, PLAYER_ID)
+        self.assertIn("nicht auf dem Server", (await self.command(ws, "sync-ranks 999999999999999999", request_id=5))["text"])
+        self.assertEqual(self.hooks.audit.await_count, 5)
+
+    async def test_say_needs_confirmation_and_sends_without_pings(self):
+        _, ws, _ = await self.connect(ADMIN_ID)
+        channel = self.hooks.client.guild.text_channels[0]
+        result = await self.command(ws, "say #allgemein Hallo @everyone")
+        self.assertIn("bestätigt", result["text"])
+        channel.send.assert_not_awaited()
+        result = await self.command(ws, "say #allgemein Hallo @everyone", confirm=True, request_id=2)
+        self.assertTrue(result["ok"])
+        mentions = channel.send.await_args.kwargs["allowed_mentions"]
+        self.assertFalse(mentions.everyone)
+        self.assertFalse(mentions.users)
+        self.assertFalse(mentions.roles)
+        self.assertEqual(channel.send.await_args.args, ("Hallo @everyone",))
+        result = await self.command(ws, "say #orga Hallo", confirm=True, request_id=3)
+        self.assertIn("darf in #Orga nicht schreiben", result["text"])
+
+    async def test_failing_command_hides_details(self):
+        self.hooks.send_reminders.side_effect = RuntimeError("geheimes Detail")
+        _, ws, _ = await self.connect(ADMIN_ID)
+        result = await self.command(ws, "reminders")
+        self.assertEqual(result["text"], "Der Befehl ist fehlgeschlagen. Details stehen im Log.")
+
+    async def test_restart(self):
+        _, ws, _ = await self.connect(OWNER_ID)
+        result = await self.command(ws, "restart", confirm=True)
+        self.assertTrue(result["ok"])
+        for _ in range(30):
+            if self.hooks.restart.await_count:
+                break
+            await asyncio.sleep(0.1)
+        self.hooks.restart.assert_awaited_once()
+
+    async def test_rate_limit(self):
+        _, ws, _ = await self.connect(COACH_ID)
+        for request_id in range(1, panel.COMMANDS_PER_MINUTE + 1):
+            self.assertTrue((await self.command(ws, "help", request_id=request_id))["ok"])
+        result = await self.command(ws, "help", request_id=99)
+        self.assertIn("Zu viele Befehle", result["text"])
+
+    async def test_role_removal_closes_console(self):
+        _, ws, _ = await self.connect(COACH_ID)
+        LEVELS.pop(COACH_ID)
+        try:
+            result = await self.command(ws, "help")
+            self.assertIn("keinen Zugriff mehr", result["text"])
+            message = await ws.receive(timeout=2)
+            self.assertEqual(ws.close_code, panel.WS_CLOSE_NO_ACCESS)
+        finally:
+            LEVELS[COACH_ID] = panel.COACH
+
+    async def test_logout_closes_console(self):
+        session, ws, _ = await self.connect(COACH_ID)
+        _, cookie = session_cookie(COACH_ID, session)
+        response = await self.client.post(
+            "/auth/logout", headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]}
+        )
+        self.assertEqual(response.status, 200)
+        while not ws.closed:
+            await ws.receive(timeout=2)
+        self.assertEqual(ws.close_code, panel.WS_CLOSE_NO_ACCESS)
+
+    async def test_shutdown_restores_stdout(self):
+        self.assertIsInstance(sys.stdout, panel.ConsoleStdout)
+        await self.client.close()
+        self.assertNotIsInstance(sys.stdout, panel.ConsoleStdout)
+        self.assertNotIn(self.panel.log_handler, logging.getLogger("duality").handlers)
 
 
 if __name__ == "__main__":

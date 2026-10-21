@@ -10,10 +10,14 @@ import base64
 import hashlib
 import hmac
 import html
+import itertools
 import json
 import logging
 import os
+import re
 import secrets
+import sys
+import threading
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -42,6 +46,27 @@ LOGIN_WINDOW_SECONDS = 5 * 60
 COACH, ADMIN, OWNER = 1, 2, 3
 LEVEL_NAMES = {COACH: "Coach", ADMIN: "Admin", OWNER: "Owner"}
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+PANEL_COLOR = discord.Color.from_rgb(110, 70, 255)
+LOG_BUFFER_SIZE = 1000
+LOG_MESSAGE_LIMIT = 4000
+WS_QUEUE_SIZE = 2000
+WS_CHECK_SECONDS = 5
+COMMANDS_PER_MINUTE = 20
+# Schließcode, wenn der Zugriff weg ist: Das Frontend lädt dann neu, statt sich wieder zu verbinden.
+WS_CLOSE_NO_ACCESS = 4403
+# Was nach Token oder Secret aussieht, kommt nie in die Konsole.
+REDACTIONS = (
+    (re.compile(r"(discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/)[\w-]+"), r"\1***"),
+    (re.compile(r"[\w-]{23,}\.[\w-]{6,7}\.[\w-]{27,}"), "***"),
+    (re.compile(r"(Bearer\s+)\S+", re.IGNORECASE), r"\1***"),
+    (re.compile(r"HDEV-[\w-]+"), "HDEV-***"),
+)
+
+
+def redact(text: str) -> str:
+    for pattern, replacement in REDACTIONS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 @dataclass(frozen=True)
@@ -208,6 +233,239 @@ def page(title: str, body: str, status: int = 200) -> web.Response:
 LOGIN_LINK = '<p><a class="button primary" href="/auth/login">Mit Discord anmelden</a></p>'
 
 
+class ConsoleLog:
+    """Ringpuffer der letzten Logeinträge; neue Einträge gehen sofort an alle offenen Konsolen."""
+
+    def __init__(self, size: int = LOG_BUFFER_SIZE):
+        self.entries: deque[dict] = deque(maxlen=size)
+        self.listeners: list[Callable[[dict], None]] = []
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.ids = itertools.count(1)
+        self.lock = threading.Lock()
+
+    def add(self, level: str, name: str, message: str, created: float | None = None) -> None:
+        # discord.py loggt teils aus eigenen Threads, deshalb Lock und call_soon_threadsafe.
+        with self.lock:
+            entry = {
+                "id": next(self.ids),
+                "time": created or time.time(),
+                "level": level,
+                "name": name,
+                "message": redact(message)[:LOG_MESSAGE_LIMIT],
+            }
+            self.entries.append(entry)
+        if self.loop and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(self.notify, entry)
+            except RuntimeError:
+                pass
+
+    def notify(self, entry: dict) -> None:
+        for listener in list(self.listeners):
+            listener(entry)
+
+    def snapshot(self) -> list[dict]:
+        with self.lock:
+            return list(self.entries)
+
+
+class ConsoleLogHandler(logging.Handler):
+    def __init__(self, console: ConsoleLog):
+        super().__init__(logging.DEBUG)
+        self.console = console
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            if record.exc_info and record.exc_info[1] is not None:
+                # Nur Art und Text des Fehlers; der vollständige Stacktrace bleibt im Journal.
+                error = record.exc_info[1]
+                message += f" ({type(error).__name__}: {error})"
+            self.console.add(record.levelname, record.name, message, record.created)
+        except Exception:
+            self.handleError(record)
+
+
+class ConsoleStdout:
+    """Gibt print()-Ausgaben unverändert ans Terminal weiter und schreibt sie zusätzlich in die Konsole."""
+
+    def __init__(self, stream, console: ConsoleLog):
+        self.stream = stream
+        self.console = console
+        self.pending = ""
+
+    def write(self, text: str) -> int:
+        written = self.stream.write(text)
+        self.pending += text
+        *lines, self.pending = self.pending.split("\n")
+        if len(self.pending) > LOG_MESSAGE_LIMIT:
+            lines.append(self.pending)
+            self.pending = ""
+        for line in lines:
+            if line.strip():
+                self.console.add("INFO", "ausgabe", line)
+        return written
+
+    def flush(self) -> None:
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+CAPTURED_LOGGERS = ("duality", "discord")
+
+
+def parse_command_line(line: str) -> tuple[str, str]:
+    """„say #kanal Hallo“ → („say“, „#kanal Hallo“)."""
+    parts = line.strip().split(maxsplit=1)
+    if not parts:
+        return "", ""
+    return parts[0].casefold(), parts[1].strip() if len(parts) > 1 else ""
+
+
+def parse_user_id(text: str) -> int | None:
+    match = re.fullmatch(r"<@!?(\d{15,20})>|(\d{15,20})", text.strip())
+    return int(match.group(1) or match.group(2)) if match else None
+
+
+def find_channel(guild: discord.Guild, text: str):
+    """Textkanal per Erwähnung (<#id>), ID oder Name (mit oder ohne #)."""
+    text = text.strip()
+    match = re.fullmatch(r"<#(\d{15,20})>|(\d{15,20})", text)
+    if match:
+        channel = guild.get_channel(int(match.group(1) or match.group(2)))
+        return channel if channel in guild.text_channels else None
+    name = text.removeprefix("#").casefold()
+    return discord.utils.find(lambda channel: channel.name.casefold() == name, guild.text_channels)
+
+
+class CommandError(Exception):
+    """Fehler mit einer Meldung, die so in der Konsole angezeigt werden darf."""
+
+
+@dataclass(frozen=True)
+class CommandContext:
+    panel: "Panel"
+    guild: discord.Guild
+    member: discord.Member
+    level: int
+
+
+@dataclass(frozen=True)
+class ConsoleCommand:
+    name: str
+    usage: str
+    description: str
+    level: int
+    run: Callable[[CommandContext, str], Awaitable[str]]
+    # Text für den Bestätigungsdialog; ohne Bestätigung lehnt der Server den Befehl ab.
+    confirm: str | None = None
+    # Steuernde Befehle landen im Audit-Log.
+    controlling: bool = True
+
+
+async def command_help(context: CommandContext, arguments: str) -> str:
+    return "\n".join(
+        f"{command.usage} – {command.description}"
+        for command in COMMANDS.values()
+        if context.level >= command.level
+    )
+
+
+async def command_sync_ranks(context: CommandContext, arguments: str) -> str:
+    if not arguments:
+        return await context.panel.hooks.sync_ranks(context.guild, None)
+    user_id = parse_user_id(arguments)
+    if user_id is None:
+        raise CommandError("Bitte gib @Person oder eine User-ID an, z. B. „sync-ranks 123456789012345678“.")
+    member = context.guild.get_member(user_id)
+    if member is None:
+        raise CommandError("Diese Person ist nicht auf dem Server.")
+    return await context.panel.hooks.sync_ranks(context.guild, member)
+
+
+async def command_reminders(context: CommandContext, arguments: str) -> str:
+    sent = await context.panel.hooks.send_reminders()
+    return f"Termin-Erinnerungen geprüft, {sent} gesendet."
+
+
+async def command_purge(context: CommandContext, arguments: str) -> str:
+    events, applications = await context.panel.hooks.purge(context.guild)
+    return f"Löschfristen angewendet: {events} vergangene Termine und {applications} Bewerbungen gelöscht."
+
+
+async def command_cleanup_voice(context: CommandContext, arguments: str) -> str:
+    removed = await context.panel.hooks.cleanup_voice(context.guild)
+    return f"{removed} leere temporäre Voice-Kanäle gelöscht."
+
+
+async def command_say(context: CommandContext, arguments: str) -> str:
+    parts = arguments.split(maxsplit=1)
+    channel = find_channel(context.guild, parts[0]) if parts else None
+    if channel is None:
+        raise CommandError("Kanal nicht gefunden. Beispiel: say #allgemein Hallo zusammen")
+    text = parts[1].strip() if len(parts) > 1 else ""
+    if not 1 <= len(text) <= 2000:
+        raise CommandError("Der Text muss 1 bis 2000 Zeichen lang sein.")
+    permissions = channel.permissions_for(context.guild.me)
+    if not (permissions.view_channel and permissions.send_messages):
+        raise CommandError(f"Der Bot darf in #{channel.name} nicht schreiben.")
+    await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+    return f"Nachricht in #{channel.name} gesendet."
+
+
+async def command_restart(context: CommandContext, arguments: str) -> str:
+    context.panel.spawn(context.panel.restart_soon())
+    return "Der Bot startet neu. Die Konsole verbindet sich danach automatisch wieder."
+
+
+COMMANDS = {
+    command.name: command
+    for command in (
+        ConsoleCommand("help", "help", "listet die Befehle, die du nutzen darfst", COACH, command_help, controlling=False),
+        ConsoleCommand(
+            "sync-ranks", "sync-ranks [@user|user_id]", "Rang-Abgleich sofort, für alle oder eine Person",
+            ADMIN, command_sync_ranks,
+        ),
+        ConsoleCommand("reminders", "reminders", "Termin-Erinnerungen sofort prüfen", ADMIN, command_reminders),
+        ConsoleCommand("purge", "purge", "Löschfristen für Termine und Bewerbungen sofort anwenden", ADMIN, command_purge),
+        ConsoleCommand("cleanup-voice", "cleanup-voice", "leere temporäre Voice-Kanäle löschen", ADMIN, command_cleanup_voice),
+        ConsoleCommand(
+            "say", "say #kanal <text>", "Nachricht als Bot senden (ohne Pings)", ADMIN, command_say,
+            confirm="Der Text wird als Bot-Nachricht im angegebenen Kanal veröffentlicht. Erwähnungen pingen niemanden.",
+        ),
+        ConsoleCommand(
+            "restart", "restart", "Bot sauber beenden; systemd startet ihn neu", OWNER, command_restart,
+            confirm="Der Bot beendet sich und wird von systemd neu gestartet. Er ist dabei kurz offline, "
+            "laufende Befehle brechen ab.",
+        ),
+    )
+}
+
+
+class Connection:
+    """Eine offene Konsole. Nachrichten laufen über eine Warteschlange, damit langsame Browser den Bot nicht bremsen."""
+
+    def __init__(self, ws: web.WebSocketResponse, session: dict):
+        self.ws = ws
+        self.user_id = int(session["uid"])
+        self.sid = session["sid"]
+        self.expires = session["exp"]
+        self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=WS_QUEUE_SIZE)
+
+    def send(self, message: dict) -> None:
+        try:
+            self.queue.put_nowait(json.dumps(message, ensure_ascii=False))
+        except asyncio.QueueFull:
+            pass
+
+    async def write(self) -> None:
+        while True:
+            data = await self.queue.get()
+            await self.ws.send_str(data)
+
+
 @dataclass
 class PanelHooks:
     """Was das Panel vom Bot braucht. main.py füllt es aus, damit panel.py main.py nicht importiert."""
@@ -217,6 +475,12 @@ class PanelHooks:
     # 0 = kein Staff, sonst COACH, ADMIN oder OWNER.
     staff_level: Callable[[discord.Member], int]
     audit: Callable[[discord.Guild, str, discord.Color], Awaitable[None]]
+    # Konsolenbefehle; Rückgabe ist die Meldung für die Konsole bzw. eine Anzahl.
+    sync_ranks: Callable[[discord.Guild, discord.Member | None], Awaitable[str]]
+    send_reminders: Callable[[], Awaitable[int]]
+    purge: Callable[[discord.Guild], Awaitable[tuple[int, int]]]
+    cleanup_voice: Callable[[discord.Guild], Awaitable[int]]
+    restart: Callable[[], Awaitable[None]]
 
 
 class Panel:
@@ -225,7 +489,12 @@ class Panel:
         self.hooks = hooks
         self.revoked: dict[str, float] = {}
         self.login_limiter = RateLimiter(LOGIN_ATTEMPTS, LOGIN_WINDOW_SECONDS)
+        self.command_limiter = RateLimiter(COMMANDS_PER_MINUTE, 60)
         self.http: aiohttp.ClientSession | None = None
+        self.console = ConsoleLog()
+        self.log_handler = ConsoleLogHandler(self.console)
+        self.connections: set[Connection] = set()
+        self.tasks: set[asyncio.Task] = set()
         ws_origin = config.origin.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
         self.csp = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -243,11 +512,29 @@ class Panel:
             web.get("/auth/callback", self.callback),
             web.post("/auth/logout", self.logout),
             web.get("/api/me", self.api_me),
+            web.get("/ws", self.websocket),
         ])
         app.router.add_static("/static/", STATIC_DIR)
         app.on_response_prepare.append(self.add_security_headers)
+        app.on_startup.append(self.open)
+        app.on_shutdown.append(self.close_connections)
         app.on_cleanup.append(self.close)
         return app
+
+    async def open(self, app: web.Application | None = None) -> None:
+        self.console.loop = asyncio.get_running_loop()
+        self.console.listeners.append(self.broadcast_log)
+        for name in CAPTURED_LOGGERS:
+            logging.getLogger(name).addHandler(self.log_handler)
+        # print()-Ausgaben bleiben im Terminal unverändert und erscheinen zusätzlich in der Konsole.
+        sys.stdout = ConsoleStdout(sys.stdout, self.console)
+        self.spawn(self.watch_connections())
+
+    async def close_connections(self, app: web.Application | None = None) -> None:
+        for task in list(self.tasks):
+            task.cancel()
+        for connection in list(self.connections):
+            await connection.ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Bot wird beendet")
 
     async def add_security_headers(self, request: web.Request, response: web.StreamResponse) -> None:
         response.headers["Content-Security-Policy"] = self.csp
@@ -272,8 +559,20 @@ class Panel:
         return await handler(request)
 
     async def close(self, app: web.Application | None = None) -> None:
+        for name in CAPTURED_LOGGERS:
+            logging.getLogger(name).removeHandler(self.log_handler)
+        if isinstance(sys.stdout, ConsoleStdout) and sys.stdout.console is self.console:
+            sys.stdout = sys.stdout.stream
+        if self.broadcast_log in self.console.listeners:
+            self.console.listeners.remove(self.broadcast_log)
         if self.http and not self.http.closed:
             await self.http.close()
+
+    def spawn(self, coroutine) -> asyncio.Task:
+        task = asyncio.create_task(coroutine)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return task
 
     def http_session(self) -> aiohttp.ClientSession:
         if self.http is None or self.http.closed:
@@ -314,6 +613,33 @@ class Panel:
         now = time.time()
         self.revoked = {sid: expires for sid, expires in self.revoked.items() if expires > now}
         self.revoked[session["sid"]] = session["exp"]
+        for connection in list(self.connections):
+            if connection.sid == session["sid"]:
+                self.spawn(connection.ws.close(code=WS_CLOSE_NO_ACCESS, message=b"Abgemeldet"))
+
+    def connection_level(self, connection: Connection) -> int:
+        """Aktuelle Stufe einer offenen Konsole; 0, wenn Session oder Staff-Rolle weg sind."""
+        if connection.sid in self.revoked or connection.expires <= time.time() or self.guild() is None:
+            return 0
+        staff = self.staff(connection.user_id)
+        return staff[1] if staff else 0
+
+    async def watch_connections(self) -> None:
+        # Rollenentzug, Abmelden und Ablauf der Session wirken auch auf offene Konsolen.
+        while True:
+            await asyncio.sleep(WS_CHECK_SECONDS)
+            for connection in list(self.connections):
+                if self.connection_level(connection) == 0:
+                    await connection.ws.close(code=WS_CLOSE_NO_ACCESS, message=b"Kein Zugriff mehr")
+
+    def broadcast_log(self, entry: dict) -> None:
+        for connection in list(self.connections):
+            connection.send({"type": "log", "entry": entry})
+
+    async def restart_soon(self) -> None:
+        # Kurz warten, damit Antwort und Audit-Eintrag noch rausgehen.
+        await asyncio.sleep(1)
+        await self.hooks.restart()
 
     def set_cookie(self, response: web.StreamResponse, name: str, value: str, max_age: int, path: str = "/") -> None:
         response.set_cookie(
@@ -434,6 +760,97 @@ class Panel:
             "role": LEVEL_NAMES[level],
             "csrf": session["csrf"],
         })
+
+    def command_list(self, level: int) -> list[dict]:
+        return [
+            {"name": command.name, "usage": command.usage, "description": command.description, "confirm": command.confirm}
+            for command in COMMANDS.values()
+            if level >= command.level
+        ]
+
+    async def websocket(self, request: web.Request) -> web.WebSocketResponse:
+        session = self.session(request)
+        if session is None:
+            raise json_error(401, "Bitte melde dich an.")
+        # Browser schicken beim WebSocket-Aufbau keine eigenen Header mit, deshalb kommt das Token als Parameter.
+        if not csrf_valid(session, self.config.origin, request.headers.get("Origin"), request.query.get("csrf")):
+            log.warning("Panel: WebSocket ohne gültiges CSRF-Token abgelehnt")
+            raise json_error(403, "Ungültige Anfrage. Bitte lade die Seite neu.")
+        _, _, level = self.authenticate(request)
+        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=16 * 1024)
+        await ws.prepare(request)
+        connection = Connection(ws, session)
+        self.connections.add(connection)
+        writer = asyncio.create_task(connection.write())
+        try:
+            connection.send({"type": "hello", "logs": self.console.snapshot(), "commands": self.command_list(level)})
+            async for message in ws:
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    self.handle_message(connection, message.data)
+        finally:
+            self.connections.discard(connection)
+            writer.cancel()
+        return ws
+
+    def handle_message(self, connection: Connection, data: str) -> None:
+        try:
+            message = json.loads(data)
+        except ValueError:
+            return
+        if not isinstance(message, dict) or message.get("type") != "command":
+            return
+        request_id = message.get("id")
+        line = message.get("line")
+
+        def reply(ok: bool, text: str) -> None:
+            connection.send({"type": "result", "id": request_id, "ok": ok, "text": text})
+
+        level = self.connection_level(connection)
+        if level == 0:
+            reply(False, "Du hast keinen Zugriff mehr auf das Panel.")
+            self.spawn(connection.ws.close(code=WS_CLOSE_NO_ACCESS, message=b"Kein Zugriff mehr"))
+            return
+        if not isinstance(line, str) or not line.strip() or len(line) > 2100:
+            reply(False, "Bitte gib einen Befehl ein. Mit „help“ siehst du alle Befehle.")
+            return
+        if not self.command_limiter.allow(connection.user_id):
+            reply(False, "Zu viele Befehle in kurzer Zeit. Bitte warte einen Moment.")
+            return
+        self.spawn(self.run_command(connection.user_id, level, line, message.get("confirm") is True, reply))
+
+    async def run_command(self, user_id: int, level: int, line: str, confirmed: bool, reply) -> None:
+        name, arguments = parse_command_line(line)
+        command = COMMANDS.get(name)
+        guild = self.guild()
+        member = guild.get_member(user_id) if guild else None
+        if command is None:
+            reply(False, f"Unbekannter Befehl „{name[:50]}“. Mit „help“ siehst du alle Befehle.")
+            return
+        if guild is None or member is None:
+            reply(False, "Der Bot ist gerade nicht mit Discord verbunden.")
+            return
+        if level < command.level:
+            log.warning("Panel-Befehl %s von %s abgelehnt: fehlende Rechte", name, user_id)
+            reply(False, f"„{name}“ braucht mindestens die Rolle {LEVEL_NAMES[command.level]}.")
+            return
+        if command.confirm and not confirmed:
+            reply(False, f"„{name}“ muss im Panel bestätigt werden.")
+            return
+        if command.controlling:
+            log.info("Panel-Befehl von %s (%s): %s", member, member.id, line.strip()[:300])
+            await self.hooks.audit(
+                guild,
+                f"🖥️ **Panel-Befehl** von {member.mention} (`{member.id}`):\n"
+                f"{discord.utils.escape_markdown(line.strip()[:1500])}",
+                PANEL_COLOR,
+            )
+        try:
+            reply(True, await command.run(CommandContext(self, guild, member, level), arguments))
+        except CommandError as error:
+            reply(False, str(error))
+        except Exception:
+            log.exception("Panel-Befehl %s ist fehlgeschlagen", name)
+            reply(False, "Der Befehl ist fehlgeschlagen. Details stehen im Log.")
 
 
 async def start_panel(hooks: PanelHooks) -> web.AppRunner | None:
