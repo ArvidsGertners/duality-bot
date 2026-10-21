@@ -157,6 +157,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Kontrast: Primärrot `#eb1b29` mit weißer Schrift hat 4,45:1 (knapp unter 4,5); roter Text nutzt daher den Akzent (`#ff4d58` dunkel, `#c8101c` hell). Fehler-Knöpfe sind umrandet, damit sie sich vom roten Primärknopf abheben.
 - Standardfarbe neuer Ankündigungen ist jetzt `#eb1b29`.
 - [x] Navigation in Kategorien: Übersicht (Dashboard, Voice), Team (Termine, Anwesenheit, Rangliste, Spieler), Community (Bewerbungen, Tickets, Ankündigungen), Inhalte & Regeln (Texte, Einstellungen, Datenschutz), System (Konsole, Server-Setup, Backups). Gruppen ohne erlaubte Seite werden ausgeblendet; auf dem Handy eine Zeile mit Trennern statt Überschriften — fertig (241b998)
+- [x] Stil nach Arvids' Variant-Entwurf: schwarze Seitenleiste (auch im hellen Theme), eckige Flächen, Seitentitel in Großbuchstaben mit rotem „//“ und Überzeile aus der Navigationsgruppe, Kartenköpfe mit rotem Strich, Daten/Tabellen/Felder in Monospace, gefüllte Status-Badges, Punktraster im Hintergrund, Theme-Knopf (System → Hell → Dunkel). Deutsche Texte und echte Funktionen bleiben; Beispielinhalte aus dem Entwurf (Annehmen/Ablehnen, Auto-Moderation, Reset) bewusst nicht übernommen — fertig (Commit folgt)
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |

@@ -12,8 +12,8 @@
 <body>
   <a class="skip-link" href="#main">Zum Inhalt springen</a>
   <div class="layout">
-    <header class="sidebar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Duality-Panel</div>
+    <header class="sidebar" data-theme="duality-dark">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Duality</div>
       <nav aria-label="Bereiche">
         <ul class="menu" id="nav">
           <li class="nav-group">
@@ -65,13 +65,8 @@
           <div class="muted" id="user-role"></div>
         </div>
         <div class="user-actions">
-          <label class="visually-hidden" for="theme-select">Darstellung</label>
-          <select class="select select-sm" id="theme-select">
-            <option value="system">System</option>
-            <option value="light">Hell</option>
-            <option value="dark">Dunkel</option>
-          </select>
-          <button type="button" class="btn btn-sm" id="logout">Abmelden</button>
+          <button type="button" class="btn btn-sm" id="theme-toggle">Theme</button>
+          <button type="button" class="btn btn-sm btn-error btn-outline" id="logout">Abmelden</button>
         </div>
       </div>
     </header>

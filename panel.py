@@ -237,7 +237,7 @@ def page(title: str, body: str, status: int = 200) -> web.Response:
         '<link rel="stylesheet" href="/static/daisyui.css">'
         '<link rel="stylesheet" href="/static/panel.css"></head>'
         '<body class="center-page"><main class="card narrow">'
-        '<div class="brand"><span class="brand-mark" aria-hidden="true"></span>Duality-Panel</div>'
+        '<div class="brand"><span class="brand-mark" aria-hidden="true"></span>Duality</div>'
         f"<h1>{html.escape(title)}</h1>{body}</main></body></html>"
     )
     return web.Response(text=document, content_type="text/html", status=status, headers={"Cache-Control": "no-store"})

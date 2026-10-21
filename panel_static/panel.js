@@ -120,10 +120,10 @@ function formatDuration(seconds) {
   return `${minutes} min`;
 }
 
-const BADGES = { ok: "badge-success", warn: "badge-warning", bad: "badge-error", neutral: "badge-neutral" };
+const BADGES = { ok: "badge-success", warn: "badge-warning", bad: "badge-error", neutral: "badge-quiet" };
 
 function pill(text, kind) {
-  return span(`badge badge-soft badge-sm ${BADGES[kind] || BADGES.neutral}`, text);
+  return span(`badge badge-sm ${BADGES[kind] || BADGES.neutral}`, text);
 }
 
 function fillList(list, rows) {
@@ -1614,7 +1614,23 @@ function togglePause() {
   scrollLog(!state.paused);
 }
 
+// Überzeile über jedem Seitentitel aus der Navigationsgruppe, z. B. „Duality Mannheim // Team“.
+function addEyebrows() {
+  for (const group of document.querySelectorAll("#nav .nav-group")) {
+    const title = group.querySelector(".menu-title").textContent;
+    for (const link of group.querySelectorAll("a[data-page]")) {
+      const heading = document.querySelector(`#page-${link.dataset.page} > h1`);
+      if (!heading) continue;
+      const eyebrow = document.createElement("p");
+      eyebrow.className = "eyebrow";
+      eyebrow.textContent = `Duality Mannheim // ${title}`;
+      heading.before(eyebrow);
+    }
+  }
+}
+
 async function init() {
+  addEyebrows();
   state.me = await api("/api/me");
   $("#user-name").textContent = state.me.name;
   $("#user-role").textContent = state.me.role;

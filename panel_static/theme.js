@@ -1,6 +1,8 @@
 // Setzt das Farbschema, bevor die Seite gezeichnet wird; die Wahl bleibt nur in diesem Browser gespeichert.
 (() => {
   const KEY = "duality-theme";
+  const ORDER = ["system", "light", "dark"];
+  const LABELS = { system: "System", light: "Hell", dark: "Dunkel" };
   const query = window.matchMedia("(prefers-color-scheme: light)");
 
   function stored() {
@@ -21,17 +23,24 @@
   query.addEventListener("change", () => apply(stored()));
 
   document.addEventListener("DOMContentLoaded", () => {
-    const select = document.getElementById("theme-select");
-    if (!select) return;
-    select.value = stored();
-    select.addEventListener("change", () => {
+    const button = document.getElementById("theme-toggle");
+    if (!button) return;
+    let choice = stored();
+    const label = () => {
+      button.textContent = `Theme: ${LABELS[choice]}`;
+      button.setAttribute("aria-label", `Darstellung: ${LABELS[choice]} (klicken zum Wechseln)`);
+    };
+    label();
+    button.addEventListener("click", () => {
+      choice = ORDER[(ORDER.indexOf(choice) + 1) % ORDER.length];
       try {
-        if (select.value === "system") localStorage.removeItem(KEY);
-        else localStorage.setItem(KEY, select.value);
+        if (choice === "system") localStorage.removeItem(KEY);
+        else localStorage.setItem(KEY, choice);
       } catch {
         // Ohne Speicher gilt die Wahl nur bis zum Neuladen.
       }
-      apply(select.value);
+      apply(choice);
+      label();
     });
   });
 })();
