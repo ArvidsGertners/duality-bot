@@ -31,8 +31,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 ### Phase 3 – Team
 - [x] Gemeinsame Termin-Funktion für `/termin` und Panel — fertig (20f2037)
 - [x] C2 Termine im Panel (anlegen, bearbeiten/verschieben, absagen) — fertig (260e713)
-- [x] C1 Anwesenheitsübersicht + CSV — fertig (Commit „Anwesenheit …“)
-- [ ] C3 Glückwunsch bei Rangaufstieg — offen
+- [x] C1 Anwesenheitsübersicht + CSV — fertig (e7aa165)
+- [x] C3 Glückwunsch bei Rangaufstieg — fertig (Commit „Glückwunsch bei Rangaufstieg …“)
 - [ ] C4 `/rangliste` + Panel-Ansicht + `rank_history` — offen
 
 ### Phase 4 – Konfiguration & Kommunikation
@@ -106,6 +106,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 - **C1 Anwesenheit:** `attendance_events()` (stattgefundene, nicht abgesagte Termine im Zeitraum + Antworten) und `summarize_attendance()` (rein, getestet) in main.py. Zählt nur Termine ab dem Beitritt (wie `/profil`). Markiert bei Quote < `ATTENDANCE_THRESHOLD_PERCENT` (50) oder ≥ `ATTENDANCE_MISSING_LIMIT` (2) Terminen ohne Reaktion; beides wird in D3 einstellbar. Zeitraum 1–90 Tage (Löschfrist). Spieler = Mitglieder mit Rolle „Spieler“. CSV mit `;` und BOM für Excel, Namen gegen Formel-Injection geschützt (`spreadsheet_safe`), Export wird geloggt (kein Audit, da nicht steuernd).
 
+- **C3 Glückwunsch:** `rank_value()` ('Gold 2' → (3, 2), Unrated → None), `is_rank_promotion()` nur bei höherer Hauptstufe. In `sync_member_rank` nach dem Speichern; Bedingung: vorheriger `rank_synced_at` vorhanden. Damit das „nicht beim ersten Abgleich nach dem Verknüpfen“ stimmt, setzen `/riot-id` und das Bewerbungsformular beim Verknüpfen `rank_tier`/`rank_synced_at` auf NULL. **Annahme:** Kanal `#team-chat` (`RANK_CONGRATS_CHANNEL`), nur Rolle „Spieler“, Erwähnung nur der Person. An/aus über `RANK_CONGRATS_ENABLED`, wird in D3 eine Einstellung. Sendefehler werden nur geloggt, der Abgleich läuft weiter.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -144,4 +146,4 @@ _(noch keine)_
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Nächstes Feature: C3 Rang-Glückwunsch (alter vs. neuer Rang in `sync_member_rank`, nur Hauptstufen-Aufstieg, nur Rolle Spieler, nicht beim ersten Abgleich nach dem Verknüpfen, Kanal `#team-chat`, abschaltbar per Konstante bis D3). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Nächstes Feature: C4 `/rangliste` (Spieler mit Riot-ID nach Rang, Name wie `/team`, letzter Abgleich) + Tabelle `rank_history` (nur bei Rangänderung), in `collect_user_data`/`delete_user_data`, Panel-Rangliste mit Verlauf (SVG), `/help` ergänzen. Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

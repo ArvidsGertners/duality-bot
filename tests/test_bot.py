@@ -471,6 +471,63 @@ class AttendanceTests(unittest.TestCase):
             self.assertEqual(responses, {1: {7: "going"}})
 
 
+class RankTests(unittest.IsolatedAsyncioTestCase):
+    def test_rank_order(self):
+        ordered = ["Iron 1", "Gold 2", "Gold 3", "Platinum 1", "Diamond 3", "Ascendant 1", "Immortal 3", "Radiant"]
+        values = [main.rank_value(tier) for tier in ordered]
+        self.assertEqual(values, sorted(values))
+        self.assertEqual(main.rank_value("Radiant"), (8, 0))
+        self.assertIsNone(main.rank_value("Unrated"))
+        self.assertIsNone(main.rank_value(None))
+
+    def test_promotion_only_main_tier(self):
+        self.assertTrue(main.is_rank_promotion("Gold 3", "Platinum 1"))
+        self.assertTrue(main.is_rank_promotion("Silver 1", "Diamond 2"))
+        self.assertFalse(main.is_rank_promotion("Gold 2", "Gold 3"))
+        self.assertFalse(main.is_rank_promotion("Platinum 1", "Gold 3"))
+        self.assertFalse(main.is_rank_promotion(None, "Gold 1"))
+        self.assertFalse(main.is_rank_promotion("Unrated", "Gold 1"))
+        self.assertFalse(main.is_rank_promotion("Gold 1", "Unrated"))
+
+    async def sync(self, old_tier, synced_at, new_tier, is_player=True, enabled=True):
+        member = SimpleNamespace(id=5, mention="<@5>", guild=SimpleNamespace(id=1))
+        profile = main.Profile(1, 5, "Zoe", "EUW", "eu", None, None, old_tier, synced_at, 0)
+        channel = SimpleNamespace(send=mock.AsyncMock())
+        rank_client = SimpleNamespace(current_rank=mock.AsyncMock(return_value=(new_tier, "eu")))
+        with mock.patch.object(main, "RANK_CLIENT", rank_client), \
+                mock.patch.object(main, "RANK_CONGRATS_ENABLED", enabled), \
+                mock.patch.object(main, "update_profile"), \
+                mock.patch.object(main, "find_role", return_value=None), \
+                mock.patch.object(main, "set_exclusive_role", mock.AsyncMock()), \
+                mock.patch.object(main, "member_has_role", return_value=is_player), \
+                mock.patch.object(main, "find_text_channel", return_value=channel) as find_channel:
+            self.assertEqual(await main.sync_member_rank(member, profile), new_tier)
+        return channel, find_channel
+
+    async def test_congratulates_player_on_promotion(self):
+        channel, find_channel = await self.sync("Gold 3", 1000, "Platinum 1")
+        self.assertEqual(find_channel.call_args.args[1], "team-chat")
+        text = channel.send.await_args.args[0]
+        self.assertIn("<@5>", text)
+        self.assertIn("**Gold 3** auf **Platinum 1**", text)
+        mentions = channel.send.await_args.kwargs["allowed_mentions"]
+        self.assertEqual([user.id for user in mentions.users], [5])
+        self.assertFalse(mentions.everyone)
+        self.assertFalse(mentions.roles)
+
+    async def test_no_congratulations(self):
+        cases = [
+            ("Gold 3", None, "Platinum 1", True, True),   # erster Abgleich nach dem Verknüpfen
+            ("Platinum 1", 1000, "Gold 3", True, True),   # Abstieg
+            ("Gold 2", 1000, "Gold 3", True, True),       # nur Unterstufe
+            ("Gold 3", 1000, "Platinum 1", False, True),  # kein Spieler
+            ("Gold 3", 1000, "Platinum 1", True, False),  # abgeschaltet
+        ]
+        for old_tier, synced_at, new_tier, is_player, enabled in cases:
+            channel, _ = await self.sync(old_tier, synced_at, new_tier, is_player, enabled)
+            channel.send.assert_not_awaited()
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):

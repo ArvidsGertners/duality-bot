@@ -1178,6 +1178,42 @@ async def set_exclusive_role(member: discord.Member, role_names, selected_role: 
     return True
 
 
+RANK_CONGRATS_CHANNEL = "team-chat"
+RANK_CONGRATS_ENABLED = True
+
+
+def rank_value(tier_name: str | None) -> tuple[int, int] | None:
+    """'Gold 2' → (3, 2), 'Radiant' → (8, 0); 'Unrated' und Unbekanntes → None. Vergleichbar per <."""
+    if not tier_name:
+        return None
+    base, _, level = tier_name.partition(" ")
+    base = base.capitalize()
+    if base not in VALORANT_RANKS:
+        return None
+    return VALORANT_RANKS.index(base), int(level) if level.isdigit() else 0
+
+
+def is_rank_promotion(old_tier: str | None, new_tier: str | None) -> bool:
+    """Nur ein Aufstieg der Hauptstufe zählt, z. B. Gold 3 → Platinum 1, nicht Gold 2 → Gold 3."""
+    old_value, new_value = rank_value(old_tier), rank_value(new_tier)
+    return old_value is not None and new_value is not None and new_value[0] > old_value[0]
+
+
+async def congratulate_rank_up(member: discord.Member, old_tier: str, new_tier: str) -> None:
+    if not RANK_CONGRATS_ENABLED or not member_has_role(member, "Spieler"):
+        return
+    channel = find_text_channel(member.guild, RANK_CONGRATS_CHANNEL)
+    if channel is None:
+        return
+    try:
+        await channel.send(
+            f"🎉 Glückwunsch {member.mention}! Du bist von **{old_tier}** auf **{new_tier}** aufgestiegen.",
+            allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False, replied_user=False),
+        )
+    except discord.HTTPException:
+        log.warning("Glückwunsch zum Rangaufstieg von %s konnte nicht gesendet werden", member.id)
+
+
 async def sync_member_rank(member: discord.Member, profile: Profile) -> str:
     """Holt den aktuellen Rang über die Riot-ID und setzt die passende Rangrolle."""
     if RANK_CLIENT is None:
@@ -1187,6 +1223,9 @@ async def sync_member_rank(member: discord.Member, profile: Profile) -> str:
     role_name = rank_role_name(tier_name)
     selected_role = find_role(member.guild, role_name) if role_name else None
     await set_exclusive_role(member, VALORANT_RANKS, selected_role, "Valorant-Rang automatisch über Riot-ID aktualisiert")
+    # Beim ersten Abgleich nach dem Verknüpfen fehlt rank_synced_at; dann gibt es keinen Vergleich.
+    if profile.rank_synced_at and is_rank_promotion(profile.rank_tier, tier_name):
+        await congratulate_rank_up(member, profile.rank_tier, tier_name)
     return tier_name
 
 
@@ -1769,7 +1808,8 @@ class ApplicationSelectionView(DualityView):
                 member.id,
                 main_role=main_role,
                 playable_roles=", ".join(playable_roles),
-                **({"riot_name": riot_id[0], "riot_tag": riot_id[1], "region": None} if riot_id else {}),
+                # Neue Riot-ID: alter Rang zählt nicht, sonst gäbe es beim ersten Abgleich einen falschen Glückwunsch.
+                **({"riot_name": riot_id[0], "riot_tag": riot_id[1], "region": None, "rank_tier": None, "rank_synced_at": None} if riot_id else {}),
             )
             if riot_id:
                 run_in_background(sync_rank_quietly(member))
@@ -3198,7 +3238,10 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             await interaction.response.send_message("Bitte gib deine Riot-ID als `Name#Tag` an, z. B. `Duality#EUW`.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        update_profile(interaction.guild.id, interaction.user.id, riot_name=parsed[0], riot_tag=parsed[1], region=None)
+        update_profile(
+            interaction.guild.id, interaction.user.id,
+            riot_name=parsed[0], riot_tag=parsed[1], region=None, rank_tier=None, rank_synced_at=None,
+        )
         try:
             tier_name = await sync_member_rank(interaction.user, get_profile(interaction.guild.id, interaction.user.id))
         except RankLookupError as error:
