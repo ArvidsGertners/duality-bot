@@ -42,11 +42,19 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] E1 Datenschutz-Seite (Auskunft/Löschung) — fertig (e5499f4)
 
 ### Phase 5 – Setup-Diff
-- [x] B3 `setup_guild` liefert strukturierten Diff, Panel-Seite, Anwenden mit Lock — fertig (Commit „Server-Setup als Diff …“)
+- [x] B3 `setup_guild` liefert strukturierten Diff, Panel-Seite, Anwenden mit Lock — fertig (7f87f7d)
 
-### Phase 6 – Scrim-Suche
-- [ ] Recherche-Tabelle vorlegen und auf Entscheidung warten — offen
-- [ ] F Scrim-Börse, eigenes Gesuch, `scrim_requests`, Termin aus Scrim, Einladungslink — offen
+### Phase 6 – Scrim-Suche (ZURÜCKGESTELLT am 21.10.2026 auf Wunsch von Arvids, nichts umgesetzt)
+- [x] Recherche-Tabelle vorgelegt (21.10.2026); Entscheidung: Scrim-Feature vorerst komplett weglassen
+  - Ergebnis: Keine der Scrim-Börsen (Curry.gg, Ascend, Scrimps, Esports Planner, Gankster) hat eine öffentliche API oder einen Feed. Ascend verbietet Scraping und automatische Anfragen ausdrücklich (AGB Abschnitt 08); bei Curry.gg/Scrimps waren die AGB nicht abrufbar → nicht automatisieren.
+  - Uniliga (Hochschulliga DE, passt am besten): Anmeldung über OPLeague (früher Toornament), Kontakt über den Uniliga-Discord, keine API gefunden.
+  - Toornament hat eine offizielle API (Viewer/Organizer, API-Key) → könnte Teilnehmerlisten von Turnieren liefern, nur sinnvoll, falls eine Liga dort läuft.
+  - Discord-Scrim-Server (Valorant Scrim DE, VERSUS VALORANT, Valorant Europe): Der Bot kann sie nicht lesen (nur mit Einladung durch deren Admins), Self-Bots verboten → nur manuell posten.
+  - FACEIT Data API (offiziell, Key) ohne Scrim-Börse; Riot/HenrikDev ohne Scrim-Daten.
+  - Vorschlag: manuelle Scrim-Börse + Gesuch-Text zum Kopieren + Anfragen-Tracking + Termin + Einladungslink, keine Plattform anbinden (Option A).
+  - Nachtrag (Hinweis von Arvids): **PRACC.COM** (stonefire GmbH, Kassel) hat Valorant-Scrimsearch und einen **offiziellen Discord-Bot**: Team-Seite auf pracc.com mit dem eigenen Server verknüpfen → Bot legt Kanäle an (Post-LFS, My-LFS, matching-LFS, Team-Chats, Match-Kanäle mit Angeboten). Keine öffentliche API. AGB: Kontoinhaber ≥ 18 (4.1), keine Eingriffe in die Funktion (4.5) → inoffizielle Automatisierungs-Erweiterungen (z. B. pracc-valorant-request-bot) nicht nutzen. Preis für Scrimsearch auf der Seite nicht angegeben. Damit ist PRACC die beste erlaubte Quelle; Vorschlag: PRACC-Bot nutzen, eigene Phase 6 verkleinern (Scrim-Protokoll + „bestätigt → Termin“ + Gast-Einladungslink, ggf. Anfrage-Formular), keine eigene Börse.
+  - Weitere offizielle APIs geprüft: start.gg, Challengermode, Toornament, FACEIT (nur Turnier-/Teamdaten, keine Scrim-Gesuche). HenrikDev hat Premier-Endpunkte (Rangliste nach Konferenz/Division) als mögliche Vorschlagsliste.
+- [ ] F Scrim-Börse, eigenes Gesuch, `scrim_requests`, Termin aus Scrim, Einladungslink — zurückgestellt (bei Wiederaufnahme: PRACC-Bot als Quelle prüfen, `scrim_requests` in Auskunft/Löschung aufnehmen)
 
 ### Phase 7 – Abschluss
 - [ ] README (Web-Panel, Env-Variablen, systemd, Caddy, SSH-Tunnel, Backup zurückspielen, Webhook) — offen
@@ -137,6 +145,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - **21.10.2026, 12:29 UTC: Phase 2 deployt (a770e37)**, `update-vps.sh` Exit 0, Dienst aktiv, keine Fehler im Log, `/healthz` lokal und öffentlich 200, API ohne Login 401. Test-Backup als `dualitybot` erstellt (`/home/duality-bot/app/backups/`, Ordner 700, Datei 600), `git status` sauber. Kein `ALERT_WEBHOOK_URL` gesetzt → Warnungen nach `#audit-log`.
 - **21.10.2026, 12:52 UTC: Phase 3 deployt (aa72e6d)**, vorher Backup `duality-backup-2026-10-21_145223.sqlite3`. `update-vps.sh` Exit 0, Dienst aktiv, 0 Fehler im Log, Schema migriert (`scheduled_events` + `title`/`details`/`cancelled_at`, `rank_history` da), `/rangliste` bei Discord registriert, Panel lokal/öffentlich ok. Hinweise: ein verknüpftes Profil gehört zu jemandem, der den Server verlassen hat (wird beim Abgleich übersprungen); der gespeicherte Termin am 24.10. 17:00 hat eine in Discord gelöschte Nachricht (kein Titel, verschwindet beim Erinnerungs-Check 24 h vorher von selbst).
 - **21.10.2026, 13:12 UTC: Phase 4 deployt (e5499f4)**, vorher Backup `duality-backup-2026-10-21_151242.sqlite3`. `update-vps.sh` Exit 0, Dienst aktiv, 0 Fehler, neue Tabellen da, Standardwerte aktiv, feste Nachrichten mit den (unveränderten) Standardtexten neu gesetzt, Panel lokal/öffentlich ok.
+- **21.10.2026, 13:21 UTC: Phase 5 deployt (7f87f7d)**, vorher Backup `duality-backup-2026-10-21_152155.sqlite3`. Exit 0, Dienst aktiv, 0 Fehler, Panel ok. Setup-Vorschau gegen den echten Server noch nicht angesehen (geht nur über das Panel).
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
@@ -167,4 +176,4 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Phase 5 ist fertig. Auf Arvids' OK warten; VPS-Update vorschlagen (vorher Backup). Danach Phase 6: zuerst Recherche-Tabelle zu Scrim-Plattformen vorlegen und auf Entscheidung warten. Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Phase 6 (Scrims) ist zurückgestellt. Auf Arvids' OK für Phase 7 warten: README (Web-Panel, Env-Variablen, systemd, Caddy/nginx, SSH-Tunnel, Backup zurückspielen, Alarm-Webhook), Update-Skripte prüfen, /help. Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
