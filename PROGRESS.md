@@ -149,13 +149,14 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - **21.10.2026, 15:06 UTC: Abschluss deployt (f24331b)**, vorher Backup `duality-backup-2026-10-21_170647.sqlite3`. Exit 0, Dienst aktiv, 0 Fehler, Syntaxprüfung in `update-vps.sh` vorhanden, `git status` sauber, Panel lokal/öffentlich ok.
 - **21.10.2026, 15:19 UTC: Design-Update deployt (c827c7f)**, vorher Backup `duality-backup-2026-10-21_171937.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, neue Dateien `daisyui.css` und `theme.js` werden ausgeliefert.
 - **21.10.2026, 15:21 UTC: gzip für `/static/` in nginx** (nur Duality-Server-Block, API bleibt unkomprimiert wegen BREACH), vorher Sicherung `/root/nginx-duality-2026-10-21_152111.conf`. `nginx -t` ok, neu geladen; `daisyui.css` jetzt 29 KB statt 437 KB, Sicherheits-Header unverändert, andere Seiten auf dem VPS unberührt (`map.cbs-minecraft.de` gab schon vorher 502). README-Beispiel angepasst.
+- **21.10.2026, 15:30 UTC: Navigation in Kategorien deployt (241b998)**, vorher Backup `duality-backup-2026-10-21_173025.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, neue Navigation (5 Gruppen) wird ausgeliefert, gzip weiter aktiv.
 
 ## Design-Update (Wunsch von Arvids, 21.10.2026)
 - [x] Panel in den Farben der Palette (`palette.ase`: `#eb1b29`, Schwarz, Weiß), Themes `duality-dark`/`duality-light`, Umschalter System/Hell/Dunkel in der Seitenleiste (Wahl nur im Browser gespeichert, `panel_static/theme.js`) — fertig (c827c7f)
 - Statt shadcn (braucht React + Build, verboten) auf Wunsch daisyUI 5.7.50: nur die genutzten Komponenten als `panel_static/daisyui.css`, unverändert von jsDelivr zusammengefügt, ohne Tailwind und ohne Build. Eigene Klassen nur für Layout und Discord-Vorschau.
 - Kontrast: Primärrot `#eb1b29` mit weißer Schrift hat 4,45:1 (knapp unter 4,5); roter Text nutzt daher den Akzent (`#ff4d58` dunkel, `#c8101c` hell). Fehler-Knöpfe sind umrandet, damit sie sich vom roten Primärknopf abheben.
 - Standardfarbe neuer Ankündigungen ist jetzt `#eb1b29`.
-- [x] Navigation in Kategorien: Übersicht (Dashboard, Voice), Team (Termine, Anwesenheit, Rangliste, Spieler), Community (Bewerbungen, Tickets, Ankündigungen), Inhalte & Regeln (Texte, Einstellungen, Datenschutz), System (Konsole, Server-Setup, Backups). Gruppen ohne erlaubte Seite werden ausgeblendet; auf dem Handy eine Zeile mit Trennern statt Überschriften — fertig (Commit folgt)
+- [x] Navigation in Kategorien: Übersicht (Dashboard, Voice), Team (Termine, Anwesenheit, Rangliste, Spieler), Community (Bewerbungen, Tickets, Ankündigungen), Inhalte & Regeln (Texte, Einstellungen, Datenschutz), System (Konsole, Server-Setup, Backups). Gruppen ohne erlaubte Seite werden ausgeblendet; auf dem Handy eine Zeile mit Trennern statt Überschriften — fertig (241b998)
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
