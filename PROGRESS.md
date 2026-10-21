@@ -151,6 +151,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - **21.10.2026, 15:21 UTC: gzip für `/static/` in nginx** (nur Duality-Server-Block, API bleibt unkomprimiert wegen BREACH), vorher Sicherung `/root/nginx-duality-2026-10-21_152111.conf`. `nginx -t` ok, neu geladen; `daisyui.css` jetzt 29 KB statt 437 KB, Sicherheits-Header unverändert, andere Seiten auf dem VPS unberührt (`map.cbs-minecraft.de` gab schon vorher 502). README-Beispiel angepasst.
 - **21.10.2026, 15:30 UTC: Navigation in Kategorien deployt (241b998)**, vorher Backup `duality-backup-2026-10-21_173025.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, neue Navigation (5 Gruppen) wird ausgeliefert, gzip weiter aktiv.
 - **21.10.2026, 16:02 UTC: Design nach Variant-Entwurf deployt (46e9a8a)**, vorher Backup `duality-backup-2026-10-21_180201.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, neuer Stil (Theme-Knopf, dunkle Seitenleiste, Überzeilen) wird ausgeliefert, gzip aktiv.
+- **21.10.2026, 16:07 UTC: Duality-Logo deployt (b169451)**, vorher Backup `duality-backup-2026-10-21_180709.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, Logo auf Anmeldeseite und im Panel, Favicon wird als `image/svg+xml` ausgeliefert.
 
 ## Design-Update (Wunsch von Arvids, 21.10.2026)
 - [x] Panel in den Farben der Palette (`palette.ase`: `#eb1b29`, Schwarz, Weiß), Themes `duality-dark`/`duality-light`, Umschalter System/Hell/Dunkel in der Seitenleiste (Wahl nur im Browser gespeichert, `panel_static/theme.js`) — fertig (c827c7f)
@@ -159,7 +160,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Standardfarbe neuer Ankündigungen ist jetzt `#eb1b29`.
 - [x] Navigation in Kategorien: Übersicht (Dashboard, Voice), Team (Termine, Anwesenheit, Rangliste, Spieler), Community (Bewerbungen, Tickets, Ankündigungen), Inhalte & Regeln (Texte, Einstellungen, Datenschutz), System (Konsole, Server-Setup, Backups). Gruppen ohne erlaubte Seite werden ausgeblendet; auf dem Handy eine Zeile mit Trennern statt Überschriften — fertig (241b998)
 - [x] Stil nach Arvids' Variant-Entwurf: schwarze Seitenleiste (auch im hellen Theme), eckige Flächen, Seitentitel in Großbuchstaben mit rotem „//“ und Überzeile aus der Navigationsgruppe, Kartenköpfe mit rotem Strich, Daten/Tabellen/Felder in Monospace, gefüllte Status-Badges, Punktraster im Hintergrund, Theme-Knopf (System → Hell → Dunkel). Deutsche Texte und echte Funktionen bleiben; Beispielinhalte aus dem Entwurf (Annehmen/Ablehnen, Auto-Moderation, Reset) bewusst nicht übernommen — fertig (46e9a8a)
-- [x] Duality-Logo (DM-Zeichen aus `Duality-DM.svg`/`Duality-DM-LightBG.svg`) statt Raute: als Inline-SVG in Seitenleiste und Anmeldeseite, linker Teil folgt der Textfarbe (weiß auf dunkel, schwarz auf hell), rechter Teil rot; dazu `favicon.svg` auf schwarzem Feld — fertig (Commit folgt)
+- [x] Duality-Logo (DM-Zeichen aus `Duality-DM.svg`/`Duality-DM-LightBG.svg`) statt Raute: als Inline-SVG in Seitenleiste und Anmeldeseite, linker Teil folgt der Textfarbe (weiß auf dunkel, schwarz auf hell), rechter Teil rot; dazu `favicon.svg` auf schwarzem Feld — fertig (b169451)
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
