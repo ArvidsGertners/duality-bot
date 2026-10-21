@@ -21,8 +21,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] Tests ohne Discord-Verbindung: Session, CSRF, Rate-Limit, Konfiguration, Rechte, HTTP-Endpunkte, Parser, Log-Puffer, WebSocket-Befehle, Dashboard-Status, Task-Tracking, HenrikDev-Status; ab Phase 2 Bot-Tests in `tests/test_bot.py`
 
 ### Phase 2 – Betrieb
-- [x] B1 Fehler-Benachrichtigung (Webhook, Entprellung, „wieder in Ordnung“, Dashboard-Karte) — fertig (Commit „Warnungen bei Fehlern …“); Backup-Warnung kommt mit B2
-- [ ] B2 Datenbank-Backups (SQLite-Backup-API, Aufbewahrung, Download für Owner, Konsolenbefehl `backup`) — offen
+- [x] B1 Fehler-Benachrichtigung (Webhook, Entprellung, „wieder in Ordnung“, Dashboard-Karte) — fertig (fc281ab)
+- [x] B2 Datenbank-Backups (SQLite-Backup-API, Aufbewahrung, Download für Owner, Konsolenbefehl `backup`, Warnung `backup`) — fertig (Commit „Tägliche Datenbank-Backups …“)
 - [ ] B4 Live-Ansicht der Voice-Kanäle — offen
 - [ ] A3 Bewerbungen lesen + „Neue Saison“ — offen
 - [ ] A4 Spieler & Profile + „Rang jetzt abgleichen“ — offen
@@ -86,6 +86,11 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Versand: Webhook aus `ALERT_WEBHOOK_URL` (nur `https://discord.com/api/webhooks/…` u. ä., sonst ignoriert), `allowed_mentions: parse []`, Fehler ohne URL geloggt. Ohne Webhook oder wenn er scheitert: `#audit-log` über `audit()`, bei fehlender Verbindung in einer Warteschlange, die beim nächsten Verbinden **vor** neuen Meldungen nachgereicht wird.
 - Prüf-Loop `check_alerts` (1 min) startet mit `--apply` schon vor dem Login, damit auch ein Bot, der nie verbindet, gemeldet wird; fängt eigene Fehler ab. Dashboard zeigt aktive Probleme und die letzten 10 Meldungen mit Zustellweg.
 
+- **B2 Backups:** täglich 04:00 Uhr Berlin (`tasks.loop(time=…)`, damit Neustarts keine Extra-Backups erzeugen), Name `duality-backup-JJJJ-MM-TT_HHMMSS.sqlite3`, erst `.part` (600), dann `os.replace`; Ordner wird mit 700 angelegt. Aufräumen nach Datum im Namen, nur Dateien mit genau diesem Muster. Fehler → `BACKUP_STATE.last_error` → Warnung `backup`, bis ein Backup klappt; der Loop läuft weiter.
+- Backup-Seite und Download nur Owner (Download aus der eigenen Liste, nie Pfad aus der Anfrage, Audit-Eintrag), „Jetzt sichern“ (POST) und Konsolenbefehl `backup` ab Admin. Dashboard zeigt letztes Backup für alle.
+- Frontend: `api()` leitet nur bei 401 zur Startseite; 403 zeigt die Meldung (z. B. Admin auf Owner-Endpunkt). Beim Wiederverbinden führt 403 zur Startseite.
+- Backup zurückspielen (für README, Phase 7): `systemctl stop duality-bot`, aktuelle DB wegsichern, Backup nach `/home/duality-bot/app/duality_bot_data.sqlite3` kopieren, `chown dualitybot:dualitybot` + `chmod 600`, `systemctl start duality-bot`.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -110,6 +115,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 | `DISCORD_CLIENT_SECRET` | – | OAuth2-Client-Secret |
 | `ALERT_WEBHOOK_URL` | – | Discord-Webhook für Warnungen; ohne: `#audit-log` |
 | `ALERT_DISCONNECT_MINUTES` | `5` | Ab so vielen Minuten ohne Gateway gibt es eine Warnung |
+| `BACKUP_DIR` | `backups/` neben `main.py` | Zielordner der Backups (gitignored) |
+| `BACKUP_RETENTION_DAYS` | `14` | Ältere Backups werden gelöscht |
 
 ## Neue Tabellen
 _(noch keine)_
@@ -121,4 +128,4 @@ _(noch keine)_
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Nächstes Feature: B2 Backups (SQLite-Backup-API, `BACKUP_DIR`, `BACKUP_RETENTION_DAYS`, Rechte 600, Warnung `backup`, Panel-Liste + Download für Owner, Konsolenbefehl `backup`, Dashboard „Letztes Backup“). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Nächstes Feature: B4 Live-Ansicht der Voice-Kanäle (Snapshot aus `guild.voice_channels`, temporäre Kanäle + Besitzer aus `temp_voice_channels`, Push über WS bei `on_voice_state_update` und bei Änderungen im 5-s-Takt). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

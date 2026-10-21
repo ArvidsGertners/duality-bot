@@ -1,8 +1,12 @@
 """Tests für Bot-Funktionen aus main.py ohne Discord-Verbindung: python -m unittest discover -s tests"""
 
+import os
+import sqlite3
+import stat
 import sys
+import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -145,6 +149,59 @@ class AlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
     def test_webhook_prefixes(self):
         self.assertTrue("https://discord.com/api/webhooks/1/x".startswith(main.WEBHOOK_PREFIXES))
         self.assertFalse("https://evil.example/api/webhooks/1/x".startswith(main.WEBHOOK_PREFIXES))
+
+
+class BackupTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.backups = self.root / "backups"
+        for patcher in (
+            mock.patch.object(main, "DATA_PATH", self.root / "bot.sqlite3"),
+            mock.patch.dict(main.BACKUP_STATE, {"last_success": None, "last_error": None, "last_error_at": None}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        main.initialize_storage()
+        main.save_ticket(4242, 1, 99)
+
+    def test_backup_is_complete_and_private(self):
+        path = main.create_backup(self.backups, datetime(2026, 10, 21, 4, 0, tzinfo=main.BERLIN))
+        self.assertEqual(path.name, "duality-backup-2026-10-21_040000.sqlite3")
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.backups.stat().st_mode), 0o700)
+        with sqlite3.connect(path) as connection:
+            self.assertEqual(connection.execute("SELECT thread_id FROM tickets").fetchall(), [(4242,)])
+        self.assertEqual([entry.name for entry in self.backups.iterdir()], [path.name])
+
+    def test_list_and_prune_only_touch_backups(self):
+        self.backups.mkdir()
+        now = datetime(2026, 10, 21, 4, 0, tzinfo=main.BERLIN)
+        for days in (1, 13, 15, 40):
+            (self.backups / f"duality-backup-{now - timedelta(days=days):%Y-%m-%d_%H%M%S}.sqlite3").write_bytes(b"x")
+        for other in ("notizen.txt", "duality-backup-2020-01-01_000000.sqlite3.part", "duality-bot-2020-01-01.sqlite3"):
+            (self.backups / other).write_bytes(b"x")
+        self.assertEqual(len(main.list_backups(self.backups)), 4)
+        removed = main.prune_backups(self.backups, 14, now)
+        self.assertEqual(len(removed), 2)
+        names = sorted(entry.name for entry in self.backups.iterdir())
+        self.assertEqual(len(names), 5)
+        self.assertIn("notizen.txt", names)
+        self.assertEqual([backup["name"] for backup in main.list_backups(self.backups)][0][15:25], f"{now - timedelta(days=1):%Y-%m-%d}")
+
+    async def test_failure_raises_alert_until_next_success(self):
+        blocker = self.root / "kein-ordner"
+        blocker.write_text("Datei statt Ordner")
+        with self.assertRaises(OSError):
+            await main.run_backup(blocker, 14)
+        self.assertIsNotNone(main.BACKUP_STATE["last_error"])
+        with mock.patch.object(main, "RANK_CLIENT", None):
+            self.assertIn("Backup ist fehlgeschlagen", main.collect_problems({}, 0)["backup"])
+            result = await main.run_backup(self.backups, 14)
+            self.assertIsNone(main.collect_problems({}, 0)["backup"])
+        self.assertEqual(result["removed"], 0)
+        self.assertTrue((self.backups / result["name"]).exists())
 
 
 class EnvIntTests(unittest.TestCase):

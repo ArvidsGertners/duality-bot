@@ -18,6 +18,7 @@ import os
 import platform
 import re
 import secrets
+import sqlite3
 import sys
 import threading
 import time
@@ -480,6 +481,22 @@ async def command_say(context: CommandContext, arguments: str) -> str:
     return f"Nachricht in #{channel.name} gesendet."
 
 
+def format_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB".replace(".", ",")
+    return f"{size / 1024 / 1024:.1f} MB".replace(".", ",")
+
+
+async def command_backup(context: CommandContext, arguments: str) -> str:
+    try:
+        backup = await context.panel.hooks.run_backup()
+    except (OSError, sqlite3.Error) as error:
+        raise CommandError(f"Das Backup ist fehlgeschlagen ({type(error).__name__}). Details stehen im Log.") from error
+    return f"Backup erstellt: {backup['name']} ({format_size(backup['size'])}), {backup['removed']} alte Backups gelöscht."
+
+
 async def command_restart(context: CommandContext, arguments: str) -> str:
     context.panel.spawn(context.panel.restart_soon())
     return "Der Bot startet neu. Die Konsole verbindet sich danach automatisch wieder."
@@ -498,6 +515,7 @@ COMMANDS = {
         ConsoleCommand("reminders", "reminders", "Termin-Erinnerungen sofort prüfen", ADMIN, command_reminders),
         ConsoleCommand("purge", "purge", "Löschfristen für Termine und Bewerbungen sofort anwenden", ADMIN, command_purge),
         ConsoleCommand("cleanup-voice", "cleanup-voice", "leere temporäre Voice-Kanäle löschen", ADMIN, command_cleanup_voice),
+        ConsoleCommand("backup", "backup", "sofort ein Datenbank-Backup erstellen", ADMIN, command_backup),
         ConsoleCommand(
             "say", "say #kanal <text>", "Nachricht als Bot senden (ohne Pings)", ADMIN, command_say,
             confirm="Der Text wird als Bot-Nachricht im angegebenen Kanal veröffentlicht. Erwähnungen pingen niemanden.",
@@ -559,6 +577,10 @@ class PanelHooks:
     staff_members: Callable[[discord.Guild], list[discord.Member]]
     # main.Alerts: aktive Probleme und die letzten Meldungen
     alerts: Any
+    # Backups: erstellen, auflisten (neueste zuerst, mit name/path/size/created), letzter Fehler
+    run_backup: Callable[[], Awaitable[dict]]
+    list_backups: Callable[[], list[dict]]
+    backup_state: dict
 
 
 class Panel:
@@ -592,6 +614,9 @@ class Panel:
             web.post("/auth/logout", self.logout),
             web.get("/api/me", self.api_me),
             web.get("/api/status", self.api_status),
+            web.get("/api/backups", self.api_backups),
+            web.post("/api/backups", self.api_create_backup),
+            web.get("/api/backups/{name}", self.api_download_backup),
             web.get("/ws", self.websocket),
         ])
         app.router.add_static("/static/", STATIC_DIR)
@@ -772,6 +797,7 @@ class Panel:
                 "rate_limited": bool(rank_client and rank_client.rate_limited_until > now),
                 "rate_limited_until": int(rank_client.rate_limited_until) if rank_client and rank_client.rate_limited_until > now else None,
             },
+            "backup": self.backup_summary(),
             "alerts": {
                 "channel": "Webhook" if hooks.alerts.webhook_url else "#audit-log",
                 "active": [
@@ -922,6 +948,59 @@ class Panel:
     async def api_status(self, request: web.Request) -> web.Response:
         self.authenticate(request)
         return web.json_response(self.status())
+
+    def backup_summary(self) -> dict:
+        try:
+            backups = self.hooks.list_backups()
+        except OSError:
+            backups = []
+        last = backups[0] if backups else None
+        state = self.hooks.backup_state
+        return {
+            "last": {"name": last["name"], "size": last["size"], "created": last["created"]} if last else None,
+            "count": len(backups),
+            "last_error": state.get("last_error"),
+            "last_error_at": state.get("last_error_at"),
+        }
+
+    async def api_backups(self, request: web.Request) -> web.Response:
+        self.authenticate(request, OWNER)
+        return web.json_response({
+            "backups": [
+                {"name": backup["name"], "size": backup["size"], "created": backup["created"]}
+                for backup in self.hooks.list_backups()
+            ],
+            **{key: value for key, value in self.backup_summary().items() if key.startswith("last_error")},
+        })
+
+    async def api_create_backup(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        await self.audit_action(member, "hat ein Datenbank-Backup erstellt")
+        try:
+            backup = await self.hooks.run_backup()
+        except (OSError, sqlite3.Error) as error:
+            return web.json_response({"error": f"Das Backup ist fehlgeschlagen ({type(error).__name__})."}, status=500)
+        return web.json_response({"name": backup["name"], "size": backup["size"], "removed": backup["removed"]})
+
+    async def api_download_backup(self, request: web.Request) -> web.StreamResponse:
+        _, member, _ = self.authenticate(request, OWNER)
+        # Nur Namen aus der eigenen Liste; der Pfad kommt nie aus der Anfrage.
+        backup = next((entry for entry in self.hooks.list_backups() if entry["name"] == request.match_info["name"]), None)
+        if backup is None:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Dieses Backup gibt es nicht."}), content_type="application/json")
+        await self.audit_action(member, f"hat das Backup `{backup['name']}` heruntergeladen")
+        return web.FileResponse(backup["path"], headers={
+            "Content-Disposition": f'attachment; filename="{backup["name"]}"',
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "no-store",
+        })
+
+    async def audit_action(self, member: discord.Member, action: str) -> None:
+        """Steuernde Aktion aus dem Panel ins Log und in den Audit-Kanal."""
+        log.info("Panel: %s (%s) %s", member, member.id, action)
+        guild = self.guild()
+        if guild:
+            await self.hooks.audit(guild, f"🖥️ **Panel:** {member.mention} (`{member.id}`) {action}", PANEL_COLOR)
 
     def command_list(self, level: int) -> list[dict]:
         return [

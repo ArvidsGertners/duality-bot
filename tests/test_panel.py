@@ -129,6 +129,9 @@ def make_hooks(client=None) -> panel.PanelHooks:
         find_role=lambda guild, name: SimpleNamespace(members=[1, 2]) if name == "Spieler" else None,
         staff_members=lambda guild: [guild.get_member(OWNER_ID), guild.get_member(COACH_ID)],
         alerts=main.Alerts(),
+        run_backup=mock.AsyncMock(return_value={"name": "duality-backup-2026-10-21_040000.sqlite3", "size": 2048, "removed": 1}),
+        list_backups=lambda: [],
+        backup_state={"last_error": None, "last_error_at": None},
     )
 
 
@@ -745,6 +748,71 @@ class BotStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.GATEWAY_STATE["connected"])
         main.set_gateway_connected(False)
         self.assertFalse(main.GATEWAY_STATE["connected"])
+
+
+class BackupPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.file = Path(directory.name) / "duality-backup-2026-10-21_040000.sqlite3"
+        self.file.write_bytes(b"SQLite format 3\x00 Testinhalt")
+        self.hooks = make_hooks()
+        self.hooks.list_backups = lambda: [{"name": self.file.name, "path": self.file, "size": 26, "created": 1792548000}]
+        self.panel = panel.Panel(CONFIG, self.hooks)
+        self.client = TestClient(TestServer(self.panel.build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def get(self, path: str, user_id: int):
+        _, cookie = session_cookie(user_id)
+        return await self.client.get(path, headers={"Cookie": cookie})
+
+    async def test_list_only_for_owner(self):
+        self.assertEqual((await self.get("/api/backups", ADMIN_ID)).status, 403)
+        response = await self.get("/api/backups", OWNER_ID)
+        data = await response.json()
+        self.assertEqual(data["backups"], [{"name": self.file.name, "size": 26, "created": 1792548000}])
+
+    async def test_download_is_audited(self):
+        self.assertEqual((await self.get(f"/api/backups/{self.file.name}", ADMIN_ID)).status, 403)
+        response = await self.get(f"/api/backups/{self.file.name}", OWNER_ID)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), self.file.read_bytes())
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+        self.assertIn("heruntergeladen", self.hooks.audit.await_args.args[1])
+
+    async def test_unknown_names_and_traversal(self):
+        for name in ("gibtsnicht.sqlite3", "..%2F..%2Fetc%2Fpasswd", "%2E%2E%2Fbot.sqlite3"):
+            response = await self.get(f"/api/backups/{name}", OWNER_ID)
+            self.assertEqual(response.status, 404, name)
+        self.hooks.audit.assert_not_awaited()
+
+    async def test_create_needs_admin_and_csrf(self):
+        for user_id, status in ((COACH_ID, 403), (ADMIN_ID, 200)):
+            session, cookie = session_cookie(user_id)
+            response = await self.client.post(
+                "/api/backups", headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]}
+            )
+            self.assertEqual(response.status, status)
+        self.hooks.run_backup.assert_awaited_once()
+        _, cookie = session_cookie(ADMIN_ID)
+        self.assertEqual((await self.client.post("/api/backups", headers={"Cookie": cookie})).status, 403)
+
+    async def test_failed_backup(self):
+        self.hooks.run_backup.side_effect = OSError("Platte voll")
+        session, cookie = session_cookie(ADMIN_ID)
+        response = await self.client.post("/api/backups", headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]})
+        self.assertEqual(response.status, 500)
+        self.assertNotIn("Platte voll", (await response.json())["error"])
+
+    async def test_console_command_and_dashboard(self):
+        guild = self.hooks.client.guild
+        context = panel.CommandContext(self.panel, guild, guild.get_member(ADMIN_ID), panel.ADMIN)
+        text = await panel.command_backup(context, "")
+        self.assertEqual(text, "Backup erstellt: duality-backup-2026-10-21_040000.sqlite3 (2,0 KB), 1 alte Backups gelöscht.")
+        self.assertEqual(panel.COMMANDS["backup"].level, panel.ADMIN)
+        summary = self.panel.status()["backup"]
+        self.assertEqual((summary["count"], summary["last"]["size"]), (1, 26))
 
 
 if __name__ == "__main__":

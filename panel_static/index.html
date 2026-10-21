@@ -16,6 +16,7 @@
         <ul id="nav">
           <li><a href="#dashboard" data-page="dashboard" data-level="1">Dashboard</a></li>
           <li><a href="#konsole" data-page="konsole" data-level="1">Konsole</a></li>
+          <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
         </ul>
       </nav>
       <div class="user">
@@ -42,6 +43,10 @@
             <h2 id="card-guild">Server</h2>
             <dl class="stat-list" id="dash-guild"></dl>
           </article>
+          <article class="card" aria-labelledby="card-backup">
+            <h2 id="card-backup">Backups</h2>
+            <dl class="stat-list" id="dash-backup"></dl>
+          </article>
           <article class="card" aria-labelledby="card-api">
             <h2 id="card-api">HenrikDev-API</h2>
             <dl class="stat-list" id="dash-api"></dl>
@@ -66,6 +71,24 @@
           </div>
         </article>
         <p class="muted small" id="dash-updated">Warte auf Daten vom Bot …</p>
+      </section>
+
+      <section id="page-backups" class="page" aria-labelledby="title-backups" hidden>
+        <h1 id="title-backups">Backups</h1>
+        <p class="muted">Jeden Tag um 4:00 Uhr sichert der Bot die Datenbank; alte Backups löscht er nach der eingestellten Frist.
+          Zurückspielen geht nur direkt auf dem Server (README, „Backup zurückspielen“). Jeder Download wird im Audit-Log vermerkt.</p>
+        <div class="toolbar">
+          <button type="button" class="primary" id="backup-create">Jetzt Backup erstellen</button>
+          <span id="backup-message" role="status"></span>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead>
+              <tr><th scope="col">Datei</th><th scope="col">Erstellt</th><th scope="col">Größe</th><th scope="col"><span class="visually-hidden">Aktion</span></th></tr>
+            </thead>
+            <tbody id="backup-list"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="page-konsole" class="page" aria-labelledby="title-konsole" hidden>

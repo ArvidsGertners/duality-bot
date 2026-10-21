@@ -6,3 +6,5 @@ __pycache__/
 !.env.example
 *.sqlite3
 *.db
+# Backups enthalten personenbezogene Daten
+backups/

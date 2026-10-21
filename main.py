@@ -18,13 +18,14 @@ import sqlite3
 import getpass
 import logging
 import os
+import re
 import time
 import sys
 import weakref
 from collections import deque
 from collections.abc import Sequence
-from contextlib import contextmanager
-from datetime import datetime, timedelta
+from contextlib import closing, contextmanager
+from datetime import datetime, timedelta, time as day_time
 from pathlib import Path
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
@@ -1185,6 +1186,7 @@ def collect_problems(loops: dict, now: float, disconnect_minutes: int = ALERT_DI
     problems["gateway"] = None
     if not GATEWAY_STATE["connected"] and offline_seconds >= disconnect_minutes * 60:
         problems["gateway"] = f"Der Bot ist seit {int(offline_seconds // 60)} Minuten nicht mit Discord verbunden"
+    problems["backup"] = f"Das Backup ist fehlgeschlagen: {BACKUP_STATE['last_error']}" if BACKUP_STATE["last_error"] else None
     problems["henrikdev"] = None
     if RANK_CLIENT and RANK_CLIENT.failures_in_row >= ALERT_HENRIKDEV_FAILURES:
         problems["henrikdev"] = (
@@ -2187,6 +2189,71 @@ async def purge_expired_data(guild: discord.Guild | None) -> tuple[int, int]:
         removed_applications += 1
         log.info("Bewerbung nach %s Tagen gelöscht", APPLICATION_RETENTION_DAYS)
     return removed_events, removed_applications
+
+
+BACKUP_PREFIX = "duality-backup-"
+BACKUP_PATTERN = re.compile(r"duality-backup-(\d{4}-\d{2}-\d{2})_(\d{6})\.sqlite3")
+BACKUP_RETENTION_DAYS = 14
+BACKUP_HOUR = 4
+BACKUP_STATE = {"last_success": None, "last_error": None, "last_error_at": None}
+BACKUP_LOCK = asyncio.Lock()
+
+
+def create_backup(directory: Path, moment: datetime) -> Path:
+    """Konsistente Kopie über die SQLite-Backup-API, nur für den Bot-Nutzer lesbar."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = directory / f"{BACKUP_PREFIX}{moment:%Y-%m-%d_%H%M%S}.sqlite3"
+    # Erst fertig schreiben, dann umbenennen: Ein halbes Backup trägt nie den endgültigen Namen.
+    partial = target.with_name(target.name + ".part")
+    os.close(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+    try:
+        with closing(sqlite3.connect(DATA_PATH)) as source, closing(sqlite3.connect(partial)) as destination:
+            source.backup(destination)
+        os.replace(partial, target)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def list_backups(directory: Path) -> list[dict]:
+    """Vorhandene Backups, neueste zuerst. Andere Dateien im Ordner werden ignoriert."""
+    if not directory.is_dir():
+        return []
+    backups = []
+    for path in directory.iterdir():
+        match = BACKUP_PATTERN.fullmatch(path.name)
+        if not match or not path.is_file():
+            continue
+        created = datetime.strptime(f"{match[1]} {match[2]}", "%Y-%m-%d %H%M%S").replace(tzinfo=BERLIN)
+        backups.append({"name": path.name, "path": path, "size": path.stat().st_size, "created": int(created.timestamp())})
+    return sorted(backups, key=lambda backup: backup["created"], reverse=True)
+
+
+def prune_backups(directory: Path, retention_days: int, now: datetime) -> list[str]:
+    cutoff = (now - timedelta(days=retention_days)).timestamp()
+    removed = []
+    for backup in list_backups(directory):
+        if backup["created"] < cutoff:
+            backup["path"].unlink()
+            removed.append(backup["name"])
+    return removed
+
+
+async def run_backup(directory: Path, retention_days: int) -> dict:
+    """Backup erstellen und alte löschen. Ein Fehler bleibt in BACKUP_STATE stehen, bis ein Backup klappt."""
+    async with BACKUP_LOCK:
+        now = datetime.now(BERLIN)
+        try:
+            path = await asyncio.to_thread(create_backup, directory, now)
+            removed = await asyncio.to_thread(prune_backups, directory, retention_days, now)
+        except (OSError, sqlite3.Error) as error:
+            BACKUP_STATE.update(last_error=f"{type(error).__name__}: {error}", last_error_at=int(time.time()))
+            log.error("Backup fehlgeschlagen: %s", BACKUP_STATE["last_error"])
+            raise
+        BACKUP_STATE.update(last_success=int(time.time()), last_error=None, last_error_at=None)
+        log.info("Backup erstellt: %s, %s alte Backups gelöscht", path.name, len(removed))
+        return {"name": path.name, "size": path.stat().st_size, "removed": len(removed)}
 
 
 async def delete_my_applications(guild: discord.Guild, user_id: int) -> int:
@@ -3369,6 +3436,8 @@ async def main(apply: bool) -> int | None:
         )
     alerts = Alerts(webhook_url or None)
     disconnect_minutes = env_int("ALERT_DISCONNECT_MINUTES", ALERT_DISCONNECT_MINUTES, 1, 24 * 60)
+    backup_dir = Path(os.getenv("BACKUP_DIR", "").strip() or DATA_PATH.with_name("backups"))
+    backup_retention = env_int("BACKUP_RETENTION_DAYS", BACKUP_RETENTION_DAYS, 1, 3650)
     intents = discord.Intents.none()
     intents.guilds = True
     intents.members = True
@@ -3415,6 +3484,15 @@ async def main(apply: bool) -> int | None:
     async def event_reminders_error(error: Exception):
         log.error("Fehler bei den Termin-Erinnerungen", exc_info=error)
 
+    @tasks.loop(time=day_time(hour=BACKUP_HOUR, tzinfo=BERLIN))
+    @tracked("backups")
+    async def daily_backup():
+        try:
+            await run_backup(backup_dir, backup_retention)
+        except (OSError, sqlite3.Error):
+            # Steht in BACKUP_STATE; die Warnung kommt über check_alerts. Der Task läuft morgen weiter.
+            pass
+
     @tasks.loop(minutes=1)
     @tracked("check_alerts")
     async def check_alerts():
@@ -3432,6 +3510,7 @@ async def main(apply: bool) -> int | None:
         "sync_ranks": ("Rang-Abgleich", sync_ranks),
         "purge_declined_applications": ("Löschfristen", purge_declined_applications),
         "event_reminders": ("Termin-Erinnerungen", event_reminders),
+        "backups": ("Backups", daily_backup),
         "check_alerts": ("Warnungen prüfen", check_alerts),
     }
 
@@ -3518,6 +3597,8 @@ async def main(apply: bool) -> int | None:
                 sync_ranks.start()
             if not event_reminders.is_running():
                 event_reminders.start()
+            if not daily_backup.is_running():
+                daily_backup.start()
             print("Onboarding-Bot läuft. Mit Ctrl+C beenden.")
         else:
             await client.close()
@@ -3554,6 +3635,9 @@ async def main(apply: bool) -> int | None:
                     find_role=find_role,
                     staff_members=staff_members,
                     alerts=alerts,
+                    run_backup=lambda: run_backup(backup_dir, backup_retention),
+                    list_backups=lambda: list_backups(backup_dir),
+                    backup_state=BACKUP_STATE,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

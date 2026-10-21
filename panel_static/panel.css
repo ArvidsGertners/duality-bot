@@ -200,6 +200,9 @@ th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid var(-
 th { color: var(--muted); font-weight: 600; font-size: .85rem; }
 .table-wrap { overflow-x: auto; }
 
+.toolbar { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; margin-bottom: 1rem; }
+.empty { color: var(--muted); text-align: center; padding: 1rem; }
+
 /* Konsole */
 .console { display: flex; flex-direction: column; gap: .75rem; height: calc(100vh - 7rem); min-height: 420px; }
 .console-toolbar { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; }

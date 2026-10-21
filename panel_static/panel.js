@@ -37,13 +37,17 @@ async function api(path, options = {}) {
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     credentials: "same-origin",
   });
-  if (response.status === 401 || response.status === 403) {
-    // Abgemeldet oder Staff-Rolle verloren: Die Startseite erklärt, warum.
+  if (response.status === 401) {
+    // Abgemeldet: Die Startseite zeigt die Anmeldung.
     window.location.href = "/";
-    throw new Error("Kein Zugriff");
+    throw new Error("Bitte melde dich an.");
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Fehler ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(data.error || `Fehler ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -69,6 +73,8 @@ function showPage() {
   }
   document.title = `${current.textContent} · Duality-Panel`;
   if (current.dataset.page === "konsole") scrollLog(true);
+  const loader = pageLoaders[current.dataset.page];
+  if (loader) loader().catch((error) => setBanner(`Laden fehlgeschlagen: ${error.message}`));
 }
 
 async function logout() {
@@ -112,6 +118,12 @@ function fillList(list, rows) {
     items.push(term, detail);
   }
   list.replaceChildren(...items);
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toLocaleString("de-DE", { maximumFractionDigits: 1 })} KB`;
+  return `${(bytes / 1024 / 1024).toLocaleString("de-DE", { maximumFractionDigits: 1 })} MB`;
 }
 
 function renderUptime() {
@@ -187,9 +199,69 @@ function renderDashboard(status) {
     }
     return row;
   }));
+  const backup = status.backup;
+  fillList($("#dash-backup"), [
+    ["Letztes", backup.last ? formatTime(backup.last.created) : "noch keins"],
+    ["Größe", backup.last ? formatSize(backup.last.size) : "–"],
+    ["Vorhanden", String(backup.count)],
+    ["Letzter Fehler", backup.last_error ? pill("Fehlgeschlagen", "bad") : "–"],
+  ]);
   renderAlerts(status.alerts);
   $("#dash-updated").textContent = `Zuletzt aktualisiert: ${clock.format(new Date(status.time * 1000))} Uhr (alle 5 Sekunden)`;
 }
+
+/* Seiten mit Daten aus /api */
+
+function tableRow(...cells) {
+  const row = document.createElement("tr");
+  for (const value of cells) {
+    const cell = document.createElement("td");
+    cell.append(value ?? "–");
+    row.append(cell);
+  }
+  return row;
+}
+
+function emptyRow(columns, text) {
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+  cell.colSpan = columns;
+  cell.className = "empty";
+  cell.textContent = text;
+  row.append(cell);
+  return row;
+}
+
+async function loadBackups() {
+  const data = await api("/api/backups");
+  $("#backup-list").replaceChildren(...(data.backups.length ? data.backups.map((backup) => {
+    const link = document.createElement("a");
+    link.className = "button small";
+    link.href = `/api/backups/${encodeURIComponent(backup.name)}`;
+    link.download = backup.name;
+    link.textContent = "Herunterladen";
+    link.setAttribute("aria-label", `${backup.name} herunterladen`);
+    return tableRow(span("mono", backup.name), formatTime(backup.created), formatSize(backup.size), link);
+  }) : [emptyRow(4, "Noch keine Backups vorhanden.")]));
+  $("#backup-message").textContent = data.last_error ? `Letzter Fehler: ${data.last_error}` : "";
+}
+
+async function createBackup() {
+  const button = $("#backup-create");
+  button.disabled = true;
+  $("#backup-message").textContent = "Backup läuft …";
+  try {
+    const backup = await api("/api/backups", { method: "POST" });
+    await loadBackups();
+    $("#backup-message").textContent = `Erstellt: ${backup.name} (${formatSize(backup.size)})`;
+  } catch (error) {
+    $("#backup-message").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+const pageLoaders = { backups: loadBackups };
 
 /* Konsole: Log-Anzeige */
 
@@ -290,6 +362,10 @@ async function reconnect() {
   try {
     state.me = await api("/api/me");
   } catch (error) {
+    if (error.status === 403) {
+      window.location.href = "/";
+      return;
+    }
     scheduleReconnect();
     return;
   }
@@ -427,6 +503,7 @@ async function init() {
   $("#command-form").addEventListener("submit", submitCommand);
   $("#command-input").addEventListener("keydown", handleCommandKeys);
   $("#log-pause").addEventListener("click", togglePause);
+  $("#backup-create").addEventListener("click", createBackup);
   $("#log-search").addEventListener("input", renderLog);
   for (const box of document.querySelectorAll("input[name=log-level]")) box.addEventListener("change", renderLog);
   window.addEventListener("hashchange", showPage);
