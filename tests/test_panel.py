@@ -23,6 +23,11 @@ import main
 import panel
 
 
+def setUpModule():
+    # Nur Standardwerte; kein Test soll Einstellungen aus der echten Datenbank lesen.
+    main.SETTINGS_CACHE = {}
+
+
 def env_value(name: str) -> str | None:
     """Wert aus der Umgebung oder aus .env im Projektordner; echte Tokens stehen nie im Code."""
     if os.environ.get(name):
@@ -157,7 +162,14 @@ def make_hooks(client=None) -> panel.PanelHooks:
         rank_value=main.rank_value,
         attendance_events=lambda guild_id, since, until: ([], {}),
         summarize_attendance=main.summarize_attendance,
-        attendance_rules={"threshold": 50, "missing_limit": 2, "retention_days": 90},
+        attendance_rules=lambda: {"threshold": 50, "missing_limit": 2, "retention_days": 90},
+        settings_overview=lambda: [{
+            "key": "application_min_votes", "label": "Stimmen für eine Bewerbungsentscheidung", "description": "…",
+            "kind": "int", "minimum": 1, "maximum": 10, "default": 2, "value": 3, "is_default": False,
+            "updated_by": ADMIN_ID, "updated_at": 1000,
+        }],
+        save_setting=mock.Mock(return_value=(2, 3)),
+        reset_setting=mock.Mock(return_value=(3, 2)),
     )
 
 
@@ -1206,6 +1218,48 @@ class RankingPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((first["position"], first["name"], first["rank_value"]), (1, "Zoe (Kader)", [4, 1]))
         self.assertEqual([entry["rank_tier"] for entry in first["history"]], ["Gold 3", "Platinum 1"])
         self.assertEqual((second["rank_tier"], second["rank_value"], second["history"]), (None, None, []))
+
+
+class SettingsPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.client = TestClient(TestServer(panel.Panel(CONFIG, self.hooks).build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def post(self, path: str, body, user_id: int = ADMIN_ID):
+        session, cookie = session_cookie(user_id)
+        return await self.client.post(path, json=body, headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]})
+
+    async def test_admin_only(self):
+        _, cookie = session_cookie(COACH_ID)
+        self.assertEqual((await self.client.get("/api/settings", headers={"Cookie": cookie})).status, 403)
+        self.assertEqual((await self.post("/api/settings/application_min_votes", {"value": 3}, COACH_ID)).status, 403)
+        self.hooks.save_setting.assert_not_called()
+        _, cookie = session_cookie(ADMIN_ID)
+        settings = (await (await self.client.get("/api/settings", headers={"Cookie": cookie})).json())["settings"]
+        self.assertEqual(settings[0]["updated_by"]["id"], str(ADMIN_ID))
+
+    async def test_save_audits_old_and_new(self):
+        response = await self.post("/api/settings/application_min_votes", {"value": 3})
+        self.assertEqual(await response.json(), {"value": 3})
+        self.assertEqual(self.hooks.save_setting.call_args.args, ("application_min_votes", 3, ADMIN_ID))
+        self.assertIn("„Stimmen für eine Bewerbungsentscheidung“ geändert: 2 → 3", self.hooks.audit.await_args.args[1])
+
+    async def test_invalid_and_reset(self):
+        self.hooks.save_setting.side_effect = ValueError("Erlaubt sind 1 bis 10.")
+        response = await self.post("/api/settings/application_min_votes", {"value": 99})
+        self.assertEqual((response.status, (await response.json())["error"]), (400, "Erlaubt sind 1 bis 10."))
+        self.assertEqual((await self.post("/api/settings/application_min_votes", {})).status, 400)
+        self.hooks.audit.assert_not_awaited()
+        response = await self.post("/api/settings/application_min_votes/reset", None)
+        self.assertEqual(await response.json(), {"value": 2})
+        self.assertIn("auf den Standard gesetzt: 3 → 2", self.hooks.audit.await_args.args[1])
+
+    def test_setting_text(self):
+        self.assertEqual(panel.setting_text(True), "an")
+        self.assertEqual(panel.setting_text((24, 1)), "24, 1 h")
+        self.assertEqual(panel.setting_text(5), "5")
 
 
 if __name__ == "__main__":

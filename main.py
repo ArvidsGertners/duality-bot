@@ -235,6 +235,10 @@ def initialize_storage() -> None:
             "channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL, "
             "created_at INTEGER NOT NULL)"
         )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS bot_settings ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_by INTEGER, updated_at INTEGER NOT NULL)"
+        )
         # Rangverlauf für die Rangliste; ein Eintrag nur, wenn sich der Rang ändert.
         connection.execute(
             "CREATE TABLE IF NOT EXISTS rank_history ("
@@ -565,7 +569,9 @@ def summarize_attendance(
             **counts,
             "total": total,
             "rate": rate,
-            "flagged": bool(total) and (rate < ATTENDANCE_THRESHOLD_PERCENT or counts["none"] >= ATTENDANCE_MISSING_LIMIT),
+            "flagged": bool(total) and (
+                rate < setting("attendance_threshold_percent") or counts["none"] >= setting("attendance_missing_limit")
+            ),
             "history": history,
         }
     return summary
@@ -1217,7 +1223,6 @@ async def set_exclusive_role(member: discord.Member, role_names, selected_role: 
 
 
 RANK_CONGRATS_CHANNEL = "team-chat"
-RANK_CONGRATS_ENABLED = True
 
 
 def rank_value(tier_name: str | None) -> tuple[int, int] | None:
@@ -1253,7 +1258,7 @@ def rank_leaderboard(guild: discord.Guild) -> list[tuple[discord.Member, Profile
 
 
 async def congratulate_rank_up(member: discord.Member, old_tier: str, new_tier: str) -> None:
-    if not RANK_CONGRATS_ENABLED or not member_has_role(member, "Spieler"):
+    if not setting("rank_congrats_enabled") or not member_has_role(member, "Spieler"):
         return
     channel = find_text_channel(member.guild, RANK_CONGRATS_CHANNEL)
     if channel is None:
@@ -1301,7 +1306,7 @@ async def sync_all_ranks(guild: discord.Guild) -> int:
             except (RankLookupError, discord.HTTPException) as error:
                 log.warning("Rang von %s konnte nicht aktualisiert werden: %s", profile.user_id, error)
             # Abstand halten, damit der API-Key nicht ins Rate-Limit läuft.
-            await asyncio.sleep(RANK_SYNC_DELAY_SECONDS)
+            await asyncio.sleep(setting("rank_sync_delay_seconds"))
         log.info("%s Ränge über Riot-ID aktualisiert", synced)
         return synced
 
@@ -1477,7 +1482,181 @@ class Alerts:
             await self.session.close()
 
 
-def collect_problems(loops: dict, now: float, disconnect_minutes: int = ALERT_DISCONNECT_MINUTES) -> dict[str, str | None]:
+class SettingDefinition(NamedTuple):
+    key: str
+    label: str
+    description: str
+    # "int", "bool" oder "hours" (1–4 Stundenangaben, absteigend sortiert)
+    kind: str
+    default: object
+    minimum: int | None = None
+    maximum: int | None = None
+
+
+SETTING_DEFINITIONS = {definition.key: definition for definition in (
+    SettingDefinition(
+        "application_min_votes", "Stimmen für eine Bewerbungsentscheidung",
+        "So viele Staff-Stimmen (👍/👎) braucht es, bevor angenommen oder abgelehnt werden kann. Gibt es weniger Staff, reicht die Staff-Zahl.",
+        "int", APPLICATION_MIN_VOTES, 1, 10,
+    ),
+    SettingDefinition(
+        "application_retention_days", "Löschfrist für Bewerbungen (Tage)",
+        "Abgelehnte und geschlossene Bewerbungen werden nach so vielen Tagen samt Nachricht gelöscht.",
+        "int", APPLICATION_RETENTION_DAYS, 1, 365,
+    ),
+    SettingDefinition(
+        "event_retention_days", "Löschfrist für Termine (Tage)",
+        "Vergangene Termine und Antworten werden nach so vielen Tagen gelöscht; so weit reichen Anwesenheit und /profil zurück.",
+        "int", EVENT_RETENTION_DAYS, 7, 365,
+    ),
+    SettingDefinition(
+        "event_reminder_hours", "Termin-Erinnerungen (Stunden vorher)",
+        "Wann vor einem Termin in #spieltermine erinnert wird, z. B. 24 und 1. Höchstens 4 Zeitpunkte.",
+        "hours", (24, 1), 1, 168,
+    ),
+    SettingDefinition(
+        "rank_sync_delay_seconds", "Pause beim Rang-Abgleich (Sekunden)",
+        "Abstand zwischen zwei Abfragen bei der HenrikDev-API, damit der Schlüssel nicht ins Rate-Limit läuft.",
+        "int", RANK_SYNC_DELAY_SECONDS, 1, 60,
+    ),
+    SettingDefinition(
+        "rank_congrats_enabled", "Glückwunsch bei Rangaufstieg",
+        "Postet in #team-chat einen Glückwunsch, wenn ein Spieler eine Hauptstufe aufsteigt.",
+        "bool", True,
+    ),
+    SettingDefinition(
+        "attendance_threshold_percent", "Anwesenheit: Schwelle (%)",
+        "Spieler unter dieser Zusagequote werden in der Anwesenheit markiert.",
+        "int", ATTENDANCE_THRESHOLD_PERCENT, 0, 100,
+    ),
+    SettingDefinition(
+        "attendance_missing_limit", "Anwesenheit: Termine ohne Reaktion",
+        "Ab so vielen Terminen ohne Reaktion wird ein Spieler in der Anwesenheit markiert.",
+        "int", ATTENDANCE_MISSING_LIMIT, 1, 20,
+    ),
+    SettingDefinition(
+        "alert_disconnect_minutes", "Warnung: Minuten ohne Verbindung",
+        "Ab so vielen Minuten ohne Verbindung zu Discord gibt es eine Warnung.",
+        "int", ALERT_DISCONNECT_MINUTES, 1, 24 * 60,
+    ),
+    SettingDefinition(
+        "alert_henrikdev_failures", "Warnung: HenrikDev-Fehler in Folge",
+        "Ab so vielen fehlgeschlagenen Abfragen in Folge gibt es eine Warnung.",
+        "int", ALERT_HENRIKDEV_FAILURES, 1, 20,
+    ),
+)}
+# Gelesene Einstellungen; None heißt „neu aus der Datenbank laden“.
+SETTINGS_CACHE: dict[str, object] | None = None
+
+
+def validate_setting(definition: SettingDefinition, value):
+    """Prüft einen Wert und gibt ihn in der Form zurück, mit der der Code arbeitet."""
+    if definition.kind == "bool":
+        if not isinstance(value, bool):
+            raise ValueError("Bitte an oder aus wählen.")
+        return value
+    if definition.kind == "int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Bitte eine ganze Zahl eingeben.")
+        if not definition.minimum <= value <= definition.maximum:
+            raise ValueError(f"Erlaubt sind {definition.minimum} bis {definition.maximum}.")
+        return value
+    if (
+        not isinstance(value, (list, tuple)) or not 1 <= len(value) <= 4
+        or any(isinstance(hour, bool) or not isinstance(hour, int) for hour in value)
+    ):
+        raise ValueError("Bitte 1 bis 4 ganze Zahlen angeben, z. B. 24, 1.")
+    if any(not definition.minimum <= hour <= definition.maximum for hour in value):
+        raise ValueError(f"Jeder Zeitpunkt muss zwischen {definition.minimum} und {definition.maximum} Stunden liegen.")
+    if len(set(value)) != len(value):
+        raise ValueError("Jeder Zeitpunkt darf nur einmal vorkommen.")
+    return tuple(sorted(value, reverse=True))
+
+
+def load_settings() -> dict[str, object]:
+    try:
+        with open_db() as connection:
+            rows = connection.execute("SELECT key, value FROM bot_settings").fetchall()
+    except sqlite3.Error:
+        return {}
+    values = {}
+    for key, raw in rows:
+        definition = SETTING_DEFINITIONS.get(key)
+        if definition is None:
+            continue
+        try:
+            values[key] = validate_setting(definition, json.loads(raw))
+        except (ValueError, TypeError):
+            log.warning("Einstellung %s in der Datenbank ist ungültig; es gilt der Standard", key)
+    return values
+
+
+def setting(key: str):
+    global SETTINGS_CACHE
+    if SETTINGS_CACHE is None:
+        SETTINGS_CACHE = load_settings()
+    return SETTINGS_CACHE.get(key, SETTING_DEFINITIONS[key].default)
+
+
+def save_setting(key: str, value, updated_by: int | None) -> tuple[object, object]:
+    """Speichert einen geprüften Wert und gibt (alt, neu) zurück; wirkt sofort."""
+    global SETTINGS_CACHE
+    definition = SETTING_DEFINITIONS.get(key)
+    if definition is None:
+        raise ValueError("Diese Einstellung gibt es nicht.")
+    new_value = validate_setting(definition, value)
+    old_value = setting(key)
+    stored = list(new_value) if isinstance(new_value, tuple) else new_value
+    with open_db() as connection:
+        connection.execute(
+            "INSERT INTO bot_settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, "
+            "updated_at = excluded.updated_at",
+            (key, json.dumps(stored), updated_by, int(time.time())),
+        )
+    SETTINGS_CACHE = None
+    return old_value, new_value
+
+
+def reset_setting(key: str) -> tuple[object, object]:
+    global SETTINGS_CACHE
+    definition = SETTING_DEFINITIONS.get(key)
+    if definition is None:
+        raise ValueError("Diese Einstellung gibt es nicht.")
+    old_value = setting(key)
+    with open_db() as connection:
+        connection.execute("DELETE FROM bot_settings WHERE key = ?", (key,))
+    SETTINGS_CACHE = None
+    return old_value, definition.default
+
+
+def settings_overview() -> list[dict]:
+    with open_db() as connection:
+        stored = {
+            key: (updated_by, updated_at)
+            for key, updated_by, updated_at in connection.execute("SELECT key, updated_by, updated_at FROM bot_settings")
+        }
+    overview = []
+    for key, definition in SETTING_DEFINITIONS.items():
+        updated_by, updated_at = stored.get(key, (None, None))
+        value = setting(key)
+        overview.append({
+            "key": key,
+            "label": definition.label,
+            "description": definition.description,
+            "kind": definition.kind,
+            "minimum": definition.minimum,
+            "maximum": definition.maximum,
+            "default": list(definition.default) if isinstance(definition.default, tuple) else definition.default,
+            "value": list(value) if isinstance(value, tuple) else value,
+            "is_default": key not in stored,
+            "updated_by": updated_by,
+            "updated_at": updated_at,
+        })
+    return overview
+
+
+def collect_problems(loops: dict, now: float) -> dict[str, str | None]:
     """Aktuelle Probleme je Schlüssel; None heißt „in Ordnung“."""
     problems: dict[str, str | None] = {}
     for name, (label, loop) in loops.items():
@@ -1493,11 +1672,11 @@ def collect_problems(loops: dict, now: float, disconnect_minutes: int = ALERT_DI
         problems[f"task:{name}"] = problem
     offline_seconds = now - GATEWAY_STATE["changed_at"]
     problems["gateway"] = None
-    if not GATEWAY_STATE["connected"] and offline_seconds >= disconnect_minutes * 60:
+    if not GATEWAY_STATE["connected"] and offline_seconds >= setting("alert_disconnect_minutes") * 60:
         problems["gateway"] = f"Der Bot ist seit {int(offline_seconds // 60)} Minuten nicht mit Discord verbunden"
     problems["backup"] = f"Das Backup ist fehlgeschlagen: {BACKUP_STATE['last_error']}" if BACKUP_STATE["last_error"] else None
     problems["henrikdev"] = None
-    if RANK_CLIENT and RANK_CLIENT.failures_in_row >= ALERT_HENRIKDEV_FAILURES:
+    if RANK_CLIENT and RANK_CLIENT.failures_in_row >= setting("alert_henrikdev_failures"):
         problems["henrikdev"] = (
             f"Die HenrikDev-API ist {RANK_CLIENT.failures_in_row}× in Folge fehlgeschlagen "
             f"(zuletzt: {RANK_CLIENT.last_error})"
@@ -1971,7 +2150,7 @@ def required_votes(guild: discord.Guild) -> int:
         for member in role.members
         if not getattr(member, "bot", False)
     }
-    return max(1, min(APPLICATION_MIN_VOTES, len(staff_ids)))
+    return max(1, min(setting("application_min_votes"), len(staff_ids)))
 
 
 def render_application(message: discord.Message, application: Application) -> discord.Embed:
@@ -2127,7 +2306,7 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
         await close_application_thread(message, application)
         await interaction.followup.send(
             "Die Person ist nicht mehr auf dem Server. Die Bewerbung wurde geschlossen und wird "
-            f"nach {APPLICATION_RETENTION_DAYS} Tagen automatisch gelöscht.",
+            f"nach {setting('application_retention_days')} Tagen automatisch gelöscht.",
             ephemeral=True,
         )
         return
@@ -2195,7 +2374,7 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
     if not dm_sent:
         response += ". Die DM konnte nicht zugestellt werden"
     if not accepted:
-        response += f". Der Eintrag wird nach {APPLICATION_RETENTION_DAYS} Tagen automatisch gelöscht"
+        response += f". Der Eintrag wird nach {setting('application_retention_days')} Tagen automatisch gelöscht"
     await interaction.followup.send(response + ".", ephemeral=True)
 
 
@@ -2480,7 +2659,7 @@ async def audit_message_delete(guild: discord.Guild, payload: discord.RawMessage
 async def purge_expired_data(guild: discord.Guild | None) -> tuple[int, int]:
     """Wendet die Löschfristen an. Gibt (gelöschte Termine, gelöschte Bewerbungen) zurück."""
     now = int(time.time())
-    removed_events = delete_past_events(now - EVENT_RETENTION_DAYS * 24 * 60 * 60)
+    removed_events = delete_past_events(now - setting("event_retention_days") * 24 * 60 * 60)
     if removed_events:
         log.info("%s vergangene Termine aus der Datenbank entfernt", removed_events)
 
@@ -2488,7 +2667,8 @@ async def purge_expired_data(guild: discord.Guild | None) -> tuple[int, int]:
     if staff_channel is None:
         return removed_events, 0
     removed_applications = 0
-    cutoff = now - APPLICATION_RETENTION_DAYS * 24 * 60 * 60
+    retention_days = setting("application_retention_days")
+    cutoff = now - retention_days * 24 * 60 * 60
     for application in expired_applications(guild.id, cutoff):
         try:
             message = await staff_channel.fetch_message(application.message_id)
@@ -2497,7 +2677,7 @@ async def purge_expired_data(guild: discord.Guild | None) -> tuple[int, int]:
             pass
         delete_application(application.message_id)
         removed_applications += 1
-        log.info("Bewerbung nach %s Tagen gelöscht", APPLICATION_RETENTION_DAYS)
+        log.info("Bewerbung nach %s Tagen gelöscht", retention_days)
     return removed_events, removed_applications
 
 
@@ -2860,6 +3040,23 @@ class EventRSVPView(DualityView):
 REMINDER_LOCK = asyncio.Lock()
 
 
+def due_reminder(hours: Sequence[int], seconds_until_start: int) -> tuple[str, str] | None:
+    """Fällige Erinnerung als (Schlüssel, Überschrift): Fenster von (h−1, h] Stunden vor Beginn.
+    Die Schlüssel „24h“ und „1h“ entsprechen den bisher gespeicherten."""
+    for hour in hours:
+        if (hour - 1) * 3600 < seconds_until_start <= hour * 3600:
+            if hour == 24:
+                label = "Morgen"
+            elif hour == 1:
+                label = "Gleich geht's los"
+            elif hour % 24 == 0:
+                label = f"In {hour // 24} Tagen"
+            else:
+                label = f"In {hour} Stunden"
+            return f"{hour}h", label
+    return None
+
+
 async def send_due_event_reminders(client: discord.Client) -> int:
     # Läuft minütlich und auf Befehl aus dem Panel; der Lock verhindert doppelte Erinnerungen.
     async with REMINDER_LOCK:
@@ -2870,15 +3067,10 @@ async def _send_due_event_reminders_locked(client: discord.Client) -> int:
     sent = 0
     now = int(time.time())
     for message_id, guild_id, channel_id, starts_at in get_upcoming_events(now):
-        seconds_until_start = starts_at - now
-        if 23 * 60 * 60 <= seconds_until_start <= 24 * 60 * 60:
-            reminder_key = "24h"
-            reminder_label = "Morgen"
-        elif 0 < seconds_until_start <= 60 * 60:
-            reminder_key = "1h"
-            reminder_label = "Gleich geht's los"
-        else:
+        reminder = due_reminder(setting("event_reminder_hours"), starts_at - now)
+        if reminder is None:
             continue
+        reminder_key, reminder_label = reminder
 
         if event_reminder_was_sent(message_id, reminder_key):
             continue
@@ -3282,10 +3474,11 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             embed.add_field(name="Riot-ID", value=(profile and profile.riot_id) or "Nicht verknüpft (`/riot-id`)", inline=True)
             if any(member_has_role(target, name) for name in TEAM_ROLES):
                 now = int(time.time())
-                since = max(now - EVENT_RETENTION_DAYS * 24 * 60 * 60, int(target.joined_at.timestamp()) if target.joined_at else 0)
+                retention_days = setting("event_retention_days")
+                since = max(now - retention_days * 24 * 60 * 60, int(target.joined_at.timestamp()) if target.joined_at else 0)
                 going, total = attendance(interaction.guild.id, target.id, since, now)
                 quote_text = f"{going} von {total} Terminen zugesagt ({round(100 * going / total)} %)" if total else "Noch keine vergangenen Termine"
-                embed.add_field(name=f"Teilnahme (letzte {EVENT_RETENTION_DAYS} Tage)", value=quote_text, inline=True)
+                embed.add_field(name=f"Teilnahme (letzte {retention_days} Tage)", value=quote_text, inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @tree.command(name="riot-id", description="Verknüpft deine Riot-ID, damit dein Rang automatisch aktualisiert wird.")
@@ -3741,7 +3934,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 "wo du Fragen zum Ablauf stellen kannst. "
                 "Auch bei einer Ablehnung bleibt die Rolle `Bewerber` bis zur nächsten Saison bestehen; vor jeder neuen Saison "
                 "kannst du dich erneut bewerben. Wenn du Rückfragen hast, wende dich direkt an den Staff. "
-                f"Abgelehnte Bewerbungseinträge werden nach {APPLICATION_RETENTION_DAYS} Tagen gelöscht."
+                f"Abgelehnte Bewerbungseinträge werden nach {setting('application_retention_days')} Tagen gelöscht."
             ),
             color=discord.Color.from_rgb(110, 70, 255),
         )
@@ -3891,7 +4084,10 @@ async def main(apply: bool) -> int | None:
             flush=True,
         )
     alerts = Alerts(webhook_url or None)
-    disconnect_minutes = env_int("ALERT_DISCONNECT_MINUTES", ALERT_DISCONNECT_MINUTES, 1, 24 * 60)
+    # Die Env-Variable ist der Standard; im Panel gespeicherte Werte gehen vor.
+    SETTING_DEFINITIONS["alert_disconnect_minutes"] = SETTING_DEFINITIONS["alert_disconnect_minutes"]._replace(
+        default=env_int("ALERT_DISCONNECT_MINUTES", ALERT_DISCONNECT_MINUTES, 1, 24 * 60)
+    )
     backup_dir = Path(os.getenv("BACKUP_DIR", "").strip() or DATA_PATH.with_name("backups"))
     backup_retention = env_int("BACKUP_RETENTION_DAYS", BACKUP_RETENTION_DAYS, 1, 3650)
     intents = discord.Intents.none()
@@ -3955,7 +4151,7 @@ async def main(apply: bool) -> int | None:
         # Darf nie stehen bleiben, sonst meldet niemand mehr Probleme.
         try:
             await alerts.check(
-                collect_problems(loops, time.time(), disconnect_minutes),
+                collect_problems(loops, time.time()),
                 client.get_guild(target_id),
                 GATEWAY_STATE["connected"] and client.is_ready(),
             )
@@ -4117,11 +4313,14 @@ async def main(apply: bool) -> int | None:
                     rank_leaderboard=rank_leaderboard,
                     rank_histories=rank_histories,
                     rank_value=rank_value,
-                    attendance_rules={
-                        "threshold": ATTENDANCE_THRESHOLD_PERCENT,
-                        "missing_limit": ATTENDANCE_MISSING_LIMIT,
-                        "retention_days": EVENT_RETENTION_DAYS,
+                    attendance_rules=lambda: {
+                        "threshold": setting("attendance_threshold_percent"),
+                        "missing_limit": setting("attendance_missing_limit"),
+                        "retention_days": setting("event_retention_days"),
                     },
+                    settings_overview=settings_overview,
+                    save_setting=save_setting,
+                    reset_setting=reset_setting,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

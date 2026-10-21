@@ -367,6 +367,14 @@ def format_duration(seconds: float) -> str:
     return f"{minutes} min"
 
 
+def setting_text(value) -> str:
+    if isinstance(value, bool):
+        return "an" if value else "aus"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value) + " h"
+    return str(value)
+
+
 def spreadsheet_safe(value: str) -> str:
     """Verhindert, dass Tabellenprogramme Namen wie „=HYPERLINK(…)“ als Formel ausführen."""
     return f"'{value}" if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
@@ -616,7 +624,11 @@ class PanelHooks:
     # Anwesenheit: Termine + Antworten im Zeitraum, Auswertung je Person, Schwellen und Löschfrist
     attendance_events: Callable[[int, int, int], tuple[list, dict[int, dict[int, str]]]]
     summarize_attendance: Callable[[list, dict, dict[int, int]], dict[int, dict]]
-    attendance_rules: dict
+    attendance_rules: Callable[[], dict]
+    # Einstellungen (D3): Übersicht, speichern (prüft, ValueError bei ungültigem Wert) → (alt, neu), zurücksetzen
+    settings_overview: Callable[[], list[dict]]
+    save_setting: Callable[[str, Any, int], tuple[Any, Any]]
+    reset_setting: Callable[[str], tuple[Any, Any]]
 
 
 class Panel:
@@ -660,6 +672,9 @@ class Panel:
             web.get("/api/events", self.api_events),
             web.get("/api/attendance", self.api_attendance),
             web.get("/api/ranking", self.api_ranking),
+            web.get("/api/settings", self.api_settings),
+            web.post("/api/settings/{key}", self.api_save_setting),
+            web.post("/api/settings/{key}/reset", self.api_reset_setting),
             web.get("/api/attendance.csv", self.api_attendance_csv),
             web.post("/api/events", self.api_create_event),
             web.post("/api/events/{message_id}", self.api_edit_event),
@@ -1195,7 +1210,7 @@ class Panel:
 
     def attendance(self, request: web.Request) -> dict:
         guild = self.guild()
-        rules = self.hooks.attendance_rules
+        rules = self.hooks.attendance_rules()
         try:
             days = int(request.query.get("days", "30"))
         except ValueError:
@@ -1222,6 +1237,47 @@ class Panel:
             })
         rows.sort(key=lambda row: row["user"]["name"].casefold())
         return {"days": days, "since": since, "until": until, "events": len(events), "rules": rules, "players": rows}
+
+    async def api_settings(self, request: web.Request) -> web.Response:
+        self.authenticate(request, ADMIN)
+        guild = self.guild()
+        settings = self.hooks.settings_overview()
+        for entry in settings:
+            entry["updated_by"] = self.person(guild, entry["updated_by"])
+        return web.json_response({"settings": settings})
+
+    def setting_label(self, key: str) -> str:
+        return next((entry["label"] for entry in self.hooks.settings_overview() if entry["key"] == key), key)
+
+    async def api_save_setting(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        key = request.match_info["key"]
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or "value" not in body:
+            raise json_error(400, "Ungültige Anfrage.")
+        try:
+            old, new = self.hooks.save_setting(key, body["value"], member.id)
+        except ValueError as error:
+            raise json_error(400, str(error)) from None
+        await self.audit_action(
+            member, f"hat die Einstellung „{self.setting_label(key)}“ geändert: {setting_text(old)} → {setting_text(new)}"
+        )
+        return web.json_response({"value": list(new) if isinstance(new, tuple) else new})
+
+    async def api_reset_setting(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        key = request.match_info["key"]
+        try:
+            old, new = self.hooks.reset_setting(key)
+        except ValueError as error:
+            raise json_error(400, str(error)) from None
+        await self.audit_action(
+            member, f"hat die Einstellung „{self.setting_label(key)}“ auf den Standard gesetzt: {setting_text(old)} → {setting_text(new)}"
+        )
+        return web.json_response({"value": list(new) if isinstance(new, tuple) else new})
 
     async def api_ranking(self, request: web.Request) -> web.Response:
         self.authenticate(request)

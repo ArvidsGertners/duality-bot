@@ -688,6 +688,98 @@ async function loadRanking() {
   $("#ranking-list").replaceChildren(...(rows.length ? rows : [emptyRow(5, "Noch kein Spieler hat seine Riot-ID verknüpft.")]));
 }
 
+/* Einstellungen */
+
+function settingInput(entry, id) {
+  const input = document.createElement("input");
+  input.id = id;
+  if (entry.kind === "bool") {
+    input.type = "checkbox";
+    input.checked = entry.value;
+  } else if (entry.kind === "int") {
+    input.type = "number";
+    input.min = entry.minimum;
+    input.max = entry.maximum;
+    input.step = 1;
+    input.required = true;
+    input.value = entry.value;
+  } else {
+    input.type = "text";
+    input.value = entry.value.join(", ");
+    input.setAttribute("aria-describedby", `${id}-hint`);
+  }
+  return input;
+}
+
+function settingValue(entry, input) {
+  if (entry.kind === "bool") return input.checked;
+  if (entry.kind === "int") return Number(input.value);
+  return input.value.split(/[,\s]+/).filter(Boolean).map(Number);
+}
+
+function settingText(kind, value) {
+  if (kind === "bool") return value ? "an" : "aus";
+  if (kind === "hours") return `${value.join(", ")} h`;
+  return String(value);
+}
+
+function renderSetting(entry) {
+  const card = document.createElement("article");
+  card.className = "card setting";
+  const id = `setting-${entry.key}`;
+  const title = document.createElement("h2");
+  const label = document.createElement("label");
+  label.htmlFor = id;
+  label.textContent = entry.label;
+  title.append(label);
+  const description = document.createElement("p");
+  description.className = "muted small";
+  description.textContent = entry.description;
+  const form = document.createElement("form");
+  const input = settingInput(entry, id);
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "primary small";
+  save.textContent = "Speichern";
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "small";
+  reset.textContent = "Standard";
+  reset.disabled = entry.is_default;
+  const message = span("small", "");
+  message.setAttribute("role", "status");
+  form.append(input);
+  if (entry.kind === "hours") form.append(span("muted small", "Stunden, durch Komma getrennt"));
+  form.append(save, reset, message);
+  const meta = span("muted small", entry.is_default
+    ? `Standard: ${settingText(entry.kind, entry.default)}`
+    : `Standard: ${settingText(entry.kind, entry.default)} · geändert von ${entry.updated_by ? entry.updated_by.name : "unbekannt"} am ${formatTime(entry.updated_at)}`);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await changeSetting(`/api/settings/${entry.key}`, { value: settingValue(entry, input) }, message);
+  });
+  reset.addEventListener("click", () => changeSetting(`/api/settings/${entry.key}/reset`, undefined, message));
+  card.append(title, description, form, meta);
+  return card;
+}
+
+async function changeSetting(path, body, message) {
+  message.className = "small";
+  message.textContent = "Speichere …";
+  try {
+    await api(path, { method: "POST", body });
+    await loadSettings();
+  } catch (error) {
+    message.className = "small form-error";
+    message.textContent = error.message;
+  }
+}
+
+async function loadSettings() {
+  const { settings } = await api("/api/settings");
+  $("#settings-list").replaceChildren(...settings.map(renderSetting));
+}
+
 async function loadTickets() {
   const filter = $("#ticket-filter").value;
   const { tickets } = await api(`/api/tickets?state=${filter}`);
@@ -704,7 +796,7 @@ async function loadTickets() {
 
 const pageLoaders = {
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
-  anwesenheit: loadAttendance, rangliste: loadRanking,
+  anwesenheit: loadAttendance, rangliste: loadRanking, einstellungen: loadSettings,
 };
 
 function renderVoice(channels) {

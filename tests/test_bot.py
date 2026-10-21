@@ -21,6 +21,11 @@ from aiohttp.test_utils import TestServer
 import main
 
 
+def setUpModule():
+    # Nur Standardwerte; kein Test soll Einstellungen aus der echten Datenbank lesen.
+    main.SETTINGS_CACHE = {}
+
+
 class FakeLoop:
     def __init__(self, running: bool = True, next_run: float | None = None):
         self.running = running
@@ -89,8 +94,8 @@ class CollectProblemsTests(unittest.TestCase):
 
     def test_gateway_threshold(self):
         main.GATEWAY_STATE.update(connected=False, changed_at=1000)
-        self.assertIsNone(main.collect_problems({}, 1000 + 4 * 60, disconnect_minutes=5)["gateway"])
-        problem = main.collect_problems({}, 1000 + 7 * 60, disconnect_minutes=5)["gateway"]
+        self.assertIsNone(main.collect_problems({}, 1000 + 4 * 60)["gateway"])
+        problem = main.collect_problems({}, 1000 + 7 * 60)["gateway"]
         self.assertEqual(problem, "Der Bot ist seit 7 Minuten nicht mit Discord verbunden")
 
     def test_henrikdev_failures(self):
@@ -495,7 +500,7 @@ class RankTests(unittest.IsolatedAsyncioTestCase):
         channel = SimpleNamespace(send=mock.AsyncMock())
         rank_client = SimpleNamespace(current_rank=mock.AsyncMock(return_value=(new_tier, "eu")))
         with mock.patch.object(main, "RANK_CLIENT", rank_client), \
-                mock.patch.object(main, "RANK_CONGRATS_ENABLED", enabled), \
+                mock.patch.object(main, "SETTINGS_CACHE", {"rank_congrats_enabled": enabled}), \
                 mock.patch.object(main, "update_profile"), \
                 mock.patch.object(main, "record_rank") as record_rank, \
                 mock.patch.object(main, "find_role", return_value=None), \
@@ -585,6 +590,89 @@ class RankHistoryTests(unittest.IsolatedAsyncioTestCase):
         help_embed = interaction.response.send_message.await_args.kwargs["embed"]
         self.assertTrue(any("/rangliste" in field.value for field in help_embed.fields))
         self.assertTrue(all(len(field.value) <= 1024 for field in help_embed.fields))
+
+
+class SettingsTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for patcher in (
+            mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3"),
+            mock.patch.object(main, "SETTINGS_CACHE", None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        main.initialize_storage()
+
+    def test_validation(self):
+        definitions = main.SETTING_DEFINITIONS
+        self.assertEqual(main.validate_setting(definitions["application_min_votes"], 3), 3)
+        self.assertEqual(main.validate_setting(definitions["rank_congrats_enabled"], False), False)
+        self.assertEqual(main.validate_setting(definitions["event_reminder_hours"], [1, 48, 24]), (48, 24, 1))
+        invalid = [
+            ("application_min_votes", 0), ("application_min_votes", 11), ("application_min_votes", "3"),
+            ("application_min_votes", True), ("application_min_votes", 2.5),
+            ("rank_congrats_enabled", 1), ("rank_congrats_enabled", "ja"),
+            ("event_reminder_hours", []), ("event_reminder_hours", [24, 24]), ("event_reminder_hours", [0]),
+            ("event_reminder_hours", [1, 2, 3, 4, 5]), ("event_reminder_hours", [169]), ("event_reminder_hours", "24"),
+            ("attendance_threshold_percent", 101), ("event_retention_days", 6),
+        ]
+        for key, value in invalid:
+            with self.assertRaises(ValueError, msg=f"{key}={value!r}"):
+                main.validate_setting(definitions[key], value)
+
+    def test_save_takes_effect_without_restart(self):
+        self.assertEqual(main.setting("application_min_votes"), 2)
+        old, new = main.save_setting("application_min_votes", 3, updated_by=42)
+        self.assertEqual((old, new), (2, 3))
+        self.assertEqual(main.setting("application_min_votes"), 3)
+        guild = SimpleNamespace(id=1)
+        with mock.patch.object(main, "find_role", return_value=SimpleNamespace(members=[SimpleNamespace(id=n, bot=False) for n in range(5)])):
+            self.assertEqual(main.required_votes(guild), 3)
+        main.save_setting("event_reminder_hours", [1, 24, 72], updated_by=42)
+        self.assertEqual(main.setting("event_reminder_hours"), (72, 24, 1))
+        overview = {entry["key"]: entry for entry in main.settings_overview()}
+        self.assertEqual((overview["application_min_votes"]["value"], overview["application_min_votes"]["updated_by"]), (3, 42))
+        self.assertFalse(overview["application_min_votes"]["is_default"])
+        self.assertTrue(overview["rank_congrats_enabled"]["is_default"])
+        self.assertEqual(overview["event_reminder_hours"]["value"], [72, 24, 1])
+        with self.assertRaises(ValueError):
+            main.save_setting("application_min_votes", 99, updated_by=42)
+        with self.assertRaises(ValueError):
+            main.save_setting("gibt_es_nicht", 1, updated_by=42)
+        self.assertEqual(main.setting("application_min_votes"), 3)
+        self.assertEqual(main.reset_setting("application_min_votes"), (3, 2))
+        self.assertEqual(main.setting("application_min_votes"), 2)
+
+    def test_invalid_stored_value_falls_back_to_default(self):
+        with sqlite3.connect(main.DATA_PATH) as connection:
+            connection.execute("INSERT INTO bot_settings VALUES ('application_min_votes', '\"viele\"', NULL, 0)")
+            connection.execute("INSERT INTO bot_settings VALUES ('veraltet', '1', NULL, 0)")
+        with mock.patch.object(main.log, "warning") as warning:
+            self.assertEqual(main.setting("application_min_votes"), 2)
+        warning.assert_called_once()
+
+    def test_attendance_uses_settings(self):
+        main.save_setting("attendance_threshold_percent", 80, updated_by=1)
+        summary = main.summarize_attendance([(1, 1, None), (2, 2, None), (3, 3, None), (4, 4, None)], {n: {7: "going"} for n in (1, 2, 3)}, {7: 0})
+        self.assertEqual((summary[7]["rate"], summary[7]["flagged"]), (75, True))
+
+
+class ReminderWindowTests(unittest.TestCase):
+    def test_default_windows_match_old_keys(self):
+        hours = (24, 1)
+        self.assertEqual(main.due_reminder(hours, 24 * 3600), ("24h", "Morgen"))
+        self.assertEqual(main.due_reminder(hours, 23 * 3600 + 1), ("24h", "Morgen"))
+        self.assertIsNone(main.due_reminder(hours, 23 * 3600))
+        self.assertIsNone(main.due_reminder(hours, 24 * 3600 + 1))
+        self.assertEqual(main.due_reminder(hours, 3600), ("1h", "Gleich geht's los"))
+        self.assertEqual(main.due_reminder(hours, 1), ("1h", "Gleich geht's los"))
+        self.assertIsNone(main.due_reminder(hours, 0))
+
+    def test_other_hours(self):
+        self.assertEqual(main.due_reminder((72, 3), 72 * 3600), ("72h", "In 3 Tagen"))
+        self.assertEqual(main.due_reminder((72, 3), 2 * 3600 + 5), ("3h", "In 3 Stunden"))
+        self.assertIsNone(main.due_reminder((72, 3), 3600))
 
 
 class EnvIntTests(unittest.TestCase):

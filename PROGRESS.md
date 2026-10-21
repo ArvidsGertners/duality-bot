@@ -33,10 +33,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] C2 Termine im Panel (anlegen, bearbeiten/verschieben, absagen) — fertig (260e713)
 - [x] C1 Anwesenheitsübersicht + CSV — fertig (e7aa165)
 - [x] C3 Glückwunsch bei Rangaufstieg — fertig (8899488)
-- [x] C4 `/rangliste` + Panel-Ansicht + `rank_history` — fertig (Commit „/rangliste …“)
+- [x] C4 `/rangliste` + Panel-Ansicht + `rank_history` — fertig (aa72e6d)
 
 ### Phase 4 – Konfiguration & Kommunikation
-- [ ] D3 Einstellungen (`bot_settings`, `setting()`-Helfer mit Cache) — offen
+- [x] D3 Einstellungen (`bot_settings`, `setting()`-Helfer mit Cache) — fertig (Commit „Einstellungen im Panel …“)
 - [ ] D2 Texte bearbeiten (`bot_texts`, Verlauf, Discord-Nachrichten aktualisieren) — offen
 - [ ] D1 Ankündigungs-Editor (sofort/zeitgesteuert, `scheduled_announcements`) — offen
 - [ ] E1 Datenschutz-Seite (Auskunft/Löschung) — offen
@@ -111,6 +111,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - **C4 Rangliste:** neue Tabelle `rank_history` (guild_id, user_id, rank_tier, recorded_at, Index), Eintrag in `sync_member_rank` nur bei Rangänderung (`record_rank`). In `collect_user_data` („rangverlauf“) und `delete_user_data` aufgenommen, `/meine-daten`-Löschtext nennt den Rangverlauf. `rank_leaderboard()` gemeinsam für `/rangliste` (ephemeral wie `/team`, für alle) und `/api/ranking`: Spieler mit Riot-ID, Rang absteigend, ohne Abgleich am Ende, gleicher Rang nach Name; Name aus `player_roster_names` wie `/team`. Panel zeigt den Verlauf als SVG-Linie ohne Bibliothek. `/help` nennt `/rangliste` (Feldlänge ≤ 1024 per Test geprüft).
 - Phase 3 im Browser mit Beispieldaten geprüft: Termine (Liste, Kalender, Anlegen, Bearbeiten-Dialog, Absage-Bestätigung), Anwesenheit (Sortierung, Markierung), Rangliste (Verlauf).
 
+- **D3 Einstellungen:** `SETTING_DEFINITIONS` (Typ int/bool/hours, Bereich, Beschreibung) in main.py, Tabelle `bot_settings` (key, value JSON, updated_by, updated_at). `setting(key)` liest mit Cache, `save_setting`/`reset_setting` leeren ihn → wirkt sofort. Ungültige gespeicherte Werte → Standard + Warnung im Log. Einstellbar: Stimmen für Bewerbungen, Löschfristen Bewerbungen/Termine, Erinnerungszeitpunkte (Stunden, max. 4), Pause beim Rang-Abgleich, Rang-Glückwunsch an/aus, Anwesenheits-Schwelle und -Limit, Warnung nach Minuten ohne Verbindung und nach HenrikDev-Fehlern. `ALERT_DISCONNECT_MINUTES` ist jetzt nur noch der Standard, ein gespeicherter Wert geht vor. Erinnerungen allgemein über `due_reminder()` (Fenster (h−1, h] Stunden, Schlüssel `<h>h`, kompatibel zu `24h`/`1h`). Panel-Seite ab Admin, Audit mit altem → neuem Wert. Tests setzen `SETTINGS_CACHE = {}` (nur Standardwerte), damit nie die echte DB gelesen wird.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -123,6 +125,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Arvids hat Root-Passwort und Client-Secret im Chat gepostet → Empfehlung: Root-Passwort ändern, Secret später neu erzeugen und nur über `.env` geben. `update-vps.sh` scheiterte beim ersten Lauf aus `/root` an `uv` (Leserechte) → behoben, das Skript wechselt jetzt in `$APP_DIR`.
 - Alte root-eigene Kopie `/home/duality-bot/main.py` liegt ungenutzt herum (nicht angefasst).
 - **21.10.2026, 12:29 UTC: Phase 2 deployt (a770e37)**, `update-vps.sh` Exit 0, Dienst aktiv, keine Fehler im Log, `/healthz` lokal und öffentlich 200, API ohne Login 401. Test-Backup als `dualitybot` erstellt (`/home/duality-bot/app/backups/`, Ordner 700, Datei 600), `git status` sauber. Kein `ALERT_WEBHOOK_URL` gesetzt → Warnungen nach `#audit-log`.
+- **21.10.2026, 12:52 UTC: Phase 3 deployt (aa72e6d)**, vorher Backup `duality-backup-2026-10-21_145223.sqlite3`. `update-vps.sh` Exit 0, Dienst aktiv, 0 Fehler im Log, Schema migriert (`scheduled_events` + `title`/`details`/`cancelled_at`, `rank_history` da), `/rangliste` bei Discord registriert, Panel lokal/öffentlich ok. Hinweise: ein verknüpftes Profil gehört zu jemandem, der den Server verlassen hat (wird beim Abgleich übersprungen); der gespeicherte Termin am 24.10. 17:00 hat eine in Discord gelöschte Nachricht (kein Titel, verschwindet beim Erinnerungs-Check 24 h vorher von selbst).
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
@@ -141,6 +144,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 ## Neue Tabellen und Spalten
 - `rank_history` (C4)
+- `bot_settings` (D3)
 - `scheduled_events`: neue Spalten `title`, `details`, `cancelled_at` (per `ALTER TABLE`, C2)
 
 ## Offene Fragen an Arvids
@@ -150,4 +154,4 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 3 ist fertig. Auf Arvids' OK für Phase 4 warten; VPS-Update vorschlagen (vorher fragen). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Nächstes Feature: D2 Texte (`bot_texts` mit Verlauf ≤ 20 je Text, Standardtexte im Code, Discord-Limits, feste Nachrichten in #willkommen/#regeln/#bewerbung nach dem Speichern editieren statt neu posten, Vorschau, Zurücksetzen). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

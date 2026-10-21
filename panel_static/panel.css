@@ -236,6 +236,14 @@ tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .sparkline polyline { fill: none; stroke: var(--accent-text); stroke-width: 2; }
 .sparkline circle { fill: var(--accent-text); }
 
+/* Einstellungen */
+.settings-list { display: grid; gap: .75rem; }
+.setting form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .5rem; }
+.setting h2 { margin-bottom: .25rem; }
+.setting p { margin: 0; }
+.setting input[type="number"] { width: 7rem; }
+.setting input[type="text"] { width: 10rem; }
+
 /* Voice */
 .voice-grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
 .voice-category { grid-column: 1 / -1; margin: .5rem 0 0; font-size: .85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
