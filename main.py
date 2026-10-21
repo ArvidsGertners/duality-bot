@@ -453,6 +453,17 @@ def linked_profiles(guild_id: int) -> list[Profile]:
         ]
 
 
+def list_profiles(guild_id: int) -> list[Profile]:
+    with open_db() as connection:
+        return [
+            Profile(*row)
+            for row in connection.execute(
+                f"SELECT guild_id, user_id, {', '.join(PROFILE_FIELDS)}, updated_at FROM player_profiles WHERE guild_id = ?",
+                (guild_id,),
+            )
+        ]
+
+
 def attendance(guild_id: int, user_id: int, since: int, until: int) -> tuple[int, int]:
     """(Zusagen, Termine) für vergangene Termine im Zeitraum."""
     with open_db() as connection:
@@ -3687,6 +3698,7 @@ async def main(apply: bool) -> int | None:
                     application_vote_counts=application_vote_counts,
                     application_labels=APPLICATION_STATUS_LABELS,
                     reopen_applications=reopen_applications,
+                    list_profiles=list_profiles,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

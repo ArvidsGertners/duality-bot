@@ -24,8 +24,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] B1 Fehler-Benachrichtigung (Webhook, Entprellung, „wieder in Ordnung“, Dashboard-Karte) — fertig (fc281ab)
 - [x] B2 Datenbank-Backups (SQLite-Backup-API, Aufbewahrung, Download für Owner, Konsolenbefehl `backup`, Warnung `backup`) — fertig (6323545)
 - [x] B4 Live-Ansicht der Voice-Kanäle — fertig (1aae0e4)
-- [x] A3 Bewerbungen lesen + „Neue Saison“ — fertig (Commit „Panel: Bewerbungen …“)
-- [ ] A4 Spieler & Profile + „Rang jetzt abgleichen“ — offen
+- [x] A3 Bewerbungen lesen + „Neue Saison“ — fertig (5d05767)
+- [x] A4 Spieler & Profile + „Rang jetzt abgleichen“ — fertig (Commit „Panel: Spieler und Profile …“)
 - [ ] A5 Tickets — offen
 
 ### Phase 3 – Team
@@ -95,6 +95,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 - **A3 Bewerbungen:** `/api/applications?status=…` (Coach+) aus `applications` + `application_vote_counts()` (neu), Namen/Avatare nur aus dem Cache (`Panel.person`), Personen ohne Mitgliedschaft als „Nicht mehr auf dem Server (ID)“. Link `discord.com/channels/<guild>/<#bewerbungen>/<message>`. „Neue Saison“ = `reopen_applications`, POST mit `{"confirm": true}` Pflicht, Admin+, Audit vor dem Ausführen. Bestätigungsdialog im Frontend ist jetzt allgemein (`confirmAction`), Elemente mit `data-level` werden für zu niedrige Stufen ausgeblendet.
 
+- **A4 Spieler:** `/api/players?filter=players|all` (Coach+) aus `list_profiles()` (neu). Rolle in der Anzeige: Staff-Stufe, sonst Spieler/Bewerber/Mitglied, sonst „Nicht mehr auf dem Server“. Standard nur Spieler, Suche im Browser. „Rang abgleichen“ = `POST /api/players/<id>/sync-rank`, Admin+ (steuernd, wie in der Konsole), Audit, nutzt `sync_ranks_now`.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -132,4 +134,4 @@ _(noch keine)_
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Nächstes Feature: A4 Spieler & Profile (Liste aus `player_profiles`, Riot-ID, Rang, letzter Abgleich, Rollen, Knopf „Rang jetzt abgleichen“ für Admin+). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Nächstes Feature: A5 Tickets (offen/geschlossen aus `tickets`, Link zum Thread, keine Inhalte). Danach Browser-Check und Phase-2-Zusammenfassung. Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

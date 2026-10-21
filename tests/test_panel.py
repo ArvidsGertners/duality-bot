@@ -50,6 +50,7 @@ class FakeMember:
         self.display_name = name
         self.display_avatar = SimpleNamespace(url="https://cdn.discordapp.com/embed/avatars/0.png")
         self.bot = False
+        self.roles = []
 
     def __str__(self) -> str:
         return self.display_name
@@ -141,6 +142,7 @@ def make_hooks(client=None) -> panel.PanelHooks:
         application_vote_counts=lambda guild_id: {},
         application_labels=main.APPLICATION_STATUS_LABELS,
         reopen_applications=mock.AsyncMock(return_value=3),
+        list_profiles=lambda guild_id: [],
     )
 
 
@@ -946,6 +948,66 @@ class ApplicationPanelTests(unittest.IsolatedAsyncioTestCase):
         self.hooks.reopen_applications.side_effect = None
         self.hooks.reopen_applications.return_value = None
         self.assertEqual((await self.post_season(OWNER_ID, {"confirm": True})).status, 409)
+
+
+def profile(user_id: int, riot: tuple[str, str] | None = None, rank: str | None = None) -> main.Profile:
+    name, tag = riot or (None, None)
+    return main.Profile(1, user_id, name, tag, "eu", "Duelist", "Duelist, Sentinel", rank, 1792500000 if rank else None, 1792500000)
+
+
+class PlayerPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        guild = self.hooks.client.guild
+        self.player_role = SimpleNamespace(name="Spieler", members=[])
+        guild.get_member(PLAYER_ID).roles = [self.player_role]
+        guild.members[PLAYER_ID].display_name = "Zoe"
+        self.hooks.find_role = lambda guild, name: self.player_role if name == "Spieler" else None
+        self.hooks.list_profiles = lambda guild_id: [
+            profile(PLAYER_ID, ("Zoe", "EUW"), "Gold 2"),
+            profile(COACH_ID, ("Coach", "1234")),
+            profile(888888888888888888),
+        ]
+        self.panel = panel.Panel(CONFIG, self.hooks)
+        self.client = TestClient(TestServer(self.panel.build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def get(self, path: str):
+        _, cookie = session_cookie(COACH_ID)
+        return await self.client.get(path, headers={"Cookie": cookie})
+
+    async def sync(self, user_id: int, target: str):
+        session, cookie = session_cookie(user_id)
+        return await self.client.post(
+            f"/api/players/{target}/sync-rank",
+            headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]},
+        )
+
+    async def test_only_players_by_default(self):
+        players = (await (await self.get("/api/players")).json())["players"]
+        self.assertEqual(len(players), 1)
+        self.assertEqual(
+            {key: players[0][key] for key in ("role", "riot_id", "rank_tier", "main_role")},
+            {"role": "Spieler", "riot_id": "Zoe#EUW", "rank_tier": "Gold 2", "main_role": "Duelist"},
+        )
+
+    async def test_all_profiles(self):
+        players = (await (await self.get("/api/players?filter=all")).json())["players"]
+        roles = {player["user"]["id"]: player["role"] for player in players}
+        self.assertEqual(roles[str(COACH_ID)], "Coach")
+        self.assertEqual(roles["888888888888888888"], "Nicht mehr auf dem Server")
+        self.assertIsNone(next(player for player in players if player["role"] == "Coach")["rank_tier"])
+
+    async def test_sync_rank(self):
+        self.assertEqual((await self.sync(COACH_ID, str(PLAYER_ID))).status, 403)
+        response = await self.sync(ADMIN_ID, str(PLAYER_ID))
+        self.assertEqual(await response.json(), {"message": "Rang abgeglichen"})
+        self.assertEqual(self.hooks.sync_ranks.await_args.args[1].id, PLAYER_ID)
+        self.assertIn("Rang", self.hooks.audit.await_args.args[1])
+        for target in ("888888888888888888", "abc"):
+            self.assertEqual((await self.sync(ADMIN_ID, target)).status, 404)
+        self.hooks.sync_ranks.assert_awaited_once()
 
 
 if __name__ == "__main__":

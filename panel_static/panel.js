@@ -19,6 +19,7 @@ const state = {
   pending: new Map(),
   status: null,
   voice: [],
+  players: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -323,7 +324,54 @@ async function startNewSeason() {
   }
 }
 
-const pageLoaders = { backups: loadBackups, bewerbungen: loadApplications };
+function renderPlayers() {
+  const search = $("#player-search").value.trim().toLowerCase();
+  const rows = state.players
+    .filter((player) => !search || `${player.user.name} ${player.riot_id || ""}`.toLowerCase().includes(search))
+    .map((player) => {
+      let action = "";
+      if (state.me.level >= 2 && player.riot_id && player.user.on_server) {
+        action = document.createElement("button");
+        action.type = "button";
+        action.className = "small";
+        action.textContent = "Rang abgleichen";
+        action.setAttribute("aria-label", `Rang von ${player.user.name} jetzt abgleichen`);
+        action.addEventListener("click", () => syncPlayerRank(player, action));
+      }
+      return tableRow(
+        personCell(player.user),
+        pill(player.role, player.role === "Spieler" ? "ok" : "neutral"),
+        player.riot_id ? span("mono", player.riot_id) : "nicht verknüpft",
+        player.rank_tier || "–",
+        formatTime(player.rank_synced_at),
+        player.main_role || "–",
+        player.playable_roles || "–",
+        action,
+      );
+    });
+  $("#player-list").replaceChildren(...(rows.length ? rows : [emptyRow(8, "Keine passenden Profile.")]));
+}
+
+async function loadPlayers() {
+  const filter = $("#players-only").checked ? "players" : "all";
+  state.players = (await api(`/api/players?filter=${filter}`)).players;
+  renderPlayers();
+}
+
+async function syncPlayerRank(player, button) {
+  button.disabled = true;
+  $("#player-message").textContent = `Gleiche den Rang von ${player.user.name} ab …`;
+  try {
+    const result = await api(`/api/players/${player.user.id}/sync-rank`, { method: "POST" });
+    $("#player-message").textContent = result.message;
+    await loadPlayers();
+  } catch (error) {
+    $("#player-message").textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+const pageLoaders = { backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers };
 
 function renderVoice(channels) {
   state.voice = channels;
@@ -619,6 +667,8 @@ async function init() {
   $("#voice-hide-empty").addEventListener("change", () => renderVoice(state.voice));
   $("#application-filter").addEventListener("change", () => loadApplications().catch((error) => setBanner(error.message)));
   $("#new-season").addEventListener("click", startNewSeason);
+  $("#players-only").addEventListener("change", () => loadPlayers().catch((error) => setBanner(error.message)));
+  $("#player-search").addEventListener("input", renderPlayers);
   $("#log-search").addEventListener("input", renderLog);
   for (const box of document.querySelectorAll("input[name=log-level]")) box.addEventListener("change", renderLog);
   window.addEventListener("hashchange", showPage);

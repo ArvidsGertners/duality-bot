@@ -18,6 +18,7 @@
           <li><a href="#konsole" data-page="konsole" data-level="1">Konsole</a></li>
           <li><a href="#voice" data-page="voice" data-level="1">Voice</a></li>
           <li><a href="#bewerbungen" data-page="bewerbungen" data-level="1">Bewerbungen</a></li>
+          <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
           <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
         </ul>
       </nav>
@@ -106,6 +107,25 @@
               <tr><th scope="col">Bewerber</th><th scope="col">Status</th><th scope="col">Eingang</th><th scope="col">Stimmen</th><th scope="col">Entschieden von</th><th scope="col">Nachricht</th></tr>
             </thead>
             <tbody id="application-list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="page-spieler" class="page" aria-labelledby="title-spieler" hidden>
+        <h1 id="title-spieler">Spieler &amp; Profile</h1>
+        <p class="muted">Profile aus <code>/riot-id</code> und Bewerbungen. Der Rang wird täglich automatisch abgeglichen.</p>
+        <div class="toolbar">
+          <label><input type="checkbox" id="players-only" checked> Nur Spieler</label>
+          <label class="visually-hidden" for="player-search">Spieler suchen</label>
+          <input type="search" id="player-search" placeholder="Name oder Riot-ID …">
+          <span class="muted" id="player-message" role="status"></span>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead>
+              <tr><th scope="col">Person</th><th scope="col">Rolle</th><th scope="col">Riot-ID</th><th scope="col">Rang</th><th scope="col">Letzter Abgleich</th><th scope="col">Main-Rolle</th><th scope="col">Spielbar</th><th scope="col"><span class="visually-hidden">Aktion</span></th></tr>
+            </thead>
+            <tbody id="player-list"></tbody>
           </table>
         </div>
       </section>

@@ -238,6 +238,19 @@ class ApplicationQueryTests(unittest.TestCase):
             self.assertEqual(main.application_vote_counts(10), {1: (2, 1)})
 
 
+class ProfileQueryTests(unittest.TestCase):
+    def test_list_profiles_per_guild(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(main, "DATA_PATH", Path(directory) / "bot.sqlite3"):
+            main.initialize_storage()
+            main.update_profile(1, 100, riot_name="Zoe", riot_tag="EUW")
+            main.update_profile(1, 101, main_role="Sentinel")
+            main.update_profile(2, 102, riot_name="Andere", riot_tag="EUW")
+            profiles = {profile.user_id: profile for profile in main.list_profiles(1)}
+            self.assertEqual(set(profiles), {100, 101})
+            self.assertEqual(profiles[100].riot_id, "Zoe#EUW")
+            self.assertIsNone(profiles[101].riot_id)
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):

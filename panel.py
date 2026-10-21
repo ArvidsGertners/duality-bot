@@ -590,6 +590,8 @@ class PanelHooks:
     application_vote_counts: Callable[[int], dict[int, tuple[int, int]]]
     application_labels: dict[str, str]
     reopen_applications: Callable[[discord.Guild], Awaitable[int | None]]
+    # Spieler-Profile (main.Profile)
+    list_profiles: Callable[[int], list]
 
 
 class Panel:
@@ -628,6 +630,8 @@ class Panel:
             web.get("/api/voice", self.api_voice),
             web.get("/api/applications", self.api_applications),
             web.post("/api/applications/new-season", self.api_new_season),
+            web.get("/api/players", self.api_players),
+            web.post("/api/players/{user_id}/sync-rank", self.api_sync_player_rank),
             web.get("/api/backups", self.api_backups),
             web.post("/api/backups", self.api_create_backup),
             web.get("/api/backups/{name}", self.api_download_backup),
@@ -1058,6 +1062,51 @@ class Panel:
                 "url": f"https://discord.com/channels/{guild.id}/{channel.id}/{application.message_id}" if channel else None,
             })
         return web.json_response({"applications": applications, "labels": self.hooks.application_labels})
+
+    def team_role(self, guild: discord.Guild, member: discord.Member | None) -> str:
+        if member is None:
+            return "Nicht mehr auf dem Server"
+        level = self.hooks.staff_level(member)
+        if level:
+            return LEVEL_NAMES[level]
+        for name in ("Spieler", "Bewerber"):
+            role = self.hooks.find_role(guild, name)
+            if role and role in member.roles:
+                return name
+        return "Mitglied"
+
+    async def api_players(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        only_players = request.query.get("filter", "players") == "players"
+        players = []
+        for profile in self.hooks.list_profiles(guild.id):
+            member = guild.get_member(profile.user_id)
+            role = self.team_role(guild, member)
+            if only_players and role != "Spieler":
+                continue
+            players.append({
+                "user": self.person(guild, profile.user_id),
+                "role": role,
+                "riot_id": profile.riot_id,
+                "region": profile.region,
+                "rank_tier": profile.rank_tier,
+                "rank_synced_at": profile.rank_synced_at,
+                "main_role": profile.main_role,
+                "playable_roles": profile.playable_roles,
+            })
+        players.sort(key=lambda player: player["user"]["name"].casefold())
+        return web.json_response({"players": players})
+
+    async def api_sync_player_rank(self, request: web.Request) -> web.Response:
+        _, staff_member, _ = self.authenticate(request, ADMIN)
+        guild = self.guild()
+        user_id = parse_user_id(request.match_info["user_id"])
+        member = guild.get_member(user_id) if user_id else None
+        if member is None:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Diese Person ist nicht auf dem Server."}), content_type="application/json")
+        await self.audit_action(staff_member, f"hat den Rang von {member.mention} abgeglichen")
+        return web.json_response({"message": await self.hooks.sync_ranks(guild, member)})
 
     async def api_new_season(self, request: web.Request) -> web.Response:
         _, member, _ = self.authenticate(request, ADMIN)
