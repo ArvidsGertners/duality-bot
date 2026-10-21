@@ -38,8 +38,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 ### Phase 4 – Konfiguration & Kommunikation
 - [x] D3 Einstellungen (`bot_settings`, `setting()`-Helfer mit Cache) — fertig (283261a)
 - [x] D2 Texte bearbeiten (`bot_texts`, Verlauf, Discord-Nachrichten aktualisieren) — fertig (08bf42d)
-- [x] D1 Ankündigungs-Editor (sofort/zeitgesteuert, `scheduled_announcements`) — fertig (Commit „Ankündigungen …“)
-- [ ] E1 Datenschutz-Seite (Auskunft/Löschung) — offen
+- [x] D1 Ankündigungs-Editor (sofort/zeitgesteuert, `scheduled_announcements`) — fertig (ce5de97)
+- [x] E1 Datenschutz-Seite (Auskunft/Löschung) — fertig (Commit „Datenschutz im Panel …“)
 
 ### Phase 5 – Setup-Diff
 - [ ] B3 `setup_guild` liefert strukturierten Diff, Panel-Seite, Anwenden mit Lock — offen
@@ -117,6 +117,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 - **D1 Ankündigungen:** `validate_announcement()` (Titel 256, Text 4096, Fußzeile 2048, ≤ 10 Felder à 256/1024, gesamt ≤ 6000, Farbe #RRGGBB, Bilder nur https), `announcement_embed()`, `send_announcement()` (nur Kanäle mit view/send/embed_links, Erwähnung höchstens der gewählten Rolle aus `ANNOUNCEMENT_PING_ROLES` = Ping Valorant/Ping Events, nie @everyone/@here), `edit_sent_announcement()` (nur Embed, Kanal und Ping bleiben, kein neuer Ping). Tabelle `scheduled_announcements` (sofort gesendete werden auch gespeichert, damit man sie später bearbeiten kann; `sent_at NULL` = offen). Minuten-Task `announcements` sendet fällige; Fehler bleiben als `error` stehen statt minütlicher Wiederholung, Bearbeiten löscht den Fehler. Panel-Seite ab Admin mit Live-Vorschau, Bestätigung vor „sofort senden“, Liste mit Bearbeiten/Löschen (nur ungesendete). CSP `img-src` erlaubt jetzt `https:` für die Bildvorschau.
 
+- **E1 Datenschutz:** `build_data_export()` gemeinsam für `/meine-daten` und Panel (inkl. Angaben aus der Bewerbungsnachricht, ohne sie zu speichern). `collect_user_data` um `geaenderte_einstellungen`, `geaenderte_texte`, `ankuendigungen` erweitert (`rangverlauf` seit C4); `delete_user_data` anonymisiert dort `updated_by`/`created_by` (Inhalte gehören dem Server). Panel ab Admin: Suche nach Name/Nutzername oder User-ID (auch Ausgetretene), Auskunft ansehen/als JSON laden, Löschung mit Pflichtfeld „Grund / Anfrage vom“ (3–300 Zeichen) + Bestätigung; scheitert das Löschen der Bewerbungsnachrichten, wird nichts weiter gelöscht. Audit: nur dass, wer, für welche ID, bei Löschung mit Grund – nie Daten. Nach der Löschung wird die Auskunft nicht neu geladen (sonst zweiter Audit-Eintrag). Hinweis in Panel und `/meine-daten`: Daten in Backups verschwinden erst mit deren Aufbewahrungsfrist. **Für Phase 6:** `scrim_requests` und Scrim-Börse-Kontakte dann ebenfalls in Auskunft/Löschung prüfen.
+- Handy-Ansicht korrigiert: Mit 16 Menüpunkten zog die Navigationsleiste die Seite auf 1320 px; jetzt `minmax(0, 1fr)`, die Leiste scrollt seitlich und der aktive Punkt wird sichtbar gescrollt.
+- Phase 4 im Browser geprüft (Wegwerf-DB, Discord simuliert): Einstellungen (inkl. abgelehnter Eingabe), Texte (Speichern, Platzhalter, Verlauf), Ankündigungen (Vorschau, Planen, Bearbeiten, Löschen), Datenschutz (Suche, Auskunft), Handy-Layout.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -160,4 +164,4 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Nächstes Feature: E1 Datenschutz (Suche nach Name oder User-ID auch für Ausgetretene, Auskunft als JSON wie /meine-daten über gemeinsame Funktion, Löschung mit Pflichtfeld „Grund / Anfrage vom“ + Bestätigung, Audit nur „dass“ und „wer“; alle neuen Tabellen in `collect_user_data`/`delete_user_data`: `bot_settings.updated_by`, `bot_texts.updated_by`, `scheduled_announcements.created_by/updated_by` (anonymisieren statt löschen), `rank_history` schon drin). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Phase 4 ist fertig. Auf Arvids' OK für Phase 5 (B3 Setup-Diff) warten; VPS-Update vorschlagen (vorher fragen, vorher Backup). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

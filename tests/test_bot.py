@@ -856,6 +856,62 @@ class AnnouncementSendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statuses, [(broken, False), (due, True)])
 
 
+class PrivacyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for patcher in (
+            mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3"),
+            mock.patch.object(main, "SETTINGS_CACHE", None),
+            mock.patch.object(main, "TEXT_CACHE", None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        main.initialize_storage()
+
+    def test_new_tables_in_export_and_deletion(self):
+        main.save_setting("application_min_votes", 3, updated_by=42)
+        main.save_text("dm_accepted", "Willkommen!", 42)
+        payload = main.validate_announcement({"title": "Hallo"})
+        created = main.create_announcement(1, 20, payload, 100, created_by=42)
+        other = main.create_announcement(1, 20, payload, 100, created_by=7)
+        main.update_announcement(other, 20, payload, 100, updated_by=42)
+        main.record_rank(1, 42, "Gold 1", 100)
+        data = main.collect_user_data(1, 42)
+        self.assertEqual([entry["key"] for entry in data["geaenderte_einstellungen"]], ["application_min_votes"])
+        self.assertEqual([entry["key"] for entry in data["geaenderte_texte"]], ["dm_accepted"])
+        self.assertEqual(sorted(entry["id"] for entry in data["ankuendigungen"]), sorted([created, other]))
+        self.assertEqual(len(data["rangverlauf"]), 1)
+        main.delete_user_data(1, 42)
+        after = main.collect_user_data(1, 42)
+        self.assertTrue(all(not rows for key, rows in after.items() if key not in ("staff_stimmen", "tickets")))
+        # Inhalte bleiben, nur der Bezug zur Person ist weg.
+        self.assertEqual(main.setting("application_min_votes"), 3)
+        self.assertEqual(main.bot_text("dm_accepted"), "Willkommen!")
+        self.assertIsNone(main.get_announcement(created).created_by)
+        self.assertEqual(main.get_announcement(other).created_by, 7)
+        self.assertIsNone(main.get_announcement(other).updated_by)
+
+    async def test_export_reads_application_message(self):
+        main.save_application(main.Application(500, 1, 42, "pending", 100))
+        main.save_application(main.Application(501, 1, 42, "declined", 50, 7, 60))
+        message = SimpleNamespace(embeds=[SimpleNamespace(fields=[SimpleNamespace(name="Kurs", value="WI24")])])
+
+        async def fetch_message(message_id):
+            if message_id == 500:
+                return message
+            raise discord.NotFound(mock.Mock(status=404, reason="x"), "weg")
+
+        channel = SimpleNamespace(fetch_message=fetch_message)
+        guild = SimpleNamespace(id=1, name="Duality")
+        with mock.patch.object(main, "find_text_channel", return_value=channel):
+            export = await main.build_data_export(guild, 42)
+        self.assertEqual((export["server"], export["nutzer_id"]), ("Duality", 42))
+        applications = {entry["message_id"]: entry for entry in export["daten"]["bewerbungen"]}
+        self.assertEqual(applications[500]["angaben"], {"Kurs": "WI24"})
+        self.assertEqual(applications[501]["angaben"], "Nachricht nicht mehr vorhanden")
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):

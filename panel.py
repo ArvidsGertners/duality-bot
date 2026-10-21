@@ -609,6 +609,11 @@ class PanelHooks:
     list_profiles: Callable[[int], list]
     # Tickets: (Thread, meldende Person, erstellt, geschlossen); Inhalte bleiben im Thread.
     list_tickets: Callable[[int], list[tuple[int, int, int, int | None]]]
+    # Datenschutz (E1): dieselbe Auskunft wie /meine-daten, Löschung wie dort
+    build_data_export: Callable[[discord.Guild, int], Awaitable[dict]]
+    collect_user_data: Callable[[int, int], dict]
+    delete_user_data: Callable[[int, int], None]
+    delete_my_applications: Callable[[discord.Guild, int], Awaitable[int]]
     # Termine: dieselben Funktionen wie /termin; Fehler kommen als ValueError mit Meldung für die Person.
     list_events: Callable[[int], list]
     event_rsvps: Callable[[int], dict[int, dict[str, list[int]]]]
@@ -697,6 +702,9 @@ class Panel:
             web.post("/api/announcements", self.api_create_announcement),
             web.post("/api/announcements/{announcement_id}", self.api_edit_announcement),
             web.delete("/api/announcements/{announcement_id}", self.api_delete_announcement),
+            web.get("/api/privacy/search", self.api_privacy_search),
+            web.get("/api/privacy/{user_id}", self.api_privacy_export),
+            web.post("/api/privacy/{user_id}/delete", self.api_privacy_delete),
             web.get("/api/texts", self.api_texts),
             web.get("/api/texts/{key}/history", self.api_text_history),
             web.post("/api/texts/{key}", self.api_save_text),
@@ -1396,6 +1404,78 @@ class Panel:
             raise json_error(400, "Gesendete Ankündigungen lassen sich hier nicht löschen.")
         await self.audit_action(member, f"hat eine geplante Ankündigung für <#{announcement.channel_id}> gelöscht")
         return web.json_response({"message": "Geplante Ankündigung gelöscht."})
+
+    def stored_count(self, user_id: int) -> int:
+        return sum(len(rows) for rows in self.hooks.collect_user_data(self.hooks.guild_id, user_id).values())
+
+    async def api_privacy_search(self, request: web.Request) -> web.Response:
+        self.authenticate(request, ADMIN)
+        guild = self.guild()
+        query = request.query.get("q", "").strip()
+        if len(query) < 2:
+            raise json_error(400, "Bitte mindestens 2 Zeichen oder eine User-ID eingeben.")
+        user_id = parse_user_id(query)
+        if user_id:
+            # Per ID findet man auch Personen, die den Server schon verlassen haben.
+            user_ids = [user_id]
+        else:
+            needle = query.casefold()
+            user_ids = [
+                member.id for member in guild.members
+                if not member.bot and any(needle in (name or "").casefold() for name in (member.display_name, member.name, member.global_name))
+            ][:20]
+        return web.json_response({
+            "results": [{"user": self.person(guild, user_id), "stored": self.stored_count(user_id)} for user_id in user_ids],
+        })
+
+    def privacy_user(self, request: web.Request) -> int:
+        user_id = parse_user_id(request.match_info["user_id"])
+        if user_id is None:
+            raise json_error(400, "Ungültige User-ID.")
+        return user_id
+
+    async def api_privacy_export(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        user_id = self.privacy_user(request)
+        export = await self.hooks.build_data_export(self.guild(), user_id)
+        # Ins Audit-Log nur, dass eine Auskunft erfolgte und durch wen, nie die Daten selbst.
+        await self.audit_action(member, f"hat eine Datenauskunft für `{user_id}` abgerufen")
+        body = json.dumps(export, ensure_ascii=False, indent=2)
+        headers = {"Cache-Control": "no-store"}
+        if request.query.get("download") == "1":
+            headers["Content-Disposition"] = f'attachment; filename="duality-daten-{user_id}.json"'
+        return web.Response(text=body, content_type="application/json", headers=headers)
+
+    async def api_privacy_delete(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        user_id = self.privacy_user(request)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or body.get("confirm") is not True:
+            raise json_error(400, "Die Löschung muss bestätigt werden.")
+        reason = body.get("reason")
+        if not isinstance(reason, str) or not 3 <= len(reason.strip()) <= 300:
+            raise json_error(400, "Bitte „Grund / Anfrage vom“ angeben (3 bis 300 Zeichen).")
+        guild = self.guild()
+        try:
+            applications = await self.hooks.delete_my_applications(guild, user_id)
+        except discord.HTTPException:
+            log.exception("Bewerbungsnachrichten von %s konnten nicht gelöscht werden", user_id)
+            return web.json_response(
+                {"error": "Die Bewerbungsnachrichten konnten in Discord nicht gelöscht werden; es wurde nichts weiter gelöscht."},
+                status=502,
+            )
+        self.hooks.delete_user_data(guild.id, user_id)
+        await self.audit_action(
+            member,
+            f"hat die gespeicherten Daten von `{user_id}` gelöscht (Grund / Anfrage vom: {discord.utils.escape_markdown(reason.strip())})",
+        )
+        return web.json_response({
+            "message": f"Gelöscht: gespeicherte Daten und {applications} Bewerbung(en). Tickets und Staff-Stimmen bleiben als Nachweis.",
+            "remaining": self.stored_count(user_id),
+        })
 
     async def api_texts(self, request: web.Request) -> web.Response:
         self.authenticate(request, ADMIN)

@@ -264,6 +264,10 @@ tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .embed-preview .embed-field-name { font-weight: 700; }
 .embed-preview .embed-footer { font-size: .75rem; color: #b5bac1; margin-top: .5rem; }
 
+/* Datenschutz */
+#privacy-results { padding: .75rem; }
+#privacy-json { max-height: 24rem; }
+
 /* Einstellungen */
 .settings-list { display: grid; gap: .75rem; }
 .setting form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .5rem; }
@@ -328,8 +332,10 @@ dialog::backdrop { background: rgba(5, 4, 10, .7); }
 dialog .actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
 
 @media (max-width: 760px) {
-  .layout { grid-template-columns: 1fr; }
+  /* minmax(0, …): Die lange Navigationsleiste scrollt seitlich, statt die Seite zu verbreitern. */
+  .layout { grid-template-columns: minmax(0, 1fr); }
   .sidebar {
+    min-width: 0;
     position: static;
     height: auto;
     border-right: 0;

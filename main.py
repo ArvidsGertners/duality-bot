@@ -679,6 +679,14 @@ def collect_user_data(guild_id: int, user_id: int) -> dict:
                 "SELECT rank_tier, recorded_at FROM rank_history WHERE guild_id = ? AND user_id = ? ORDER BY recorded_at",
                 (guild_id, user_id),
             ),
+            # Was jemand als Staff im Panel geändert hat; der Inhalt gehört dem Server, verknüpft ist nur die Person.
+            "geaenderte_einstellungen": rows("SELECT key, updated_at FROM bot_settings WHERE updated_by = ?", (user_id,)),
+            "geaenderte_texte": rows("SELECT key, updated_at FROM bot_texts WHERE updated_by = ? ORDER BY id", (user_id,)),
+            "ankuendigungen": rows(
+                "SELECT id, channel_id, send_at, sent_at, created_by, updated_by FROM scheduled_announcements "
+                "WHERE guild_id = ? AND (created_by = ? OR updated_by = ?)",
+                (guild_id, user_id, user_id),
+            ),
         }
 
 
@@ -690,6 +698,15 @@ def delete_user_data(guild_id: int, user_id: int) -> None:
         connection.execute("DELETE FROM player_roster_names WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         connection.execute("DELETE FROM event_rsvps WHERE user_id = ?", (user_id,))
         connection.execute("DELETE FROM rank_history WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+        # Einstellungen, Texte und Ankündigungen gehören dem Server und bleiben; nur der Bezug zur Person verschwindet.
+        connection.execute("UPDATE bot_settings SET updated_by = NULL WHERE updated_by = ?", (user_id,))
+        connection.execute("UPDATE bot_texts SET updated_by = NULL WHERE updated_by = ?", (user_id,))
+        connection.execute(
+            "UPDATE scheduled_announcements SET created_by = NULL WHERE guild_id = ? AND created_by = ?", (guild_id, user_id)
+        )
+        connection.execute(
+            "UPDATE scheduled_announcements SET updated_by = NULL WHERE guild_id = ? AND updated_by = ?", (guild_id, user_id)
+        )
 
 
 def write_rsvp(message_id: int, user_id: int, choice: str) -> None:
@@ -3278,7 +3295,8 @@ class MyDataView(DualityView):
             await interaction.response.edit_message(
                 content="Sicher? Gelöscht werden Profil (Riot-ID, Rollen, Rang-Sync), Rangverlauf, Teamname, Terminantworten und "
                 "deine Bewerbungen samt Nachricht im Staff-Kanal. Deine Discord-Rollen bleiben bestehen. "
-                "Tickets und Staff-Stimmen bleiben als Nachweis erhalten.",
+                "Tickets und Staff-Stimmen bleiben als Nachweis erhalten; bei Änderungen im Web-Panel wird nur dein Name entfernt. "
+                "Datenbank-Backups mit diesen Daten werden nach Ablauf ihrer Aufbewahrungsfrist automatisch gelöscht.",
                 view=self,
             )
             return
@@ -4037,24 +4055,8 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             await interaction.response.send_message("Dieser Befehl funktioniert nur im Server.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        data = collect_user_data(interaction.guild.id, interaction.user.id)
-        # Name, Kurs, Tracker-Link und Spielzeiten stehen in der Bewerbungsnachricht.
-        staff_channel = find_text_channel(interaction.guild, "bewerbungen")
-        for entry in data["bewerbungen"]:
-            if staff_channel is None:
-                break
-            try:
-                message = await staff_channel.fetch_message(entry["message_id"])
-                entry["angaben"] = {field.name: field.value for field in message.embeds[0].fields} if message.embeds else {}
-            except discord.HTTPException:
-                entry["angaben"] = "Nachricht nicht mehr vorhanden"
-        export = {
-            "server": interaction.guild.name,
-            "nutzer_id": interaction.user.id,
-            "exportiert_am": discord.utils.utcnow().isoformat(),
-            "daten": data,
-            "hinweis": "Discord-Rollen, Nachrichten und Ticket-Verläufe liegen bei Discord selbst und sind hier nicht enthalten.",
-        }
+        export = await build_data_export(interaction.guild, interaction.user.id)
+        data = export["daten"]
         file = discord.File(
             io.BytesIO(json.dumps(export, ensure_ascii=False, indent=2).encode()),
             filename="duality-meine-daten.json",
@@ -4066,6 +4068,28 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             view=MyDataView(interaction.user.id),
             ephemeral=True,
         )
+
+
+async def build_data_export(guild: discord.Guild, user_id: int) -> dict:
+    """Alles, was der Bot über eine Person speichert, für /meine-daten und die Auskunft im Panel."""
+    data = collect_user_data(guild.id, user_id)
+    # Name, Kurs, Tracker-Link und Spielzeiten stehen in der Bewerbungsnachricht.
+    staff_channel = find_text_channel(guild, "bewerbungen")
+    for entry in data["bewerbungen"]:
+        if staff_channel is None:
+            break
+        try:
+            message = await staff_channel.fetch_message(entry["message_id"])
+            entry["angaben"] = {field.name: field.value for field in message.embeds[0].fields} if message.embeds else {}
+        except discord.HTTPException:
+            entry["angaben"] = "Nachricht nicht mehr vorhanden"
+    return {
+        "server": guild.name,
+        "nutzer_id": user_id,
+        "exportiert_am": discord.utils.utcnow().isoformat(),
+        "daten": data,
+        "hinweis": "Discord-Rollen, Nachrichten und Ticket-Verläufe liegen bei Discord selbst und sind hier nicht enthalten.",
+    }
 
 
 async def setup_guild(guild: discord.Guild, apply: bool) -> None:
@@ -4721,6 +4745,10 @@ async def main(apply: bool) -> int | None:
                     reopen_applications=reopen_applications,
                     list_profiles=list_profiles,
                     list_tickets=list_tickets,
+                    build_data_export=build_data_export,
+                    collect_user_data=collect_user_data,
+                    delete_user_data=delete_user_data,
+                    delete_my_applications=delete_my_applications,
                     list_events=list_events,
                     event_rsvps=event_rsvp_overview,
                     event_reminders=event_reminder_overview,

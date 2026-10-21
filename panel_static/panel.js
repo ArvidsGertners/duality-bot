@@ -29,6 +29,7 @@ const state = {
   texts: [],
   announcementData: null,
   editingAnnouncement: null,
+  privacyUser: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -83,6 +84,8 @@ function showPage() {
     section.hidden = section.id !== `page-${current.dataset.page}`;
   }
   document.title = `${current.textContent} · Duality-Panel`;
+  // Auf dem Handy ist die Navigation eine seitlich scrollende Leiste: aktiven Punkt sichtbar machen.
+  current.scrollIntoView({ block: "nearest", inline: "nearest" });
   if (current.dataset.page === "konsole") scrollLog(true);
   const loader = pageLoaders[current.dataset.page];
   if (loader) loader().catch((error) => setBanner(`Laden fehlgeschlagen: ${error.message}`));
@@ -959,6 +962,84 @@ async function deleteAnnouncement(entry) {
   }
 }
 
+/* Datenschutz */
+
+const PRIVACY_LABELS = {
+  profil: "Profil (Riot-ID, Rollen, Rang)",
+  teamname: "Teamname",
+  bewerbungen: "Bewerbungen",
+  terminantworten: "Terminantworten",
+  staff_stimmen: "Staff-Stimmen",
+  tickets: "Tickets",
+  eigene_voice_channels: "Eigene Voice-Kanäle",
+  rangverlauf: "Rangverlauf",
+  geaenderte_einstellungen: "Geänderte Einstellungen (Panel)",
+  geaenderte_texte: "Geänderte Texte (Panel)",
+  ankuendigungen: "Ankündigungen (Panel)",
+};
+
+async function searchPrivacy(event) {
+  event.preventDefault();
+  const query = $("#privacy-query").value.trim();
+  $("#privacy-search-message").textContent = "Suche …";
+  try {
+    const { results } = await api(`/api/privacy/search?q=${encodeURIComponent(query)}`);
+    $("#privacy-results").replaceChildren(...(results.length ? results.map((result) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "small";
+      button.textContent = "Auskunft anzeigen";
+      button.addEventListener("click", () => showPrivacy(result.user));
+      return listItem(personCell(result.user), span("muted small", `${result.stored} gespeicherte Einträge`), button);
+    }) : [listItem(span("muted", "Niemand gefunden. Für Ausgetretene bitte die User-ID eingeben."))]));
+    $("#privacy-results").hidden = false;
+    $("#privacy-search-message").textContent = "";
+  } catch (error) {
+    $("#privacy-search-message").textContent = error.message;
+  }
+}
+
+async function showPrivacy(user) {
+  state.privacyUser = user;
+  const exportData = await api(`/api/privacy/${user.id}`);
+  $("#privacy-person").textContent = `${user.name} · ${user.id}`;
+  $("#privacy-sections").replaceChildren(...Object.entries(exportData.daten).map(([key, rows]) => tableRow(PRIVACY_LABELS[key] || key, String(rows.length))));
+  $("#privacy-json").textContent = JSON.stringify(exportData, null, 2);
+  $("#privacy-download").href = `/api/privacy/${user.id}?download=1`;
+  $("#privacy-download").download = `duality-daten-${user.id}.json`;
+  $("#privacy-reason").value = "";
+  $("#privacy-error").textContent = "";
+  $("#privacy-message").textContent = "";
+  $("#privacy-detail").hidden = false;
+  $("#privacy-person").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function deletePrivacy(event) {
+  event.preventDefault();
+  const user = state.privacyUser;
+  const reason = $("#privacy-reason").value.trim();
+  if (reason.length < 3) {
+    $("#privacy-error").textContent = "Bitte „Grund / Anfrage vom“ angeben.";
+    return;
+  }
+  const confirmed = await confirmAction(
+    `Alle gespeicherten Daten von ${user.name} (${user.id}) werden endgültig gelöscht, inklusive Bewerbungsnachrichten im Staff-Kanal. Das lässt sich nicht rückgängig machen.`,
+    `Grund / Anfrage vom: ${reason}`,
+    "Endgültig löschen",
+  );
+  if (!confirmed) return;
+  try {
+    const result = await api(`/api/privacy/${user.id}/delete`, { method: "POST", body: { confirm: true, reason } });
+    // Nicht neu laden: Das wäre eine weitere Auskunft im Audit-Log.
+    $("#privacy-sections").replaceChildren(tableRow("Noch gespeichert (Nachweise)", String(result.remaining)));
+    $("#privacy-json").textContent = "";
+    $("#privacy-reason").value = "";
+    $("#privacy-message").textContent = result.message;
+  } catch (error) {
+    $("#privacy-error").textContent = error.message;
+  }
+}
+
 /* Texte */
 
 function currentText() {
@@ -1478,6 +1559,8 @@ async function init() {
   for (const button of document.querySelectorAll("#page-anwesenheit button.sort")) {
     button.addEventListener("click", () => sortAttendance(button.dataset.sort));
   }
+  $("#privacy-search-form").addEventListener("submit", searchPrivacy);
+  $("#privacy-delete-form").addEventListener("submit", deletePrivacy);
   $("#announcement-form").addEventListener("submit", submitAnnouncement);
   $("#announcement-form").addEventListener("input", updateAnnouncementPreview);
   $("#announcement-form").addEventListener("change", () => { updateAnnouncementSubmit(); updateAnnouncementPreview(); });

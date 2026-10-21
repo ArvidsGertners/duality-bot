@@ -27,6 +27,7 @@
           <li><a href="#texte" data-page="texte" data-level="2">Texte</a></li>
           <li><a href="#einstellungen" data-page="einstellungen" data-level="2">Einstellungen</a></li>
           <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
+          <li><a href="#datenschutz" data-page="datenschutz" data-level="2">Datenschutz</a></li>
         </ul>
       </nav>
       <div class="user">
@@ -342,6 +343,46 @@
         <h1 id="title-einstellungen">Einstellungen</h1>
         <p class="muted">Änderungen wirken sofort, ohne Neustart, und landen mit altem und neuem Wert im Audit-Log.</p>
         <div class="settings-list" id="settings-list"></div>
+      </section>
+
+      <section id="page-datenschutz" class="page" aria-labelledby="title-datenschutz" hidden>
+        <h1 id="title-datenschutz">Datenschutz</h1>
+        <p class="muted">Auskunft und Löschung wie bei <code>/meine-daten</code>, für Anfragen per Mail oder von Personen, die den Server schon verlassen haben.
+          Ins Audit-Log kommt nur, dass und von wem eine Auskunft oder Löschung erfolgte, nie die Daten selbst.</p>
+        <form class="toolbar" id="privacy-search-form" role="search">
+          <label for="privacy-query">Name oder User-ID</label>
+          <input type="search" id="privacy-query" required minlength="2" placeholder="z. B. Max oder 123456789012345678">
+          <button type="submit" class="primary">Suchen</button>
+          <span class="muted small" id="privacy-search-message" role="status"></span>
+        </form>
+        <ul class="alert-list card" id="privacy-results" hidden></ul>
+        <article class="card spaced" id="privacy-detail" hidden aria-labelledby="privacy-person">
+          <h2 id="privacy-person"></h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col">Bereich</th><th scope="col">Einträge</th></tr></thead>
+              <tbody id="privacy-sections"></tbody>
+            </table>
+          </div>
+          <details class="spaced">
+            <summary>Vollständige Auskunft (JSON)</summary>
+            <pre class="log" id="privacy-json"></pre>
+          </details>
+          <div class="toolbar spaced">
+            <a class="button" id="privacy-download" download>Als JSON herunterladen</a>
+          </div>
+          <form class="form-grid spaced" id="privacy-delete-form">
+            <h3>Daten löschen</h3>
+            <p class="muted small">Gelöscht werden Profil, Rangverlauf, Teamname, Terminantworten und Bewerbungen samt Nachricht im Staff-Kanal.
+              Tickets und Staff-Stimmen bleiben als Nachweis; bei Änderungen im Panel wird nur der Name entfernt. Discord-Rollen und Nachrichten bleiben.
+              In Datenbank-Backups stehen die Daten noch, bis diese nach ihrer Aufbewahrungsfrist (Standard 14 Tage) gelöscht werden.</p>
+            <label for="privacy-reason">Grund / Anfrage vom (Pflicht)</label>
+            <input id="privacy-reason" required minlength="3" maxlength="300" placeholder="z. B. Mail vom 21.10.2026">
+            <p class="form-error" id="privacy-error" role="alert"></p>
+            <div class="actions"><button type="submit" class="danger">Daten löschen …</button></div>
+            <p class="small" id="privacy-message" role="status"></p>
+          </form>
+        </article>
       </section>
 
       <section id="page-backups" class="page" aria-labelledby="title-backups" hidden>

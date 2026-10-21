@@ -54,6 +54,8 @@ class FakeMember:
         self.id = user_id
         self.mention = f"<@{user_id}>"
         self.display_name = name
+        self.name = name.lower().replace(" ", "")
+        self.global_name = None
         self.display_avatar = SimpleNamespace(url="https://cdn.discordapp.com/embed/avatars/0.png")
         self.bot = False
         self.roles = []
@@ -82,12 +84,13 @@ class FakeGuild:
         self.name = "Duality Test"
         self.member_count = 4
         self.me = FakeMember(1, "Duality-Bot")
-        self.members = {member.id: member for member in members}
+        self.member_map = {member.id: member for member in members}
+        self.members = list(members)
         self.text_channels = [FakeChannel(111111111111111111, "allgemein"), FakeChannel(222222222222222222, "Orga", can_send=False)]
         self.voice_channels = []
 
     def get_member(self, user_id: int):
-        return self.members.get(user_id)
+        return self.member_map.get(user_id)
 
     def get_channel(self, channel_id: int):
         return next((channel for channel in self.text_channels if channel.id == channel_id), None)
@@ -153,6 +156,10 @@ def make_hooks(client=None) -> panel.PanelHooks:
         reopen_applications=mock.AsyncMock(return_value=3),
         list_profiles=lambda guild_id: [],
         list_tickets=lambda guild_id: [],
+        build_data_export=mock.AsyncMock(return_value={"server": "Duality Test", "nutzer_id": 1, "daten": {"profil": [{"riot_name": "Geheim"}]}}),
+        collect_user_data=lambda guild_id, user_id: {"profil": [{}], "tickets": [{}, {}]} if user_id == PLAYER_ID else {"profil": []},
+        delete_user_data=mock.Mock(),
+        delete_my_applications=mock.AsyncMock(return_value=1),
         list_events=lambda guild_id: [],
         event_rsvps=lambda guild_id: {},
         event_reminders=lambda guild_id: {},
@@ -1012,7 +1019,7 @@ class PlayerPanelTests(unittest.IsolatedAsyncioTestCase):
         guild = self.hooks.client.guild
         self.player_role = SimpleNamespace(name="Spieler", members=[])
         guild.get_member(PLAYER_ID).roles = [self.player_role]
-        guild.members[PLAYER_ID].display_name = "Zoe"
+        guild.get_member(PLAYER_ID).display_name = "Zoe"
         self.hooks.find_role = lambda guild, name: self.player_role if name == "Spieler" else None
         self.hooks.list_profiles = lambda guild_id: [
             profile(PLAYER_ID, ("Zoe", "EUW"), "Gold 2"),
@@ -1411,6 +1418,62 @@ class AnnouncementPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request("DELETE", "/api/announcements/2")).status, 400)
         self.assertEqual((await self.request("DELETE", "/api/announcements/3")).status, 404)
         self.assertEqual((await self.request("DELETE", "/api/announcements/abc")).status, 404)
+
+
+class PrivacyPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.client = TestClient(TestServer(panel.Panel(CONFIG, self.hooks).build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def get(self, path: str, user_id: int = ADMIN_ID):
+        _, cookie = session_cookie(user_id)
+        return await self.client.get(path, headers={"Cookie": cookie})
+
+    async def delete(self, target, body, user_id: int = ADMIN_ID):
+        session, cookie = session_cookie(user_id)
+        return await self.client.post(
+            f"/api/privacy/{target}/delete", json=body, headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]}
+        )
+
+    async def test_search(self):
+        self.assertEqual((await self.get("/api/privacy/search?q=Person", COACH_ID)).status, 403)
+        self.assertEqual((await self.get("/api/privacy/search?q=x")).status, 400)
+        results = (await (await self.get(f"/api/privacy/search?q={PLAYER_ID}")).json())["results"]
+        self.assertEqual((results[0]["user"]["id"], results[0]["stored"]), (str(PLAYER_ID), 3))
+        results = (await (await self.get("/api/privacy/search?q=888888888888888888")).json())["results"]
+        self.assertFalse(results[0]["user"]["on_server"])
+        results = (await (await self.get("/api/privacy/search?q=person 1000")).json())["results"]
+        self.assertEqual(len(results), 4)
+
+    async def test_export_audit_has_no_data(self):
+        response = await self.get(f"/api/privacy/{PLAYER_ID}?download=1")
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+        self.assertEqual((await response.json())["daten"]["profil"][0]["riot_name"], "Geheim")
+        audit_text = self.hooks.audit.await_args.args[1]
+        self.assertIn(f"Datenauskunft für `{PLAYER_ID}`", audit_text)
+        self.assertNotIn("Geheim", audit_text)
+        self.assertEqual((await self.get("/api/privacy/abc")).status, 400)
+
+    async def test_delete_needs_reason_and_confirmation(self):
+        for body in ({"confirm": True}, {"confirm": True, "reason": " x "}, {"reason": "Mail vom 21.10."}):
+            self.assertEqual((await self.delete(PLAYER_ID, body)).status, 400)
+        self.assertEqual((await self.delete(PLAYER_ID, {"confirm": True, "reason": "Mail"}, COACH_ID)).status, 403)
+        self.hooks.delete_user_data.assert_not_called()
+        response = await self.delete(PLAYER_ID, {"confirm": True, "reason": "Mail vom 21.10."})
+        data = await response.json()
+        self.assertEqual(data["remaining"], 3)
+        self.hooks.delete_user_data.assert_called_once_with(1, PLAYER_ID)
+        self.assertEqual(self.hooks.delete_my_applications.await_args.args[1], PLAYER_ID)
+        self.assertIn("Grund / Anfrage vom: Mail vom 21.10.", self.hooks.audit.await_args.args[1])
+
+    async def test_failed_application_deletion_stops(self):
+        self.hooks.delete_my_applications.side_effect = discord.HTTPException(mock.Mock(status=403, reason="x"), "nein")
+        response = await self.delete(PLAYER_ID, {"confirm": True, "reason": "Mail vom 21.10."})
+        self.assertEqual(response.status, 502)
+        self.hooks.delete_user_data.assert_not_called()
+        self.hooks.audit.assert_not_awaited()
 
 
 if __name__ == "__main__":
