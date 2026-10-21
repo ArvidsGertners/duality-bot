@@ -26,6 +26,7 @@ const state = {
   editingEvent: null,
   attendance: null,
   attendanceSort: { key: "name", ascending: true },
+  texts: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -688,6 +689,148 @@ async function loadRanking() {
   $("#ranking-list").replaceChildren(...(rows.length ? rows : [emptyRow(5, "Noch kein Spieler hat seine Riot-ID verknüpft.")]));
 }
 
+/* Vorschau im Discord-Stil (vereinfacht, ohne verschachtelte Formatierung) */
+
+const MARKDOWN_TOKENS = /(\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|`[^`\n]+`|\*[^*\n]+\*|_[^_\n]+_)/g;
+const MARKDOWN_TAGS = [["**", "strong"], ["__", "u"], ["~~", "s"], ["`", "code"], ["*", "em"], ["_", "em"]];
+
+function inlineMarkdown(line) {
+  const parts = [];
+  for (const piece of line.split(MARKDOWN_TOKENS)) {
+    if (!piece) continue;
+    const tag = MARKDOWN_TAGS.find(([marker]) => piece.length > 2 * marker.length && piece.startsWith(marker) && piece.endsWith(marker));
+    if (tag) {
+      const element = document.createElement(tag[1]);
+      element.textContent = piece.slice(tag[0].length, -tag[0].length);
+      parts.push(element);
+    } else {
+      parts.push(document.createTextNode(piece));
+    }
+  }
+  return parts;
+}
+
+function discordMarkdown(text) {
+  const fragment = document.createDocumentFragment();
+  text.split("\n").forEach((line, index) => {
+    if (index) fragment.append(document.createTextNode("\n"));
+    const heading = line.match(/^(#{1,3}) (.*)$/);
+    if (heading) {
+      const element = span(`md-h${heading[1].length}`, "");
+      element.append(...inlineMarkdown(heading[2]));
+      fragment.append(element);
+    } else if (line.startsWith("> ")) {
+      const quote = document.createElement("blockquote");
+      quote.append(...inlineMarkdown(line.slice(2)));
+      fragment.append(quote);
+    } else {
+      fragment.append(...inlineMarkdown(line));
+    }
+  });
+  return fragment;
+}
+
+/* Texte */
+
+function currentText() {
+  return state.texts.find((entry) => entry.key === $("#text-select").value);
+}
+
+function renderedText(entry, value) {
+  return Object.entries(entry.placeholders).reduce((result, [name, current]) => result.split(`{${name}}`).join(current), value);
+}
+
+function updateTextPreview() {
+  const entry = currentText();
+  if (!entry) return;
+  const value = $("#text-editor").value;
+  const rendered = renderedText(entry, value);
+  const length = Math.max(value.trim().length, rendered.trim().length);
+  const counter = $("#text-counter");
+  counter.textContent = `${length} / ${entry.limit} Zeichen`;
+  counter.classList.toggle("over-limit", length > entry.limit);
+  $("#text-save").disabled = length > entry.limit || !value.trim();
+  $("#text-preview").replaceChildren(discordMarkdown(rendered));
+}
+
+function showText() {
+  const entry = currentText();
+  if (!entry) return;
+  $("#text-editor").value = entry.value;
+  $("#text-error").textContent = "";
+  $("#text-message").textContent = "";
+  const placeholders = Object.entries(entry.placeholders).map(([name, value]) => `{${name}} = ${value}`);
+  $("#text-placeholders").textContent = placeholders.length ? `Platzhalter: ${placeholders.join(", ")}` : "";
+  $("#text-meta").textContent = entry.is_default
+    ? "Standardtext"
+    : `Geändert von ${entry.updated_by ? entry.updated_by.name : "unbekannt"} am ${formatTime(entry.updated_at)}`;
+  $("#text-reset").disabled = entry.is_default;
+  updateTextPreview();
+  loadTextHistory(entry).catch((error) => setBanner(error.message));
+}
+
+async function loadTextHistory(entry) {
+  const { history } = await api(`/api/texts/${entry.key}/history`);
+  $("#text-history").replaceChildren(...(history.length ? history.map((version) => {
+    const load = document.createElement("button");
+    load.type = "button";
+    load.className = "small";
+    load.textContent = "In den Editor laden";
+    load.addEventListener("click", () => {
+      $("#text-editor").value = version.is_default ? entry.default : version.value;
+      updateTextPreview();
+      $("#text-editor").focus();
+    });
+    const preview = version.is_default ? "Standardtext" : `${version.value.slice(0, 80)}${version.value.length > 80 ? " …" : ""}`;
+    return listItem(span("muted small", `${formatTime(version.updated_at)} · ${version.updated_by ? version.updated_by.name : "unbekannt"}`), preview, load);
+  }) : [listItem(span("muted", "Noch keine Änderungen, es gilt der Standardtext."))]));
+}
+
+async function loadTexts() {
+  const selected = $("#text-select").value;
+  state.texts = (await api("/api/texts")).texts;
+  $("#text-select").replaceChildren(...state.texts.map((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.key;
+    option.textContent = entry.label + (entry.is_default ? "" : " (geändert)");
+    return option;
+  }));
+  if (selected && state.texts.some((entry) => entry.key === selected)) $("#text-select").value = selected;
+  showText();
+}
+
+async function saveText(event) {
+  event.preventDefault();
+  const entry = currentText();
+  $("#text-save").disabled = true;
+  $("#text-error").textContent = "";
+  try {
+    const result = await api(`/api/texts/${entry.key}`, { method: "POST", body: { value: $("#text-editor").value } });
+    await loadTexts();
+    $("#text-message").textContent = result.message;
+  } catch (error) {
+    $("#text-error").textContent = error.message;
+    updateTextPreview();
+  }
+}
+
+async function resetText() {
+  const entry = currentText();
+  const confirmed = await confirmAction(
+    `„${entry.label}“ wird auf den Standardtext aus dem Code zurückgesetzt. Die bisherige Fassung bleibt im Verlauf.`,
+    null,
+    "Zurücksetzen",
+  );
+  if (!confirmed) return;
+  try {
+    const result = await api(`/api/texts/${entry.key}/reset`, { method: "POST" });
+    await loadTexts();
+    $("#text-message").textContent = result.message;
+  } catch (error) {
+    $("#text-error").textContent = error.message;
+  }
+}
+
 /* Einstellungen */
 
 function settingInput(entry, id) {
@@ -796,7 +939,7 @@ async function loadTickets() {
 
 const pageLoaders = {
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
-  anwesenheit: loadAttendance, rangliste: loadRanking, einstellungen: loadSettings,
+  anwesenheit: loadAttendance, rangliste: loadRanking, einstellungen: loadSettings, texte: loadTexts,
 };
 
 function renderVoice(channels) {
@@ -1105,6 +1248,10 @@ async function init() {
   for (const button of document.querySelectorAll("#page-anwesenheit button.sort")) {
     button.addEventListener("click", () => sortAttendance(button.dataset.sort));
   }
+  $("#text-select").addEventListener("change", showText);
+  $("#text-editor").addEventListener("input", updateTextPreview);
+  $("#text-form").addEventListener("submit", saveText);
+  $("#text-reset").addEventListener("click", resetText);
   $("#events-view-list").addEventListener("click", () => showEventsView("list"));
   $("#events-view-calendar").addEventListener("click", () => showEventsView("calendar"));
   $("#calendar-prev").addEventListener("click", () => moveCalendar(-1));

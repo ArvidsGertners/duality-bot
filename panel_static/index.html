@@ -23,6 +23,7 @@
           <li><a href="#bewerbungen" data-page="bewerbungen" data-level="1">Bewerbungen</a></li>
           <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
           <li><a href="#tickets" data-page="tickets" data-level="1">Tickets</a></li>
+          <li><a href="#texte" data-page="texte" data-level="2">Texte</a></li>
           <li><a href="#einstellungen" data-page="einstellungen" data-level="2">Einstellungen</a></li>
           <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
         </ul>
@@ -240,6 +241,40 @@
             </thead>
             <tbody id="ticket-list"></tbody>
           </table>
+        </div>
+      </section>
+
+      <section id="page-texte" class="page" aria-labelledby="title-texte" hidden>
+        <h1 id="title-texte">Texte</h1>
+        <p class="muted">Feste Nachrichten in #willkommen, #regeln und #bewerbung werden nach dem Speichern direkt in Discord bearbeitet; Buttons bleiben erhalten.</p>
+        <div class="toolbar">
+          <label for="text-select">Text</label>
+          <select id="text-select"></select>
+          <span class="muted small" id="text-meta"></span>
+        </div>
+        <div class="text-layout">
+          <form class="card form-grid" id="text-form">
+            <label for="text-editor">Inhalt (Discord-Markdown)</label>
+            <textarea id="text-editor" rows="18" aria-describedby="text-counter text-placeholders"></textarea>
+            <div class="toolbar">
+              <span class="small" id="text-counter" aria-live="polite"></span>
+              <span class="muted small" id="text-placeholders"></span>
+            </div>
+            <p class="form-error" id="text-error" role="alert"></p>
+            <div class="actions">
+              <button type="button" id="text-reset">Auf Standard zurücksetzen …</button>
+              <button type="submit" class="primary" id="text-save">Speichern</button>
+            </div>
+            <p class="small" id="text-message" role="status"></p>
+          </form>
+          <div>
+            <h2 class="small muted">Vorschau (vereinfacht)</h2>
+            <div class="discord-preview"><div class="embed-preview" id="text-preview"></div></div>
+            <details class="card spaced">
+              <summary>Änderungsverlauf (letzte 20 Fassungen)</summary>
+              <ul class="alert-list" id="text-history"></ul>
+            </details>
+          </div>
         </div>
       </section>
 

@@ -625,6 +625,13 @@ class PanelHooks:
     attendance_events: Callable[[int, int, int], tuple[list, dict[int, dict[int, str]]]]
     summarize_attendance: Callable[[list, dict, dict[int, int]], dict[int, dict]]
     attendance_rules: Callable[[], dict]
+    # Texte (D2): Übersicht, Verlauf, speichern (ValueError bei ungültigem Text), zurücksetzen,
+    # feste Nachricht in Discord nachziehen (True, wenn eine gefunden und bearbeitet wurde)
+    texts_overview: Callable[[], list[dict]]
+    text_history: Callable[[str], list[dict]]
+    save_text: Callable[[str, Any, int], str]
+    reset_text: Callable[[str, int], None]
+    refresh_text_message: Callable[[discord.Guild, str], Awaitable[bool]]
     # Einstellungen (D3): Übersicht, speichern (prüft, ValueError bei ungültigem Wert) → (alt, neu), zurücksetzen
     settings_overview: Callable[[], list[dict]]
     save_setting: Callable[[str, Any, int], tuple[Any, Any]]
@@ -672,6 +679,10 @@ class Panel:
             web.get("/api/events", self.api_events),
             web.get("/api/attendance", self.api_attendance),
             web.get("/api/ranking", self.api_ranking),
+            web.get("/api/texts", self.api_texts),
+            web.get("/api/texts/{key}/history", self.api_text_history),
+            web.post("/api/texts/{key}", self.api_save_text),
+            web.post("/api/texts/{key}/reset", self.api_reset_text),
             web.get("/api/settings", self.api_settings),
             web.post("/api/settings/{key}", self.api_save_setting),
             web.post("/api/settings/{key}/reset", self.api_reset_setting),
@@ -1237,6 +1248,65 @@ class Panel:
             })
         rows.sort(key=lambda row: row["user"]["name"].casefold())
         return {"days": days, "since": since, "until": until, "events": len(events), "rules": rules, "players": rows}
+
+    async def api_texts(self, request: web.Request) -> web.Response:
+        self.authenticate(request, ADMIN)
+        guild = self.guild()
+        texts = self.hooks.texts_overview()
+        for entry in texts:
+            entry["updated_by"] = self.person(guild, entry["updated_by"])
+        return web.json_response({"texts": texts})
+
+    def text_entry(self, key: str) -> dict:
+        entry = next((entry for entry in self.hooks.texts_overview() if entry["key"] == key), None)
+        if entry is None:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Diesen Text gibt es nicht."}), content_type="application/json")
+        return entry
+
+    async def api_text_history(self, request: web.Request) -> web.Response:
+        self.authenticate(request, ADMIN)
+        key = self.text_entry(request.match_info["key"])["key"]
+        guild = self.guild()
+        history = self.hooks.text_history(key)
+        for entry in history:
+            entry["updated_by"] = self.person(guild, entry["updated_by"])
+        return web.json_response({"history": history})
+
+    async def after_text_change(self, member: discord.Member, entry: dict, action: str) -> web.Response:
+        await self.audit_action(member, f"hat den Text „{entry['label']}“ {action}")
+        message = "Gespeichert."
+        if entry["posted_message"]:
+            try:
+                refreshed = await self.hooks.refresh_text_message(self.guild(), entry["key"])
+            except discord.HTTPException:
+                log.exception("Feste Nachricht für %s konnte nicht aktualisiert werden", entry["key"])
+                refreshed = False
+            message += (
+                " Die Nachricht in Discord wurde aktualisiert." if refreshed
+                else " Die Nachricht in Discord konnte nicht aktualisiert werden; das passiert spätestens beim nächsten Neustart."
+            )
+        return web.json_response({"message": message})
+
+    async def api_save_text(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        entry = self.text_entry(request.match_info["key"])
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise json_error(400, "Ungültige Anfrage.")
+        try:
+            self.hooks.save_text(entry["key"], body.get("value"), member.id)
+        except ValueError as error:
+            raise json_error(400, str(error)) from None
+        return await self.after_text_change(member, entry, "geändert")
+
+    async def api_reset_text(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        entry = self.text_entry(request.match_info["key"])
+        self.hooks.reset_text(entry["key"], member.id)
+        return await self.after_text_change(member, entry, "auf den Standard zurückgesetzt")
 
     async def api_settings(self, request: web.Request) -> web.Response:
         self.authenticate(request, ADMIN)

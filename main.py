@@ -239,6 +239,13 @@ def initialize_storage() -> None:
             "CREATE TABLE IF NOT EXISTS bot_settings ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_by INTEGER, updated_at INTEGER NOT NULL)"
         )
+        # Texte mit Verlauf: der neueste Eintrag je Schlüssel gilt, value NULL heißt „Standard“.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS bot_texts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, value TEXT, updated_by INTEGER, "
+            "updated_at INTEGER NOT NULL)"
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS bot_texts_key ON bot_texts (key, id)")
         # Rangverlauf für die Rangliste; ein Eintrag nur, wenn sich der Rang ändert.
         connection.execute(
             "CREATE TABLE IF NOT EXISTS rank_history ("
@@ -1656,6 +1663,257 @@ def settings_overview() -> list[dict]:
     return overview
 
 
+class TextDefinition(NamedTuple):
+    key: str
+    label: str
+    # Discord-Grenze: Embed-Beschreibung 4096, Feldwert 1024, Nachricht 2000
+    limit: int
+    default: str
+    placeholders: tuple[str, ...] = ()
+
+
+# Die bisherigen Texte aus dem Code sind die Standardwerte; im Panel geänderte gehen vor.
+TEXT_DEFINITIONS = {definition.key: definition for definition in (
+    TextDefinition("welcome", "Willkommen (#willkommen)", 4096, (
+        "Schön, dass du da bist! Dieser Server ist für alle Mitglieder da – egal, ob du Valorant spielst "
+        "oder erst einmal die Community kennenlernen möchtest.\n\n"
+        "**Zum Ankommen**\n"
+        "• Lies zuerst `#regeln`.\n"
+        "• Stell dich in `#allgemein` vor und lerne die Community kennen.\n\n"
+        "**Du möchtest dich fürs Valorant-Team bewerben?**\n"
+        "`#bewerbung` in der Valorant-Kategorie ist für alle sichtbar. Dort kannst du über den Button deine Bewerbung starten. "
+        "Nach dem Absenden erhältst du die Rolle `Bewerber` und kannst den Kanal bis zur nächsten Saison weder sehen noch erneut nutzen. "
+        "Für Fragen zum Bewerbungsablauf kannst du anschließend in `#bewerber-chat` schreiben. "
+        "Bewerbungen sind "
+        "ab 16 Jahren möglich; besonders wichtig sind Spielzeiten Mittwoch bis Sonntag ab 19 Uhr. "
+        "Nach dem Absenden prüft der Staff deine Bewerbung. Zugang zum Teambereich gibt es erst nach einer Annahme.\n\n"
+        "**Rang, Hochschule und Profil**\n"
+        "• `/riot-id Name#Tag`: verknüpft deine Riot-ID. Der Bot holt deinen Valorant-Rang automatisch "
+        "und aktualisiert ihn täglich. `/riot-id` ohne Angabe löst die Verknüpfung wieder.\n"
+        "• `/hochschule`: ändert deine Hochschule (beim Beitritt fragt Discord sie schon ab).\n"
+        "• `/profil`: zeigt dein Profil mit Rang, Hochschule und Rollen.\n\n"
+        "**Eigener Voice-Channel**\n"
+        "Betritt `➕ Neuer Voice` oder `➕ Neuer Valorant-Voice`, dann bekommst du einen eigenen Kanal. "
+        "Er verschwindet, sobald er leer ist.\n\n"
+        "**Benachrichtigungen**\n"
+        "Nutze die Buttons unter dieser Nachricht, um freiwillig Pings für Valorant-Updates oder Community-Events zu erhalten. "
+        "Ein zweiter Klick schaltet sie wieder ab.\n\n"
+        "Alle Befehle findest du mit `/help`."
+    )),
+    TextDefinition("rules", "Regeln (#regeln)", 4096, (
+        "Mit deiner Teilnahme am Server und an unseren Teamaktivitäten akzeptierst du diese Regeln:\n\n"
+        "**1. Respektvoller Umgang** — Behandle Mitglieder freundlich. Belästigung, Drohungen, "
+        "Diskriminierung und persönliche Angriffe sind nicht erlaubt.\n\n"
+        "**2. Schutz der Privatsphäre** — Teile keine privaten Daten oder Nachrichten anderer Personen "
+        "ohne deren Zustimmung. Bewerbungsangaben bleiben dem Staff vorbehalten.\n\n"
+        "**3. Passende Kanäle und kein Spam** — Nutze die Kanäle passend zu ihrem Thema. Spam, "
+        "unerlaubte Werbung und störendes Verhalten sind nicht erlaubt.\n\n"
+        "**4. Fair Play** — Cheating, unerlaubte Exploits und absichtlicher Betrug sind im Teamkontext "
+        "nicht akzeptiert.\n\n"
+        "**5. Aufnahmen und Streams** — Stimme Aufnahmen oder Streams in gemeinsamen Sprachkanälen "
+        "vorher mit allen Beteiligten ab.\n\n"
+        "**6. DHBW Mannheim** — Duality Mannheim ist ein offiziell von der DHBW Mannheim anerkanntes "
+        "Team. Für Teamaktivitäten gelten zusätzlich die jeweils aktuellen, für uns einschlägigen "
+        "Regeln und Richtlinien der DHBW Mannheim. Bei Unsicherheit wende dich an den Staff.\n\n"
+        "**7. Team-Bewerbung ab 16** — Für eine Bewerbung ins Valorant-Team musst du mindestens 16 Jahre "
+        "alt sein. Diese Voraussetzung gilt für Team-Bewerbungen.\n\n"
+        "**8. Moderation und Hilfe** — Folge den begründeten Anweisungen des Staffs. Bei Problemen kannst "
+        "du `/report` nutzen oder dich vertraulich an Coach oder Admin wenden; Ideen kannst du mit `/feedback` senden."
+    )),
+    TextDefinition("application_info", "Bewerbungs-Infotext (#bewerbung)", 4096, (
+        "Du möchtest für Duality Mannheim Valorant spielen? Dieser Kanal ist für alle Mitglieder sichtbar. "
+        "Starte hier über den Button deine Bewerbung. Nach dem Absenden erhältst du die Rolle `Bewerber`; "
+        "danach ist dieser Kanal für dich bis zur nächsten Saison nicht mehr sichtbar.\n\n"
+        "Du brauchst deinen Tracker.gg-Profillink und bestätigst, dass du mindestens 16 bist. "
+        "Außerdem wählst du deine Main-Rolle (Duelist, Initiator, Controller oder Sentinel), alle Rollen, "
+        "die du spielen kannst, sowie deine Verfügbarkeit pro Abend von Mittwoch bis Sonntag aus. "
+        "Du kannst zum Beispiel Mittwoch 19–22 Uhr und Freitag 20–23 Uhr getrennt auswählen. "
+        "Wir fragen auch deinen bevorzugten Namen und optional Kurs/Ausbildung ab.\n\n"
+        "Deine Angaben werden privat an den Staff geschickt. Nach dem Absenden erhältst du Zugang zu `#bewerber-chat`, "
+        "wo du Fragen zum Ablauf stellen kannst. "
+        "Auch bei einer Ablehnung bleibt die Rolle `Bewerber` bis zur nächsten Saison bestehen; vor jeder neuen Saison "
+        "kannst du dich erneut bewerben. Wenn du Rückfragen hast, wende dich direkt an den Staff. "
+        "Abgelehnte Bewerbungseinträge werden nach {loeschfrist} Tagen gelöscht."
+    ), ("loeschfrist",)),
+    TextDefinition("dm_accepted", "DM bei Annahme", 2000, "Deine Bewerbung bei Duality Mannheim wurde angenommen. Du hast jetzt die Rolle `Spieler` und Zugang zum Teambereich. Willkommen im Team!"),
+    TextDefinition("dm_declined", "DM bei Ablehnung", 2000, "Danke für deine Bewerbung bei Duality Mannheim. Der Staff kann dir aktuell keinen Teamplatz anbieten. Deine Rolle `Bewerber` bleibt bis zur nächsten Saison bestehen. Vor jeder neuen Saison öffnen wir die Bewerbungen wieder, dann kannst du dich erneut bewerben. Wenn du Rückfragen hast, wende dich bitte direkt an den Staff."),
+    TextDefinition("help_community", "/help – Community", 1024, (
+        "Lies `#regeln`, stell dich in `#allgemein` vor und nutze die Buttons in `#willkommen`, um Benachrichtigungen auszuwählen. "
+                    "Über `➕ Neuer Voice` bekommst du einen eigenen Voice-Channel, der verschwindet, sobald er leer ist."
+    )),
+    TextDefinition("help_team", "/help – Valorant-Team", 1024, (
+        "`#bewerbung` ist für alle sichtbar. Starte dort über den Button das Teamformular. Nach dem Absenden erhältst du `Bewerber` und kannst den Bewerbungskanal bis zur nächsten Saison nicht erneut nutzen. Deinen Rang holt `/riot-id Name#Tag` automatisch, deine Hochschule änderst du mit `/hochschule`."
+    )),
+    TextDefinition("help_commands", "/help – Bot-Befehle", 1024, (
+        "`/report` öffnet ein privates Ticket mit dem Staff (oder der Button in `#tickets`) · `/feedback` sendet eine Idee · "
+                    "`/profil` zeigt Rang, Rollen und Hochschule · `/riot-id` verknüpft deine Riot-ID für den automatischen Rang · "
+                    "`/hochschule` ändert deine Hochschule · "
+                    "`/team` zeigt den aktuellen Kader · `/rangliste` sortiert ihn nach Valorant-Rang · "
+                    "`/teamname` setzt optional deinen Namen für den Kader · "
+                    "`/meine-daten` zeigt, exportiert oder löscht deine gespeicherten Daten · "
+                    "`/termin` erstellt einen Teamtermin (Staff) · `/neue-saison` öffnet die Bewerbungen wieder (Staff)."
+    )),
+)}
+TEXT_PLACEHOLDERS = {
+    "loeschfrist": lambda: str(setting("application_retention_days")),
+}
+TEXT_HISTORY_SIZE = 20
+# Aktuelle Rohtexte; None heißt „neu aus der Datenbank laden“, ein fehlender Schlüssel „Standard“.
+TEXT_CACHE: dict[str, str] | None = None
+
+
+def render_text(definition: TextDefinition, raw: str) -> str:
+    for name in definition.placeholders:
+        raw = raw.replace("{" + name + "}", TEXT_PLACEHOLDERS[name]())
+    return raw
+
+
+def load_texts() -> dict[str, str]:
+    try:
+        with open_db() as connection:
+            rows = connection.execute(
+                "SELECT key, value FROM bot_texts WHERE id IN (SELECT MAX(id) FROM bot_texts GROUP BY key)"
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {key: value for key, value in rows if key in TEXT_DEFINITIONS and value is not None}
+
+
+def raw_text(key: str) -> str:
+    global TEXT_CACHE
+    if TEXT_CACHE is None:
+        TEXT_CACHE = load_texts()
+    return TEXT_CACHE.get(key, TEXT_DEFINITIONS[key].default)
+
+
+def bot_text(key: str) -> str:
+    """Text zum Anzeigen: gespeicherte Fassung oder Standard, Platzhalter ausgefüllt."""
+    return render_text(TEXT_DEFINITIONS[key], raw_text(key))
+
+
+def validate_text(definition: TextDefinition, value) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Der Text darf nicht leer sein.")
+    value = value.strip()
+    length = max(len(value), len(render_text(definition, value)))
+    if length > definition.limit:
+        raise ValueError(f"Der Text ist {length} Zeichen lang; Discord erlaubt hier höchstens {definition.limit}.")
+    return value
+
+
+def store_text(key: str, value: str | None, updated_by: int | None) -> None:
+    global TEXT_CACHE
+    with open_db() as connection:
+        connection.execute(
+            "INSERT INTO bot_texts (key, value, updated_by, updated_at) VALUES (?, ?, ?, ?)",
+            (key, value, updated_by, int(time.time())),
+        )
+        # Nur die letzten Fassungen je Text bleiben als Verlauf erhalten.
+        connection.execute(
+            "DELETE FROM bot_texts WHERE key = ? AND id NOT IN "
+            "(SELECT id FROM bot_texts WHERE key = ? ORDER BY id DESC LIMIT ?)",
+            (key, key, TEXT_HISTORY_SIZE),
+        )
+    TEXT_CACHE = None
+
+
+def save_text(key: str, value, updated_by: int | None) -> str:
+    definition = TEXT_DEFINITIONS.get(key)
+    if definition is None:
+        raise ValueError("Diesen Text gibt es nicht.")
+    clean = validate_text(definition, value)
+    store_text(key, clean, updated_by)
+    return clean
+
+
+def reset_text(key: str, updated_by: int | None) -> None:
+    if key not in TEXT_DEFINITIONS:
+        raise ValueError("Diesen Text gibt es nicht.")
+    # Ein leerer Eintrag heißt „Standard“, so bleibt der Wechsel im Verlauf sichtbar.
+    store_text(key, None, updated_by)
+
+
+def text_history(key: str) -> list[dict]:
+    with open_db() as connection:
+        rows = connection.execute(
+            "SELECT id, value, updated_by, updated_at FROM bot_texts WHERE key = ? ORDER BY id DESC LIMIT ?",
+            (key, TEXT_HISTORY_SIZE),
+        ).fetchall()
+    return [
+        {"id": row_id, "value": value, "is_default": value is None, "updated_by": updated_by, "updated_at": updated_at}
+        for row_id, value, updated_by, updated_at in rows
+    ]
+
+
+def texts_overview() -> list[dict]:
+    with open_db() as connection:
+        latest = {
+            key: (value, updated_by, updated_at)
+            for key, value, updated_by, updated_at in connection.execute(
+                "SELECT key, value, updated_by, updated_at FROM bot_texts "
+                "WHERE id IN (SELECT MAX(id) FROM bot_texts GROUP BY key)"
+            )
+        }
+    overview = []
+    for key, definition in TEXT_DEFINITIONS.items():
+        value, updated_by, updated_at = latest.get(key, (None, None, None))
+        overview.append({
+            "key": key,
+            "label": definition.label,
+            "limit": definition.limit,
+            "value": raw_text(key),
+            "default": definition.default,
+            "is_default": value is None,
+            "placeholders": {name: TEXT_PLACEHOLDERS[name]() for name in definition.placeholders},
+            "posted_message": key in TEXT_MESSAGES,
+            "updated_by": updated_by,
+            "updated_at": updated_at,
+        })
+    return overview
+
+
+def welcome_message_embed() -> discord.Embed:
+    embed = discord.Embed(title="Willkommen bei Duality Mannheim! 👋", description=bot_text("welcome"), color=discord.Color.from_rgb(110, 70, 255))
+    embed.set_footer(text=WELCOME_MARKER)
+    return embed
+
+
+def rules_message_embed() -> discord.Embed:
+    embed = discord.Embed(title="Regeln von Duality Mannheim", description=bot_text("rules"), color=discord.Color.from_rgb(110, 70, 255))
+    embed.set_footer(text=RULES_MARKER)
+    return embed
+
+
+def application_message_embed() -> discord.Embed:
+    embed = discord.Embed(title="Bewerbung für Duality Mannheim", description=bot_text("application_info"), color=discord.Color.from_rgb(110, 70, 255))
+    embed.set_footer(text=APPLICATION_MARKER)
+    return embed
+
+
+# Texte, die als feste Nachricht im Server stehen: Kanal, erkannte Marker, Embed-Bauer.
+TEXT_MESSAGES = {
+    "welcome": ("willkommen", {WELCOME_MARKER}, welcome_message_embed),
+    "rules": ("regeln", {RULES_MARKER}, rules_message_embed),
+    "application_info": ("bewerbung", {"DUALITY_ONBOARDING_V1", "DUALITY_ONBOARDING_V2", APPLICATION_MARKER}, application_message_embed),
+}
+
+
+async def refresh_text_message(guild: discord.Guild, key: str) -> bool:
+    """Feste Nachricht nach einer Textänderung bearbeiten statt neu posten.
+    Nur das Embed wird ersetzt, Buttons und ihre custom_ids bleiben."""
+    if key not in TEXT_MESSAGES:
+        return False
+    channel_name, markers, build = TEXT_MESSAGES[key]
+    channel = find_text_channel(guild, channel_name)
+    if channel is None:
+        return False
+    async for message in channel.history(limit=50):
+        if message.author == guild.me and message.embeds and message.embeds[0].footer.text in markers:
+            await message.edit(embed=build())
+            return True
+    return False
+
+
 def collect_problems(loops: dict, now: float) -> dict[str, str | None]:
     """Aktuelle Probleme je Schlüssel; None heißt „in Ordnung“."""
     problems: dict[str, str | None] = {}
@@ -2348,9 +2606,9 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
     decide_application(message.id, status, interaction.user.id, int(time.time()))
     application = get_application(message.id)
     if accepted:
-        dm_text = "Deine Bewerbung bei Duality Mannheim wurde angenommen. Du hast jetzt die Rolle `Spieler` und Zugang zum Teambereich. Willkommen im Team!"
+        dm_text = bot_text("dm_accepted")
     else:
-        dm_text = "Danke für deine Bewerbung bei Duality Mannheim. Der Staff kann dir aktuell keinen Teamplatz anbieten. Deine Rolle `Bewerber` bleibt bis zur nächsten Saison bestehen. Vor jeder neuen Saison öffnen wir die Bewerbungen wieder, dann kannst du dich erneut bewerben. Wenn du Rückfragen hast, wende dich bitte direkt an den Staff."
+        dm_text = bot_text("dm_declined")
 
     dm_sent = True
     try:
@@ -3244,28 +3502,9 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             description="Hier findest du die wichtigsten Wege durch den Server.",
             color=discord.Color.from_rgb(110, 70, 255),
         )
-        embed.add_field(
-            name="Community",
-            value="Lies `#regeln`, stell dich in `#allgemein` vor und nutze die Buttons in `#willkommen`, um Benachrichtigungen auszuwählen. "
-            "Über `➕ Neuer Voice` bekommst du einen eigenen Voice-Channel, der verschwindet, sobald er leer ist.",
-            inline=False,
-        )
-        embed.add_field(
-            name="Valorant-Team",
-            value="`#bewerbung` ist für alle sichtbar. Starte dort über den Button das Teamformular. Nach dem Absenden erhältst du `Bewerber` und kannst den Bewerbungskanal bis zur nächsten Saison nicht erneut nutzen. Deinen Rang holt `/riot-id Name#Tag` automatisch, deine Hochschule änderst du mit `/hochschule`.",
-            inline=False,
-        )
-        embed.add_field(
-            name="Bot-Befehle",
-            value="`/report` öffnet ein privates Ticket mit dem Staff (oder der Button in `#tickets`) · `/feedback` sendet eine Idee · "
-            "`/profil` zeigt Rang, Rollen und Hochschule · `/riot-id` verknüpft deine Riot-ID für den automatischen Rang · "
-            "`/hochschule` ändert deine Hochschule · "
-            "`/team` zeigt den aktuellen Kader · `/rangliste` sortiert ihn nach Valorant-Rang · "
-            "`/teamname` setzt optional deinen Namen für den Kader · "
-            "`/meine-daten` zeigt, exportiert oder löscht deine gespeicherten Daten · "
-            "`/termin` erstellt einen Teamtermin (Staff) · `/neue-saison` öffnet die Bewerbungen wieder (Staff).",
-            inline=False,
-        )
+        embed.add_field(name="Community", value=bot_text("help_community"), inline=False)
+        embed.add_field(name="Valorant-Team", value=bot_text("help_team"), inline=False)
+        embed.add_field(name="Bot-Befehle", value=bot_text("help_commands"), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @tree.command(name="report", description="Öffnet ein vertrauliches Ticket mit dem Staff.")
@@ -3919,26 +4158,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
 
     application_channel = find_text_channel(guild, "bewerbung")
     if apply and application_channel:
-        embed = discord.Embed(
-            title="Bewerbung für Duality Mannheim",
-            description=(
-                "Du möchtest für Duality Mannheim Valorant spielen? Dieser Kanal ist für alle Mitglieder sichtbar. "
-                "Starte hier über den Button deine Bewerbung. Nach dem Absenden erhältst du die Rolle `Bewerber`; "
-                "danach ist dieser Kanal für dich bis zur nächsten Saison nicht mehr sichtbar.\n\n"
-                "Du brauchst deinen Tracker.gg-Profillink und bestätigst, dass du mindestens 16 bist. "
-                "Außerdem wählst du deine Main-Rolle (Duelist, Initiator, Controller oder Sentinel), alle Rollen, "
-                "die du spielen kannst, sowie deine Verfügbarkeit pro Abend von Mittwoch bis Sonntag aus. "
-                "Du kannst zum Beispiel Mittwoch 19–22 Uhr und Freitag 20–23 Uhr getrennt auswählen. "
-                "Wir fragen auch deinen bevorzugten Namen und optional Kurs/Ausbildung ab.\n\n"
-                "Deine Angaben werden privat an den Staff geschickt. Nach dem Absenden erhältst du Zugang zu `#bewerber-chat`, "
-                "wo du Fragen zum Ablauf stellen kannst. "
-                "Auch bei einer Ablehnung bleibt die Rolle `Bewerber` bis zur nächsten Saison bestehen; vor jeder neuen Saison "
-                "kannst du dich erneut bewerben. Wenn du Rückfragen hast, wende dich direkt an den Staff. "
-                f"Abgelehnte Bewerbungseinträge werden nach {setting('application_retention_days')} Tagen gelöscht."
-            ),
-            color=discord.Color.from_rgb(110, 70, 255),
-        )
-        embed.set_footer(text=APPLICATION_MARKER)
+        embed = application_message_embed()
         found_application_message = False
         async for message in application_channel.history(limit=50):
             if message.author == guild.me and message.embeds:
@@ -3954,31 +4174,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
 
     rules_channel = find_text_channel(guild, "regeln")
     if apply and rules_channel:
-        rules_embed = discord.Embed(
-            title="Regeln von Duality Mannheim",
-            description=(
-                "Mit deiner Teilnahme am Server und an unseren Teamaktivitäten akzeptierst du diese Regeln:\n\n"
-                "**1. Respektvoller Umgang** — Behandle Mitglieder freundlich. Belästigung, Drohungen, "
-                "Diskriminierung und persönliche Angriffe sind nicht erlaubt.\n\n"
-                "**2. Schutz der Privatsphäre** — Teile keine privaten Daten oder Nachrichten anderer Personen "
-                "ohne deren Zustimmung. Bewerbungsangaben bleiben dem Staff vorbehalten.\n\n"
-                "**3. Passende Kanäle und kein Spam** — Nutze die Kanäle passend zu ihrem Thema. Spam, "
-                "unerlaubte Werbung und störendes Verhalten sind nicht erlaubt.\n\n"
-                "**4. Fair Play** — Cheating, unerlaubte Exploits und absichtlicher Betrug sind im Teamkontext "
-                "nicht akzeptiert.\n\n"
-                "**5. Aufnahmen und Streams** — Stimme Aufnahmen oder Streams in gemeinsamen Sprachkanälen "
-                "vorher mit allen Beteiligten ab.\n\n"
-                "**6. DHBW Mannheim** — Duality Mannheim ist ein offiziell von der DHBW Mannheim anerkanntes "
-                "Team. Für Teamaktivitäten gelten zusätzlich die jeweils aktuellen, für uns einschlägigen "
-                "Regeln und Richtlinien der DHBW Mannheim. Bei Unsicherheit wende dich an den Staff.\n\n"
-                "**7. Team-Bewerbung ab 16** — Für eine Bewerbung ins Valorant-Team musst du mindestens 16 Jahre "
-                "alt sein. Diese Voraussetzung gilt für Team-Bewerbungen.\n\n"
-                "**8. Moderation und Hilfe** — Folge den begründeten Anweisungen des Staffs. Bei Problemen kannst "
-                "du `/report` nutzen oder dich vertraulich an Coach oder Admin wenden; Ideen kannst du mit `/feedback` senden."
-            ),
-            color=discord.Color.from_rgb(110, 70, 255),
-        )
-        rules_embed.set_footer(text=RULES_MARKER)
+        rules_embed = rules_message_embed()
         found_rules_message = False
         async for message in rules_channel.history(limit=50):
             if message.author == guild.me and message.embeds:
@@ -3999,37 +4195,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 await message.delete()
                 print("  Alte Bewerbungsnachricht aus #willkommen entfernt")
 
-        welcome_embed = discord.Embed(
-            title="Willkommen bei Duality Mannheim! 👋",
-            description=(
-                "Schön, dass du da bist! Dieser Server ist für alle Mitglieder da – egal, ob du Valorant spielst "
-                "oder erst einmal die Community kennenlernen möchtest.\n\n"
-                "**Zum Ankommen**\n"
-                "• Lies zuerst `#regeln`.\n"
-                "• Stell dich in `#allgemein` vor und lerne die Community kennen.\n\n"
-                "**Du möchtest dich fürs Valorant-Team bewerben?**\n"
-                "`#bewerbung` in der Valorant-Kategorie ist für alle sichtbar. Dort kannst du über den Button deine Bewerbung starten. "
-                "Nach dem Absenden erhältst du die Rolle `Bewerber` und kannst den Kanal bis zur nächsten Saison weder sehen noch erneut nutzen. "
-                "Für Fragen zum Bewerbungsablauf kannst du anschließend in `#bewerber-chat` schreiben. "
-                "Bewerbungen sind "
-                "ab 16 Jahren möglich; besonders wichtig sind Spielzeiten Mittwoch bis Sonntag ab 19 Uhr. "
-                "Nach dem Absenden prüft der Staff deine Bewerbung. Zugang zum Teambereich gibt es erst nach einer Annahme.\n\n"
-                "**Rang, Hochschule und Profil**\n"
-                "• `/riot-id Name#Tag`: verknüpft deine Riot-ID. Der Bot holt deinen Valorant-Rang automatisch "
-                "und aktualisiert ihn täglich. `/riot-id` ohne Angabe löst die Verknüpfung wieder.\n"
-                "• `/hochschule`: ändert deine Hochschule (beim Beitritt fragt Discord sie schon ab).\n"
-                "• `/profil`: zeigt dein Profil mit Rang, Hochschule und Rollen.\n\n"
-                "**Eigener Voice-Channel**\n"
-                "Betritt `➕ Neuer Voice` oder `➕ Neuer Valorant-Voice`, dann bekommst du einen eigenen Kanal. "
-                "Er verschwindet, sobald er leer ist.\n\n"
-                "**Benachrichtigungen**\n"
-                "Nutze die Buttons unter dieser Nachricht, um freiwillig Pings für Valorant-Updates oder Community-Events zu erhalten. "
-                "Ein zweiter Klick schaltet sie wieder ab.\n\n"
-                "Alle Befehle findest du mit `/help`."
-            ),
-            color=discord.Color.from_rgb(110, 70, 255),
-        )
-        welcome_embed.set_footer(text=WELCOME_MARKER)
+        welcome_embed = welcome_message_embed()
         found_welcome_message = False
         async for message in welcome.history(limit=50):
             if message.author == guild.me and message.embeds:
@@ -4318,6 +4484,11 @@ async def main(apply: bool) -> int | None:
                         "missing_limit": setting("attendance_missing_limit"),
                         "retention_days": setting("event_retention_days"),
                     },
+                    texts_overview=texts_overview,
+                    text_history=text_history,
+                    save_text=save_text,
+                    reset_text=reset_text,
+                    refresh_text_message=refresh_text_message,
                     settings_overview=settings_overview,
                     save_setting=save_setting,
                     reset_setting=reset_setting,

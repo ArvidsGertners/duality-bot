@@ -36,8 +36,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] C4 `/rangliste` + Panel-Ansicht + `rank_history` — fertig (aa72e6d)
 
 ### Phase 4 – Konfiguration & Kommunikation
-- [x] D3 Einstellungen (`bot_settings`, `setting()`-Helfer mit Cache) — fertig (Commit „Einstellungen im Panel …“)
-- [ ] D2 Texte bearbeiten (`bot_texts`, Verlauf, Discord-Nachrichten aktualisieren) — offen
+- [x] D3 Einstellungen (`bot_settings`, `setting()`-Helfer mit Cache) — fertig (283261a)
+- [x] D2 Texte bearbeiten (`bot_texts`, Verlauf, Discord-Nachrichten aktualisieren) — fertig (Commit „Texte im Panel …“)
 - [ ] D1 Ankündigungs-Editor (sofort/zeitgesteuert, `scheduled_announcements`) — offen
 - [ ] E1 Datenschutz-Seite (Auskunft/Löschung) — offen
 
@@ -113,6 +113,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 - **D3 Einstellungen:** `SETTING_DEFINITIONS` (Typ int/bool/hours, Bereich, Beschreibung) in main.py, Tabelle `bot_settings` (key, value JSON, updated_by, updated_at). `setting(key)` liest mit Cache, `save_setting`/`reset_setting` leeren ihn → wirkt sofort. Ungültige gespeicherte Werte → Standard + Warnung im Log. Einstellbar: Stimmen für Bewerbungen, Löschfristen Bewerbungen/Termine, Erinnerungszeitpunkte (Stunden, max. 4), Pause beim Rang-Abgleich, Rang-Glückwunsch an/aus, Anwesenheits-Schwelle und -Limit, Warnung nach Minuten ohne Verbindung und nach HenrikDev-Fehlern. `ALERT_DISCONNECT_MINUTES` ist jetzt nur noch der Standard, ein gespeicherter Wert geht vor. Erinnerungen allgemein über `due_reminder()` (Fenster (h−1, h] Stunden, Schlüssel `<h>h`, kompatibel zu `24h`/`1h`). Panel-Seite ab Admin, Audit mit altem → neuem Wert. Tests setzen `SETTINGS_CACHE = {}` (nur Standardwerte), damit nie die echte DB gelesen wird.
 
+- **D2 Texte:** `TEXT_DEFINITIONS` (Willkommen, Regeln, Bewerbungs-Infotext, DM Annahme/Ablehnung, /help in drei Feldern) mit den bisherigen Texten als Standard (per Skript verschoben und gegen die alten Ausdrücke geprüft: wortgleich). Grenzen 4096/2000/1024, geprüft inkl. eingesetzter Platzhalter. Platzhalter `{loeschfrist}` im Bewerbungstext = Einstellung `application_retention_days`. Tabelle `bot_texts` mit Verlauf: neuester Eintrag je Schlüssel gilt, `value NULL` = Standard (Zurücksetzen bleibt im Verlauf sichtbar), höchstens 20 Fassungen je Text. `bot_text(key)` mit Cache. Gemeinsame Embed-Bauer `welcome_/rules_/application_message_embed()` für `setup_guild` und Panel; `refresh_text_message()` bearbeitet die feste Nachricht (nur `embed=…`, Buttons/custom_ids bleiben). Panel-Seite ab Admin mit vereinfachter Discord-Vorschau, Zeichenzähler, Verlauf („In den Editor laden“), Audit ohne Textinhalt. Hinweis: Eine geänderte Löschfrist erscheint im #bewerbung-Text erst beim nächsten Speichern des Texts oder Neustart.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -145,6 +147,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 ## Neue Tabellen und Spalten
 - `rank_history` (C4)
 - `bot_settings` (D3)
+- `bot_texts` (D2, mit Verlauf)
 - `scheduled_events`: neue Spalten `title`, `details`, `cancelled_at` (per `ALTER TABLE`, C2)
 
 ## Offene Fragen an Arvids
@@ -154,4 +157,4 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Nächstes Feature: D2 Texte (`bot_texts` mit Verlauf ≤ 20 je Text, Standardtexte im Code, Discord-Limits, feste Nachrichten in #willkommen/#regeln/#bewerbung nach dem Speichern editieren statt neu posten, Vorschau, Zurücksetzen). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Nächstes Feature: D1 Ankündigungen (Embed-Editor mit Live-Vorschau, Zielkanal nur wo der Bot schreiben darf, optional Ping-Rolle aus NotificationView, nie @everyone/@here, sofort oder geplant über `scheduled_announcements` + Minuten-Task, geplante bearbeiten/löschen, gesendete bearbeiten, Admin+, Audit). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

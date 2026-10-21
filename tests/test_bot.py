@@ -22,8 +22,9 @@ import main
 
 
 def setUpModule():
-    # Nur Standardwerte; kein Test soll Einstellungen aus der echten Datenbank lesen.
+    # Nur Standardwerte; kein Test soll Einstellungen oder Texte aus der echten Datenbank lesen.
     main.SETTINGS_CACHE = {}
+    main.TEXT_CACHE = {}
 
 
 class FakeLoop:
@@ -673,6 +674,95 @@ class ReminderWindowTests(unittest.TestCase):
         self.assertEqual(main.due_reminder((72, 3), 72 * 3600), ("72h", "In 3 Tagen"))
         self.assertEqual(main.due_reminder((72, 3), 2 * 3600 + 5), ("3h", "In 3 Stunden"))
         self.assertIsNone(main.due_reminder((72, 3), 3600))
+
+
+class AsyncHistory:
+    def __init__(self, messages):
+        self.messages = messages
+
+    def __call__(self, limit=None):
+        return self
+
+    def __aiter__(self):
+        self.iterator = iter(self.messages)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+class TextTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for patcher in (
+            mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3"),
+            mock.patch.object(main, "TEXT_CACHE", None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        main.initialize_storage()
+
+    def test_defaults_and_placeholder(self):
+        self.assertEqual(main.bot_text("dm_accepted"), main.TEXT_DEFINITIONS["dm_accepted"].default)
+        self.assertIn("{loeschfrist}", main.raw_text("application_info"))
+        with mock.patch.object(main, "SETTINGS_CACHE", {"application_retention_days": 45}):
+            self.assertIn("werden nach 45 Tagen gelöscht", main.bot_text("application_info"))
+        self.assertIn("/rangliste", main.bot_text("help_commands"))
+
+    def test_save_history_and_reset(self):
+        self.assertEqual(main.save_text("dm_accepted", "  Willkommen im Team!  ", 42), "Willkommen im Team!")
+        self.assertEqual(main.bot_text("dm_accepted"), "Willkommen im Team!")
+        for number in range(25):
+            main.save_text("dm_accepted", f"Fassung {number}", 42)
+        history = main.text_history("dm_accepted")
+        self.assertEqual(len(history), 20)
+        self.assertEqual(history[0]["value"], "Fassung 24")
+        main.reset_text("dm_accepted", 43)
+        self.assertEqual(main.bot_text("dm_accepted"), main.TEXT_DEFINITIONS["dm_accepted"].default)
+        history = main.text_history("dm_accepted")
+        self.assertTrue(history[0]["is_default"])
+        self.assertEqual(history[0]["updated_by"], 43)
+        overview = {entry["key"]: entry for entry in main.texts_overview()}
+        self.assertTrue(overview["dm_accepted"]["is_default"])
+        self.assertTrue(overview["welcome"]["posted_message"])
+        self.assertFalse(overview["dm_accepted"]["posted_message"])
+        self.assertEqual(overview["application_info"]["placeholders"], {"loeschfrist": "30"})
+
+    def test_limits(self):
+        for key, value in (("dm_accepted", "   "), ("help_team", "x" * 1025), ("dm_declined", None), ("gibt_es_nicht", "x")):
+            with self.assertRaises(ValueError, msg=key):
+                main.save_text(key, value, 1)
+        self.assertEqual(len(main.save_text("help_team", "x" * 1024, 1)), 1024)
+        # Platzhalter zählen mit ihrem eingesetzten Wert.
+        with mock.patch.dict(main.TEXT_PLACEHOLDERS, {"loeschfrist": lambda: "9" * 50}), self.assertRaises(ValueError):
+            main.save_text("application_info", "{loeschfrist}" * 90, 1)
+
+    async def test_refresh_keeps_buttons(self):
+        main.save_text("rules", "**Neue** Regeln", 1)
+        me = object()
+        other = SimpleNamespace(author=object(), embeds=[SimpleNamespace(footer=SimpleNamespace(text=main.RULES_MARKER))])
+        target = SimpleNamespace(author=me, embeds=[SimpleNamespace(footer=SimpleNamespace(text=main.RULES_MARKER))], edit=mock.AsyncMock())
+        channel = SimpleNamespace(history=AsyncHistory([other, target]))
+        guild = SimpleNamespace(me=me)
+        with mock.patch.object(main, "find_text_channel", return_value=channel):
+            self.assertTrue(await main.refresh_text_message(guild, "rules"))
+            self.assertFalse(await main.refresh_text_message(guild, "dm_accepted"))
+        kwargs = target.edit.await_args.kwargs
+        self.assertEqual(set(kwargs), {"embed"})
+        self.assertEqual(kwargs["embed"].description, "**Neue** Regeln")
+        self.assertEqual(kwargs["embed"].footer.text, main.RULES_MARKER)
+        with mock.patch.object(main, "find_text_channel", return_value=SimpleNamespace(history=AsyncHistory([other]))):
+            self.assertFalse(await main.refresh_text_message(guild, "rules"))
+
+    def test_message_embeds(self):
+        embed = main.welcome_message_embed()
+        self.assertEqual((embed.title, embed.footer.text), ("Willkommen bei Duality Mannheim! 👋", main.WELCOME_MARKER))
+        self.assertEqual(embed.description, main.bot_text("welcome"))
+        self.assertEqual(main.application_message_embed().footer.text, main.APPLICATION_MARKER)
 
 
 class EnvIntTests(unittest.TestCase):

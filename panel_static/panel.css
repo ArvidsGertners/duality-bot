@@ -236,6 +236,21 @@ tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .sparkline polyline { fill: none; stroke: var(--accent-text); stroke-width: 2; }
 .sparkline circle { fill: var(--accent-text); }
 
+/* Texte und Vorschau im Discord-Stil */
+.text-layout { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+.text-layout textarea { font-family: var(--mono); font-size: .85rem; }
+.over-limit { color: var(--danger); font-weight: 700; }
+.discord-preview { background: #313338; border-radius: var(--radius); padding: .75rem; color: #dbdee1; }
+.embed-preview { border-left: 4px solid var(--accent); background: #2b2d31; border-radius: 4px; padding: .6rem .8rem; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .9rem; }
+.embed-preview code { background: #1e1f22; border-radius: 3px; padding: 0 .2rem; font-family: var(--mono); font-size: .85em; }
+.embed-preview blockquote { margin: 0; padding-left: .6rem; border-left: 3px solid #4e5058; }
+.embed-preview .md-h1 { font-size: 1.3rem; font-weight: 700; }
+.embed-preview .md-h2 { font-size: 1.15rem; font-weight: 700; }
+.embed-preview .md-h3 { font-size: 1rem; font-weight: 700; }
+.embed-preview .embed-title { font-weight: 700; margin-bottom: .35rem; color: #fff; }
+.embed-preview img { max-width: 100%; border-radius: 4px; margin-top: .5rem; }
+@media (max-width: 960px) { .text-layout { grid-template-columns: 1fr; } }
+
 /* Einstellungen */
 .settings-list { display: grid; gap: .75rem; }
 .setting form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .5rem; }

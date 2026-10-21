@@ -24,8 +24,9 @@ import panel
 
 
 def setUpModule():
-    # Nur Standardwerte; kein Test soll Einstellungen aus der echten Datenbank lesen.
+    # Nur Standardwerte; kein Test soll Einstellungen oder Texte aus der echten Datenbank lesen.
     main.SETTINGS_CACHE = {}
+    main.TEXT_CACHE = {}
 
 
 def env_value(name: str) -> str | None:
@@ -163,6 +164,16 @@ def make_hooks(client=None) -> panel.PanelHooks:
         attendance_events=lambda guild_id, since, until: ([], {}),
         summarize_attendance=main.summarize_attendance,
         attendance_rules=lambda: {"threshold": 50, "missing_limit": 2, "retention_days": 90},
+        texts_overview=lambda: [
+            {"key": "rules", "label": "Regeln (#regeln)", "limit": 4096, "value": "Regeln", "default": "Regeln",
+             "is_default": True, "placeholders": {}, "posted_message": True, "updated_by": None, "updated_at": None},
+            {"key": "dm_accepted", "label": "DM bei Annahme", "limit": 2000, "value": "Hi", "default": "Hallo",
+             "is_default": False, "placeholders": {}, "posted_message": False, "updated_by": ADMIN_ID, "updated_at": 1000},
+        ],
+        text_history=lambda key: [{"id": 1, "value": "Hi", "is_default": False, "updated_by": ADMIN_ID, "updated_at": 1000}],
+        save_text=mock.Mock(return_value="Neu"),
+        reset_text=mock.Mock(),
+        refresh_text_message=mock.AsyncMock(return_value=True),
         settings_overview=lambda: [{
             "key": "application_min_votes", "label": "Stimmen für eine Bewerbungsentscheidung", "description": "…",
             "kind": "int", "minimum": 1, "maximum": 10, "default": 2, "value": 3, "is_default": False,
@@ -1260,6 +1271,53 @@ class SettingsPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(panel.setting_text(True), "an")
         self.assertEqual(panel.setting_text((24, 1)), "24, 1 h")
         self.assertEqual(panel.setting_text(5), "5")
+
+
+class TextPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.client = TestClient(TestServer(panel.Panel(CONFIG, self.hooks).build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def post(self, path: str, body, user_id: int = ADMIN_ID):
+        session, cookie = session_cookie(user_id)
+        return await self.client.post(path, json=body, headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]})
+
+    async def get(self, path: str, user_id: int = ADMIN_ID):
+        _, cookie = session_cookie(user_id)
+        return await self.client.get(path, headers={"Cookie": cookie})
+
+    async def test_rights_and_lists(self):
+        self.assertEqual((await self.get("/api/texts", COACH_ID)).status, 403)
+        self.assertEqual((await self.post("/api/texts/rules", {"value": "x"}, COACH_ID)).status, 403)
+        texts = (await (await self.get("/api/texts")).json())["texts"]
+        self.assertEqual(texts[1]["updated_by"]["id"], str(ADMIN_ID))
+        history = (await (await self.get("/api/texts/dm_accepted/history")).json())["history"]
+        self.assertEqual(history[0]["updated_by"]["id"], str(ADMIN_ID))
+        self.assertEqual((await self.get("/api/texts/gibts_nicht/history")).status, 404)
+
+    async def test_save_posted_text_updates_discord(self):
+        response = await self.post("/api/texts/rules", {"value": "Neue Regeln"})
+        self.assertIn("Nachricht in Discord wurde aktualisiert", (await response.json())["message"])
+        self.assertEqual(self.hooks.save_text.call_args.args, ("rules", "Neue Regeln", ADMIN_ID))
+        self.assertEqual(self.hooks.refresh_text_message.await_args.args[1], "rules")
+        self.assertIn("„Regeln (#regeln)“ geändert", self.hooks.audit.await_args.args[1])
+
+    async def test_dm_text_and_errors(self):
+        await self.post("/api/texts/dm_accepted", {"value": "Hallo"})
+        self.hooks.refresh_text_message.assert_not_awaited()
+        self.hooks.save_text.side_effect = ValueError("Der Text darf nicht leer sein.")
+        response = await self.post("/api/texts/dm_accepted", {"value": ""})
+        self.assertEqual((response.status, (await response.json())["error"]), (400, "Der Text darf nicht leer sein."))
+        self.assertEqual((await self.post("/api/texts/gibts_nicht", {"value": "x"})).status, 404)
+
+    async def test_reset_and_failed_refresh(self):
+        self.hooks.refresh_text_message.side_effect = discord.HTTPException(mock.Mock(status=403, reason="x"), "nein")
+        response = await self.post("/api/texts/rules/reset", None)
+        self.assertIn("nächsten Neustart", (await response.json())["message"])
+        self.assertEqual(self.hooks.reset_text.call_args.args, ("rules", ADMIN_ID))
+        self.assertIn("zurückgesetzt", self.hooks.audit.await_args.args[1])
 
 
 if __name__ == "__main__":
