@@ -264,6 +264,89 @@ class TicketQueryTests(unittest.TestCase):
             self.assertEqual(main.list_tickets(10), [(2, 101, 2000, None), (1, 100, 1000, 2000)])
 
 
+class EventFunctionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_old_database_gets_new_columns_without_data_loss(self):
+        with sqlite3.connect(main.DATA_PATH) as connection:
+            connection.execute(
+                "CREATE TABLE scheduled_events (message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, "
+                "channel_id INTEGER NOT NULL, starts_at INTEGER NOT NULL)"
+            )
+            connection.execute("INSERT INTO scheduled_events VALUES (1, 10, 20, 3000)")
+        main.initialize_storage()
+        main.initialize_storage()
+        self.assertEqual(main.get_scheduled_event(1), main.ScheduledEvent(1, 10, 20, 3000, None, None, None))
+
+    def test_titles_reminders_and_cancel(self):
+        main.initialize_storage()
+        main.save_scheduled_event(1, 10, 20, 5000, "Scrim", "Infos")
+        main.save_scheduled_event(1, 10, 20, 5000, "Anderer Titel aus Discord", None)
+        self.assertEqual(main.get_scheduled_event(1).title, "Scrim")
+        main.mark_event_reminder_sent(1, "24h")
+        main.update_scheduled_event(1, "Scrim gegen X", "", 5000)
+        self.assertTrue(main.event_reminder_was_sent(1, "24h"))
+        main.update_scheduled_event(1, "Scrim gegen X", "", 6000)
+        self.assertFalse(main.event_reminder_was_sent(1, "24h"))
+        self.assertEqual(main.get_scheduled_event(1)[3:6], (6000, "Scrim gegen X", ""))
+        main.write_rsvp(1, 99, "going")
+        self.assertEqual(main.attendance(10, 99, 0, 10_000), (1, 1))
+        self.assertEqual(len(main.get_upcoming_events(0)), 1)
+        self.assertTrue(main.cancel_scheduled_event(1))
+        self.assertFalse(main.cancel_scheduled_event(1))
+        self.assertEqual(main.get_upcoming_events(0), [])
+        self.assertEqual(main.attendance(10, 99, 0, 10_000), (0, 0))
+
+    def test_fill_event_text_only_when_missing(self):
+        main.initialize_storage()
+        main.save_scheduled_event(1, 10, 20, 5000)
+        main.save_scheduled_event(2, 10, 20, 5000, "Behalten")
+        main.fill_event_text(1, "Nachgetragen", "x")
+        main.fill_event_text(2, "Überschrieben", "y")
+        self.assertEqual((main.get_scheduled_event(1).title, main.get_scheduled_event(2).title), ("Nachgetragen", "Behalten"))
+
+    def test_validate_event(self):
+        future = datetime.now(main.BERLIN) + timedelta(days=1)
+        self.assertEqual(main.validate_event("  Training ", future, "  Maps üben "), ("Training", "Maps üben", int(future.timestamp())))
+        cases = [
+            ("Training", datetime.now(main.BERLIN) - timedelta(minutes=1), "", "Zukunft"),
+            ("   ", future, "", "Titel"),
+            ("x" * 101, future, "", "Titel"),
+            ("Training", future, "x" * 1001, "Zusatzinfo"),
+        ]
+        for title, moment, details, expected in cases:
+            with self.assertRaises(main.EventError) as caught:
+                main.validate_event(title, moment, details)
+            self.assertIn(expected, str(caught.exception))
+
+    def test_event_embed(self):
+        embed = main.event_embed("Training", "", 1792600000, {"going": [1, 2], "maybe": []})
+        self.assertEqual(embed.description, "🕒 <t:1792600000:F> · <t:1792600000:R>")
+        self.assertEqual([field.name for field in embed.fields], ["✅ Dabei (2)", "🤔 Vielleicht (0)", "❌ Kann nicht (0)"])
+        self.assertEqual(embed.fields[0].value, "<@1>\n<@2>")
+        self.assertEqual(embed.footer.text, f"{main.EVENT_MARKER}|1792600000")
+        self.assertIn("\n\nMaps", main.event_embed("Training", "Maps", 1).description)
+
+    async def test_publish_event(self):
+        main.initialize_storage()
+        channel = SimpleNamespace(id=20, send=mock.AsyncMock(return_value=SimpleNamespace(id=777)))
+        guild = SimpleNamespace(id=10)
+        with mock.patch.object(main, "find_text_channel", return_value=channel):
+            message = await main.publish_event(guild, "Training", "Infos", 1792600000)
+        self.assertEqual(message.id, 777)
+        kwargs = channel.send.await_args.kwargs
+        self.assertFalse(kwargs["allowed_mentions"].everyone)
+        self.assertIsInstance(kwargs["view"], main.EventRSVPView)
+        self.assertEqual(main.get_scheduled_event(777)[:6], (777, 10, 20, 1792600000, "Training", "Infos"))
+        with mock.patch.object(main, "find_text_channel", return_value=None), self.assertRaises(main.EventError):
+            await main.publish_event(guild, "Training", "", 1792600000)
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):

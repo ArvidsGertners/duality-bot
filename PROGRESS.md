@@ -26,10 +26,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] B4 Live-Ansicht der Voice-Kanäle — fertig (1aae0e4)
 - [x] A3 Bewerbungen lesen + „Neue Saison“ — fertig (5d05767)
 - [x] A4 Spieler & Profile + „Rang jetzt abgleichen“ — fertig (d8e3a91)
-- [x] A5 Tickets — fertig (Commit „Panel: Tickets …“)
+- [x] A5 Tickets — fertig (a770e37); Phase 2 auf dem VPS seit 21.10.2026
 
 ### Phase 3 – Team
-- [ ] Gemeinsame Termin-Funktion für `/termin` und Panel — offen
+- [x] Gemeinsame Termin-Funktion für `/termin` und Panel — fertig (Commit „Gemeinsame Termin-Funktion …“)
 - [ ] C2 Termine im Panel (anlegen, bearbeiten/verschieben, absagen) — offen
 - [ ] C1 Anwesenheitsübersicht + CSV — offen
 - [ ] C3 Glückwunsch bei Rangaufstieg — offen
@@ -100,6 +100,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - **A5 Tickets:** `/api/tickets?state=open|closed|all` (Coach+) aus `list_tickets()` (neu), nur meldende Person, Zeiten und Thread-Link, keine Inhalte.
 - Phase 2 im Browser mit Beispieldaten geprüft: Dashboard (Backups, Warnungen), Voice, Bewerbungen, Spieler (Rang-Knopf), Tickets, Backups; als Coach sind Backups, „Neue Saison“ und Rang-Knöpfe ausgeblendet.
 
+- **Termine (gemeinsam):** `validate_event()` (Zukunft, Titel 1–100, Infos ≤ 1000), `publish_event()` (Embed, `EventRSVPView`, `save_scheduled_event`), `event_embed()`/`set_rsvp_fields()`/`RSVP_LABELS` statt doppeltem Code in `/termin` und `update_event_rsvps`. `scheduled_events` hat neue Spalten `title`, `details`, `cancelled_at` (per `ALTER TABLE` in `initialize_storage`, keine neue Tabelle, alte Zeilen bleiben). `save_scheduled_event` behält einen gespeicherten Titel; `update_scheduled_event` ändert ihn und löscht gesendete Erinnerungen nur bei neuer Uhrzeit. Titel alter Termine trägt `register_existing_scheduled_events` beim Start aus dem Embed nach. Abgesagte Termine: keine Erinnerungen, nicht in `attendance()`, Zu-/Absagen werden abgelehnt.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -111,6 +113,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Wechsel auf eigene Domain später: A-Record → 217.154.173.183, nginx-Seite kopieren/umbenennen, `certbot certonly --nginx -d <domain>`, `PANEL_BASE_URL` ändern, Redirect-URI ergänzen, Bot neu starten.
 - Arvids hat Root-Passwort und Client-Secret im Chat gepostet → Empfehlung: Root-Passwort ändern, Secret später neu erzeugen und nur über `.env` geben. `update-vps.sh` scheiterte beim ersten Lauf aus `/root` an `uv` (Leserechte) → behoben, das Skript wechselt jetzt in `$APP_DIR`.
 - Alte root-eigene Kopie `/home/duality-bot/main.py` liegt ungenutzt herum (nicht angefasst).
+- **21.10.2026, 12:29 UTC: Phase 2 deployt (a770e37)**, `update-vps.sh` Exit 0, Dienst aktiv, keine Fehler im Log, `/healthz` lokal und öffentlich 200, API ohne Login 401. Test-Backup als `dualitybot` erstellt (`/home/duality-bot/app/backups/`, Ordner 700, Datei 600), `git status` sauber. Kein `ALERT_WEBHOOK_URL` gesetzt → Warnungen nach `#audit-log`.
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
@@ -137,4 +140,4 @@ _(noch keine)_
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 2 ist fertig. Auf Arvids' OK für Phase 3 warten; VPS-Update vorschlagen (vorher fragen). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Nächstes Feature: C2 Termine im Panel (Liste + Kalender, anlegen, bearbeiten/verschieben mit optionaler Nachricht an Zusagen, absagen mit deaktivierten Buttons). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

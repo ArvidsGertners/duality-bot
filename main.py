@@ -235,6 +235,11 @@ def initialize_storage() -> None:
             "channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL, "
             "created_at INTEGER NOT NULL)"
         )
+        # Spalten, die spätere Versionen ergänzt haben; bestehende Zeilen behalten ihre Daten.
+        event_columns = {row[1] for row in connection.execute("PRAGMA table_info(scheduled_events)")}
+        for column, definition in (("title", "TEXT"), ("details", "TEXT"), ("cancelled_at", "INTEGER")):
+            if column not in event_columns:
+                connection.execute(f"ALTER TABLE scheduled_events ADD COLUMN {column} {definition}")
         rows = connection.execute("SELECT guild_id, kind, managed_key, object_id FROM managed_ids").fetchall()
     MANAGED_IDS.clear()
     MANAGED_IDS.update({(guild_id, kind, key): object_id for guild_id, kind, key, object_id in rows})
@@ -468,13 +473,14 @@ def attendance(guild_id: int, user_id: int, since: int, until: int) -> tuple[int
     """(Zusagen, Termine) für vergangene Termine im Zeitraum."""
     with open_db() as connection:
         total = connection.execute(
-            "SELECT COUNT(*) FROM scheduled_events WHERE guild_id = ? AND starts_at BETWEEN ? AND ?",
+            "SELECT COUNT(*) FROM scheduled_events WHERE guild_id = ? AND starts_at BETWEEN ? AND ? "
+            "AND cancelled_at IS NULL",
             (guild_id, since, until),
         ).fetchone()[0]
         going = connection.execute(
             "SELECT COUNT(*) FROM scheduled_events AS event JOIN event_rsvps AS rsvp "
             "ON rsvp.message_id = event.message_id WHERE event.guild_id = ? AND event.starts_at BETWEEN ? AND ? "
-            "AND rsvp.user_id = ? AND rsvp.choice = 'going'",
+            "AND event.cancelled_at IS NULL AND rsvp.user_id = ? AND rsvp.choice = 'going'",
             (guild_id, since, until, user_id),
         ).fetchone()[0]
     return going, total
@@ -597,13 +603,71 @@ def get_rsvps(message_id: int) -> dict[str, list[int]]:
     return result
 
 
-def save_scheduled_event(message_id: int, guild_id: int, channel_id: int, starts_at: int) -> None:
+def save_scheduled_event(
+    message_id: int, guild_id: int, channel_id: int, starts_at: int, title: str | None = None, details: str | None = None
+) -> None:
+    # Ein schon gespeicherter Titel bleibt; ändern geht nur über update_scheduled_event.
     with open_db() as connection:
         connection.execute(
-            "INSERT INTO scheduled_events (message_id, guild_id, channel_id, starts_at) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET "
-            "guild_id = excluded.guild_id, channel_id = excluded.channel_id, starts_at = excluded.starts_at",
-            (message_id, guild_id, channel_id, starts_at),
+            "INSERT INTO scheduled_events (message_id, guild_id, channel_id, starts_at, title, details) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET "
+            "guild_id = excluded.guild_id, channel_id = excluded.channel_id, starts_at = excluded.starts_at, "
+            "title = COALESCE(scheduled_events.title, excluded.title), "
+            "details = COALESCE(scheduled_events.details, excluded.details)",
+            (message_id, guild_id, channel_id, starts_at, title, details),
+        )
+
+
+class ScheduledEvent(NamedTuple):
+    message_id: int
+    guild_id: int
+    channel_id: int
+    starts_at: int
+    title: str | None
+    details: str | None
+    cancelled_at: int | None
+
+
+EVENT_COLUMNS = "message_id, guild_id, channel_id, starts_at, title, details, cancelled_at"
+
+
+def get_scheduled_event(message_id: int) -> ScheduledEvent | None:
+    with open_db() as connection:
+        row = connection.execute(
+            f"SELECT {EVENT_COLUMNS} FROM scheduled_events WHERE message_id = ?", (message_id,)
+        ).fetchone()
+    return ScheduledEvent(*row) if row else None
+
+
+def update_scheduled_event(message_id: int, title: str, details: str, starts_at: int) -> None:
+    """Neue Angaben speichern; bei neuer Uhrzeit dürfen die Erinnerungen noch einmal raus."""
+    with open_db() as connection:
+        previous = connection.execute(
+            "SELECT starts_at FROM scheduled_events WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        connection.execute(
+            "UPDATE scheduled_events SET title = ?, details = ?, starts_at = ? WHERE message_id = ?",
+            (title, details, starts_at, message_id),
+        )
+        if previous and previous[0] != starts_at:
+            connection.execute("DELETE FROM event_reminders_sent WHERE message_id = ?", (message_id,))
+
+
+def cancel_scheduled_event(message_id: int) -> bool:
+    with open_db() as connection:
+        cursor = connection.execute(
+            "UPDATE scheduled_events SET cancelled_at = ? WHERE message_id = ? AND cancelled_at IS NULL",
+            (int(time.time()), message_id),
+        )
+    return cursor.rowcount == 1
+
+
+def fill_event_text(message_id: int, title: str | None, details: str | None) -> None:
+    """Titel für Termine nachtragen, die vor dem Speichern der Titel angelegt wurden."""
+    with open_db() as connection:
+        connection.execute(
+            "UPDATE scheduled_events SET title = ?, details = ? WHERE message_id = ? AND title IS NULL",
+            (title, details, message_id),
         )
 
 
@@ -611,7 +675,7 @@ def get_upcoming_events(now: int) -> list[tuple[int, int, int, int]]:
     with open_db() as connection:
         return connection.execute(
             "SELECT message_id, guild_id, channel_id, starts_at FROM scheduled_events "
-            "WHERE starts_at > ? ORDER BY starts_at",
+            "WHERE starts_at > ? AND cancelled_at IS NULL ORDER BY starts_at",
             (now,),
         ).fetchall()
 
@@ -2405,6 +2469,69 @@ class NotificationView(DualityView):
 NO_ROLE_VALUE = "__none__"
 
 
+RSVP_LABELS = {
+    "going": "✅ Dabei",
+    "maybe": "🤔 Vielleicht",
+    "declined": "❌ Kann nicht",
+}
+EVENT_COLOR = discord.Color.from_rgb(110, 70, 255)
+
+
+class EventError(Exception):
+    """Ungültige Termin-Angaben; die Meldung geht so an die Person, die den Termin anlegt."""
+
+
+def event_description(starts_at: int, details: str) -> str:
+    when = f"🕒 <t:{starts_at}:F> · <t:{starts_at}:R>"
+    return f"{when}\n\n{details}" if details else when
+
+
+def set_rsvp_fields(embed: discord.Embed, responses: dict[str, list[int]]) -> None:
+    embed.clear_fields()
+    for rsvp_choice, label in RSVP_LABELS.items():
+        member_ids = responses.get(rsvp_choice, [])
+        listed = [f"<@{member_id}>" for member_id in member_ids[:35]]
+        if len(member_ids) > len(listed):
+            listed.append(f"… und {len(member_ids) - len(listed)} weitere")
+        embed.add_field(
+            name=f"{label} ({len(member_ids)})",
+            value="\n".join(listed) or "Noch niemand",
+            inline=True,
+        )
+
+
+def event_embed(title: str, details: str, starts_at: int, responses: dict[str, list[int]] | None = None) -> discord.Embed:
+    embed = discord.Embed(title=title, description=event_description(starts_at, details), color=EVENT_COLOR)
+    set_rsvp_fields(embed, responses or {})
+    embed.set_footer(text=f"{EVENT_MARKER}|{starts_at}")
+    return embed
+
+
+def validate_event(title: str, starts_at: datetime, details: str) -> tuple[str, str, int]:
+    """Gleiche Regeln für /termin und das Panel. Gibt (Titel, Infos, Zeitstempel) zurück."""
+    timestamp = int(starts_at.timestamp())
+    if timestamp <= int(time.time()):
+        raise EventError("Der Termin muss in der Zukunft liegen.")
+    clean_title, clean_details = title.strip(), details.strip()
+    if not clean_title or len(clean_title) > 100 or len(clean_details) > 1000:
+        raise EventError("Der Titel darf 1–100 und die Zusatzinfo höchstens 1000 Zeichen haben.")
+    return clean_title, clean_details, timestamp
+
+
+async def publish_event(guild: discord.Guild, title: str, details: str, starts_at: int) -> discord.Message:
+    """Termin mit Zu-/Absage-Buttons in #spieltermine veröffentlichen; Werte vorher mit validate_event prüfen."""
+    event_channel = find_text_channel(guild, "spieltermine")
+    if event_channel is None:
+        raise EventError("`#spieltermine` wurde nicht gefunden.")
+    event_message = await event_channel.send(
+        embed=event_embed(title, details, starts_at),
+        view=EventRSVPView(),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    save_scheduled_event(event_message.id, guild.id, event_channel.id, starts_at, title, details)
+    return event_message
+
+
 async def update_event_rsvps(interaction: discord.Interaction, choice: str) -> None:
     if not interaction.guild or not interaction.message or not interaction.message.embeds:
         await interaction.response.send_message("Dieser Termin ist ungültig.", ephemeral=True)
@@ -2422,33 +2549,21 @@ async def update_event_rsvps(interaction: discord.Interaction, choice: str) -> N
             "Dieser Termin hat bereits begonnen; Zu- und Absagen sind geschlossen.", ephemeral=True
         )
         return
+    event = get_scheduled_event(interaction.message.id)
+    if event and event.cancelled_at:
+        await interaction.response.send_message("Dieser Termin wurde abgesagt.", ephemeral=True)
+        return
 
-    labels = {
-        "going": "✅ Dabei",
-        "maybe": "🤔 Vielleicht",
-        "declined": "❌ Kann nicht",
-    }
     await interaction.response.defer()
     # Schreiben, Lesen und Bearbeiten nacheinander, damit kein gleichzeitiger
     # Klick das Embed mit einem älteren Stand überschreibt.
     lock = RSVP_LOCKS.setdefault(interaction.message.id, asyncio.Lock())
     async with lock:
         write_rsvp(interaction.message.id, interaction.user.id, choice)
-        responses = get_rsvps(interaction.message.id)
         embed = discord.Embed.from_dict(interaction.message.embeds[0].to_dict())
-        embed.clear_fields()
-        for rsvp_choice in ("going", "maybe", "declined"):
-            member_ids = responses.get(rsvp_choice, [])
-            listed = [f"<@{member_id}>" for member_id in member_ids[:35]]
-            if len(member_ids) > len(listed):
-                listed.append(f"… und {len(member_ids) - len(listed)} weitere")
-            embed.add_field(
-                name=f"{labels[rsvp_choice]} ({len(member_ids)})",
-                value="\n".join(listed) or "Noch niemand",
-                inline=True,
-            )
+        set_rsvp_fields(embed, get_rsvps(interaction.message.id))
         await interaction.edit_original_response(embed=embed, view=EventRSVPView())
-    await interaction.followup.send(f"Deine Antwort wurde auf „{labels[choice]}“ gesetzt.", ephemeral=True)
+    await interaction.followup.send(f"Deine Antwort wurde auf „{RSVP_LABELS[choice]}“ gesetzt.", ephemeral=True)
 
 
 class EventRSVPView(DualityView):
@@ -2579,10 +2694,13 @@ async def register_existing_scheduled_events(guild: discord.Guild) -> int:
                 starts_at = int(footer.rsplit("|", 1)[1])
             except (IndexError, ValueError):
                 continue
+            title = message.embeds[0].title
+            details = (message.embeds[0].description or "").partition("\n\n")[2]
             if starts_at <= now:
+                fill_event_text(message.id, title, details)
                 continue
 
-            save_scheduled_event(message.id, guild.id, event_channel.id, starts_at)
+            save_scheduled_event(message.id, guild.id, event_channel.id, starts_at, title, details)
             imported += 1
     except discord.HTTPException as error:
         log.warning(f"Vorhandene Termine konnten nicht für Erinnerungen eingelesen werden: {error}")
@@ -2813,30 +2931,13 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
                 ephemeral=True,
             )
             return
-        event_timestamp = int(event_time.timestamp())
-        if event_timestamp <= int(time.time()):
-            await interaction.response.send_message("Der Termin muss in der Zukunft liegen.", ephemeral=True)
+        try:
+            clean_title, clean_details, event_timestamp = validate_event(title, event_time, details)
+        except EventError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
             return
-        clean_title = title.strip()
-        if not clean_title or len(clean_title) > 100 or len(details) > 1000:
-            await interaction.response.send_message("Der Titel darf 1–100 und die Zusatzinfo höchstens 1000 Zeichen haben.", ephemeral=True)
-            return
-        embed = discord.Embed(
-            title=clean_title,
-            description=(f"🕒 <t:{event_timestamp}:F> · <t:{event_timestamp}:R>\n\n{details.strip()}" if details.strip() else f"🕒 <t:{event_timestamp}:F> · <t:{event_timestamp}:R>"),
-            color=discord.Color.from_rgb(110, 70, 255),
-        )
-        embed.add_field(name="✅ Dabei (0)", value="Noch niemand", inline=True)
-        embed.add_field(name="🤔 Vielleicht (0)", value="Noch niemand", inline=True)
-        embed.add_field(name="❌ Kann nicht (0)", value="Noch niemand", inline=True)
-        embed.set_footer(text=f"{EVENT_MARKER}|{event_timestamp}")
         await interaction.response.defer(ephemeral=True, thinking=True)
-        event_message = await event_channel.send(
-            embed=embed,
-            view=EventRSVPView(),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        save_scheduled_event(event_message.id, interaction.guild.id, event_channel.id, event_timestamp)
+        await publish_event(interaction.guild, clean_title, clean_details, event_timestamp)
         await interaction.followup.send("Der Termin mit RSVP-Buttons wurde in `#spieltermine` veröffentlicht.", ephemeral=True)
 
     @event_command.autocomplete("when")
