@@ -403,6 +403,10 @@ class ConsoleLogTests(unittest.TestCase):
         self.assertEqual(panel.redact(f"Fehler bei {webhook}"), "Fehler bei https://discord.com/api/webhooks/123456/***")
         self.assertEqual(panel.redact("Authorization: Bearer abc.def"), "Authorization: Bearer ***")
         self.assertEqual(panel.redact("key HDEV-1234-abcd"), "key HDEV-***")
+        self.assertEqual(
+            panel.redact("Shard ID None has connected to Gateway (Session ID: 82ad6f28fff)."),
+            "Shard ID None has connected to Gateway (Session ID: ***).",
+        )
 
     def test_bot_token_from_env_is_redacted(self):
         token = env_value("DISCORD_BOT_TOKEN")

@@ -17,7 +17,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] Rate-Limit Login 10/5 min pro IP (4a8fd5a), Konsolenbefehle 20/min pro Person (058f13a)
 - [x] Log-Handler mit Ringpuffer (1000) + `print`-Ausgaben im Panel — fertig (058f13a)
 - [x] WebSocket-Konsole `/ws` mit Whitelist-Befehlen help, sync-ranks, reminders, purge, cleanup-voice, say, restart — fertig (058f13a); `backup` kommt mit B2
-- [x] Dashboard (A1) + Befehle `status`/`tasks` + `/api/status` — fertig (Commit „Panel: Dashboard …“); „Letztes Backup“ und „Letzte Warnungen“ kommen mit B1/B2
+- [x] Dashboard (A1) + Befehle `status`/`tasks` + `/api/status` — fertig (6c7a2f7); „Letztes Backup“ und „Letzte Warnungen“ kommen mit B1/B2
 - [x] Tests ohne Discord-Verbindung: Session, CSRF, Rate-Limit, Konfiguration, Rechte, HTTP-Endpunkte, Parser, Log-Puffer, WebSocket-Befehle, Dashboard-Status, Task-Tracking, HenrikDev-Status (57 Tests)
 
 ### Phase 2 – Betrieb
@@ -54,6 +54,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [ ] `/help` um neue Befehle ergänzen — offen
 
 ## Entscheidungen und Annahmen
+- **VPS-Zugriff erlaubt** (Arvids, 21.10.2026), Ausnahme von „VPS nicht anfassen“ für die Panel-Einrichtung. Login per SSH-Schlüssel als root@217.154.173.183 (nie per Passwort). Vor jeder Änderung am laufenden Bot fragen.
 - Commits ohne Co-Author-/Claude-Zeile (Wunsch von Arvids). 746936f hat sie noch; Verlauf wird nicht umgeschrieben.
 - Tests mit `unittest` + `aiohttp.test_utils` (keine neue Abhängigkeit). Aufruf: `python -m unittest discover -s tests`.
 - `panel.py` wird nur mit `--apply` und `PANEL_ENABLED=1` importiert (lazy in `main()`); ohne das ändert sich nichts am Start.
@@ -80,6 +81,15 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Echter Bot-Token liegt lokal in `.env` (gitignored, Rechte 600). Er wird nur vom Schwärzungstest gelesen. Den Bot starte ich damit nicht mit `--apply`, weil das eine zweite Instanz neben dem VPS wäre und das Setup auf dem echten Server ausführen würde.
 - Offene Konsolen werden alle 5 s geprüft; bei Rollenentzug, Abmelden oder Session-Ablauf schließt der Server mit Code 4403, das Frontend lädt dann neu. Sonst verbindet es sich mit Backoff (1–15 s) neu und lädt den Puffer neu.
 
+## VPS (Stand 21.10.2026)
+- Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
+- Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
+- **Port 8080 belegt** (YouTrack-Docker) → Panel auf `PANEL_PORT=8090`, `PANEL_BASE_URL=http://localhost:8090`, Zugriff per `ssh -L 8090:127.0.0.1:8090 root@217.154.173.183`.
+- nginx läuft auf 80/443 (für späteren HTTPS-Proxy), ufw ist aus, YouTrack auf 8080 öffentlich (nicht von mir angefasst).
+- Panel-Einträge in `/etc/duality-bot.env` gesetzt (Sicherung `/etc/duality-bot.env.bak-20261021-114849`), `PANEL_SECRET_KEY` auf dem Server erzeugt. Es fehlen noch `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET`.
+- Code auf 6c7a2f7 deployt, Bot läuft. `update-vps.sh` scheiterte beim ersten Lauf aus `/root` an `uv` (Leserechte) → behoben, das Skript wechselt jetzt in `$APP_DIR`.
+- Alte root-eigene Kopie `/home/duality-bot/main.py` liegt ungenutzt herum (nicht angefasst).
+
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
 |---|---|---|
@@ -95,11 +105,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 _(noch keine)_
 
 ## Offene Fragen an Arvids
-- Wie ist `Restart=` in der systemd-Unit `duality-bot` gesetzt? Der Neustart aus dem Panel braucht `Restart=always` oder `Restart=on-failure` (Exit-Code 75).
 - Echten Discord-Login testen: auf dem VPS nach dem Update (empfohlen, per SSH-Tunnel) oder lokal nur mit einem separaten Test-Bot/Test-Server, damit keine zweite Instanz des echten Bots läuft.
 
 ## Bekannte Probleme
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 1 ist fertig. Auf Arvids' OK für Phase 2 warten. Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 1 ist fertig. VPS: `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET` aus Arvids' lokaler `.env` in `/etc/duality-bot.env` übertragen (ohne Ausgabe), Redirect-URI `http://localhost:8090/auth/callback` muss im Developer Portal stehen, dann Neustart und Test per Tunnel. Danach auf Arvids' OK für Phase 2 warten. Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

@@ -22,6 +22,9 @@ if [[ ! -d "$APP_DIR/.git" ]]; then
     echo "Fehler: Git-Repo nicht gefunden unter $APP_DIR"
     exit 1
 fi
+# uv läuft als Bot-Nutzer und sucht im aktuellen Ordner nach Konfiguration;
+# aus /root heraus scheitert das an fehlenden Leserechten.
+cd "$APP_DIR"
 
 if [[ ! -x "$VENV_PYTHON" ]]; then
     echo "Fehler: Python-Umgebung fehlt: $VENV_PYTHON"

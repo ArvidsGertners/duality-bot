@@ -66,6 +66,7 @@ REDACTIONS = (
     (re.compile(r"[\w-]{23,}\.[\w-]{6,7}\.[\w-]{27,}"), "***"),
     (re.compile(r"(Bearer\s+)\S+", re.IGNORECASE), r"\1***"),
     (re.compile(r"HDEV-[\w-]+"), "HDEV-***"),
+    (re.compile(r"(Session ID: )[0-9a-f]+"), r"\1***"),
 )
 
 
