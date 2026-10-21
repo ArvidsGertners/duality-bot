@@ -85,6 +85,8 @@ HENRIKDEV_API = "https://api.henrikdev.xyz"
 # Fehlercode der API, wenn ein Account existiert, aber keine aktuellen Matches hat.
 HENRIKDEV_NO_RECENT_MATCHES = 24
 RANK_SYNC_DELAY_SECONDS = 3
+STATS_MATCH_COUNT = 20
+MATCH_STATS_RETENTION_DAYS = 90
 TEMP_VOICE_CREATORS = {"➕ Neuer Voice": "🔊", "➕ Neuer Valorant-Voice": "🎯"}
 BACKGROUND_TASKS: set[asyncio.Task] = set()
 # Schwache Referenzen: Ein Lock verschwindet, sobald niemand mehr darauf wartet.
@@ -259,6 +261,15 @@ def initialize_storage() -> None:
             "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank_tier TEXT NOT NULL, recorded_at INTEGER NOT NULL)"
         )
         connection.execute("CREATE INDEX IF NOT EXISTS rank_history_member ON rank_history (guild_id, user_id, recorded_at)")
+        # Match-Werte aus der HenrikDev-API für die Statistiken; won: 1 Sieg, 0 Niederlage, NULL Unentschieden.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS match_stats ("
+            "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, match_id TEXT NOT NULL, started_at INTEGER NOT NULL, "
+            "mode TEXT, map TEXT, agent TEXT, kills INTEGER NOT NULL, deaths INTEGER NOT NULL, assists INTEGER NOT NULL, "
+            "head INTEGER NOT NULL, body INTEGER NOT NULL, leg INTEGER NOT NULL, damage INTEGER NOT NULL, "
+            "score INTEGER NOT NULL, rounds INTEGER NOT NULL, won INTEGER, fetched_at INTEGER NOT NULL, "
+            "PRIMARY KEY (guild_id, user_id, match_id))"
+        )
         # Spalten, die spätere Versionen ergänzt haben; bestehende Zeilen behalten ihre Daten.
         event_columns = {row[1] for row in connection.execute("PRAGMA table_info(scheduled_events)")}
         for column, definition in (("title", "TEXT"), ("details", "TEXT"), ("cancelled_at", "INTEGER")):
@@ -458,6 +469,9 @@ def update_profile(guild_id: int, user_id: int, **fields) -> None:
                 f"UPDATE player_profiles SET {assignments}, updated_at = ? WHERE guild_id = ? AND user_id = ?",
                 (*fields.values(), now, guild_id, user_id),
             )
+        # Neue oder gelöste Riot-ID: Die gespeicherten Matches gehören dann zu einem anderen Konto.
+        if "riot_name" in fields or "riot_tag" in fields:
+            connection.execute("DELETE FROM match_stats WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
 
 
 def get_profile(guild_id: int, user_id: int) -> Profile | None:
@@ -518,6 +532,96 @@ def rank_histories(guild_id: int) -> dict[int, list[tuple[str, int]]]:
         ):
             histories.setdefault(user_id, []).append((rank_tier, recorded_at))
     return histories
+
+
+class MatchStat(NamedTuple):
+    match_id: str
+    started_at: int
+    mode: str | None
+    map: str | None
+    agent: str | None
+    kills: int
+    deaths: int
+    assists: int
+    head: int
+    body: int
+    leg: int
+    damage: int
+    score: int
+    rounds: int
+    # 1 Sieg, 0 Niederlage, None Unentschieden
+    won: int | None
+
+
+MATCH_COLUMNS = "match_id, started_at, mode, map, agent, kills, deaths, assists, head, body, leg, damage, score, rounds, won"
+
+
+def save_match_stats(guild_id: int, user_id: int, matches: Sequence[MatchStat], fetched_at: int) -> None:
+    with open_db() as connection:
+        connection.executemany(
+            f"INSERT OR REPLACE INTO match_stats (guild_id, user_id, {MATCH_COLUMNS}, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(guild_id, user_id, *match, fetched_at) for match in matches],
+        )
+
+
+def match_stats_by_user(guild_id: int, limit: int) -> dict[int, tuple[list[MatchStat], int]]:
+    """Je Person die neuesten `limit` Matches und wann sie zuletzt abgeholt wurden."""
+    result: dict[int, tuple[list[MatchStat], int]] = {}
+    with open_db() as connection:
+        for row in connection.execute(
+            f"SELECT user_id, fetched_at, {MATCH_COLUMNS} FROM match_stats WHERE guild_id = ? ORDER BY started_at DESC",
+            (guild_id,),
+        ):
+            matches, fetched_at = result.setdefault(row[0], ([], 0))
+            if len(matches) < limit:
+                matches.append(MatchStat(*row[2:]))
+            result[row[0]] = (matches, max(fetched_at, row[1]))
+    return result
+
+
+def delete_old_match_stats(started_before: int) -> int:
+    with open_db() as connection:
+        return connection.execute("DELETE FROM match_stats WHERE started_at < ?", (started_before,)).rowcount
+
+
+def summarize_matches(matches: Sequence[MatchStat]) -> dict:
+    """Kennzahlen wie bei tracker.gg: K/D, Headshot-Quote, ACS und ADR je Runde, Win-Rate; dazu Agents und Maps."""
+    def win_rate(games: Sequence[MatchStat]) -> float | None:
+        decided = [match for match in games if match.won is not None]
+        return round(100 * sum(match.won for match in decided) / len(decided), 1) if decided else None
+
+    def kd(games: Sequence[MatchStat]) -> float:
+        kills, deaths = sum(match.kills for match in games), sum(match.deaths for match in games)
+        return round(kills / deaths, 2) if deaths else float(kills)
+
+    def grouped(attribute: str) -> list[dict]:
+        groups: dict[str, list[MatchStat]] = {}
+        for match in matches:
+            groups.setdefault(getattr(match, attribute) or "Unbekannt", []).append(match)
+        entries = [
+            {"name": name, "games": len(games), "wins": sum(match.won == 1 for match in games), "win_rate": win_rate(games), "kd": kd(games)}
+            for name, games in groups.items()
+        ]
+        return sorted(entries, key=lambda entry: (-entry["games"], entry["name"]))
+
+    shots = sum(match.head + match.body + match.leg for match in matches)
+    rounds = sum(match.rounds for match in matches)
+    return {
+        "matches": len(matches),
+        "wins": sum(match.won == 1 for match in matches),
+        "losses": sum(match.won == 0 for match in matches),
+        "win_rate": win_rate(matches),
+        "kills": sum(match.kills for match in matches),
+        "deaths": sum(match.deaths for match in matches),
+        "assists": sum(match.assists for match in matches),
+        "kd": kd(matches) if matches else None,
+        "hs_percent": round(100 * sum(match.head for match in matches) / shots, 1) if shots else None,
+        "acs": round(sum(match.score for match in matches) / rounds) if rounds else None,
+        "adr": round(sum(match.damage for match in matches) / rounds) if rounds else None,
+        "agents": grouped("agent"),
+        "maps": grouped("map"),
+    }
 
 
 def attendance(guild_id: int, user_id: int, since: int, until: int) -> tuple[int, int]:
@@ -679,6 +783,10 @@ def collect_user_data(guild_id: int, user_id: int) -> dict:
                 "SELECT rank_tier, recorded_at FROM rank_history WHERE guild_id = ? AND user_id = ? ORDER BY recorded_at",
                 (guild_id, user_id),
             ),
+            "match_statistiken": rows(
+                f"SELECT {MATCH_COLUMNS}, fetched_at FROM match_stats WHERE guild_id = ? AND user_id = ? ORDER BY started_at",
+                (guild_id, user_id),
+            ),
             # Was jemand als Staff im Panel geändert hat; der Inhalt gehört dem Server, verknüpft ist nur die Person.
             "geaenderte_einstellungen": rows("SELECT key, updated_at FROM bot_settings WHERE updated_by = ?", (user_id,)),
             "geaenderte_texte": rows("SELECT key, updated_at FROM bot_texts WHERE updated_by = ? ORDER BY id", (user_id,)),
@@ -698,6 +806,7 @@ def delete_user_data(guild_id: int, user_id: int) -> None:
         connection.execute("DELETE FROM player_roster_names WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         connection.execute("DELETE FROM event_rsvps WHERE user_id = ?", (user_id,))
         connection.execute("DELETE FROM rank_history WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+        connection.execute("DELETE FROM match_stats WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         # Einstellungen, Texte und Ankündigungen gehören dem Server und bleiben; nur der Bezug zur Person verschwindet.
         connection.execute("UPDATE bot_settings SET updated_by = NULL WHERE updated_by = ?", (user_id,))
         connection.execute("UPDATE bot_texts SET updated_by = NULL WHERE updated_by = ?", (user_id,))
@@ -1234,9 +1343,49 @@ class HenrikDevClient:
             self.record_failure("unerwartete Antwort")
             raise RankLookupError("Die HenrikDev-API hat eine unerwartete Antwort geschickt.") from error
 
+    async def recent_matches(
+        self, name: str, tag: str, region: str | None, size: int, only_competitive: bool = True
+    ) -> tuple[list[MatchStat], str]:
+        """Liefert (die letzten Matches als MatchStat, Region); Deathmatch & Co. ohne Runden fallen raus."""
+        riot_name, riot_tag = quote(name, safe=""), quote(tag, safe="")
+        try:
+            if not region:
+                account = await self.get(f"/valorant/v2/account/{riot_name}/{riot_tag}")
+                region = account["data"]["region"]
+            mode = "&mode=competitive" if only_competitive else ""
+            data = await self.get(f"/valorant/v1/stored-matches/{region}/{riot_name}/{riot_tag}?size={size}{mode}")
+            matches = [match for entry in data["data"] if (match := parse_stored_match(entry)) is not None]
+            return matches, region
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            self.record_failure("nicht erreichbar")
+            raise RankLookupError("Die HenrikDev-API ist gerade nicht erreichbar.") from error
+        except (KeyError, TypeError, ValueError) as error:
+            self.record_failure("unerwartete Antwort")
+            raise RankLookupError("Die HenrikDev-API hat eine unerwartete Antwort geschickt.") from error
+
     async def close(self) -> None:
         if self.session and not self.session.closed:
             await self.session.close()
+
+
+def parse_stored_match(entry: dict) -> MatchStat | None:
+    """Ein Eintrag aus /valorant/v1/stored-matches; None für Modi ohne Runden (Deathmatch)."""
+    meta, stats, teams = entry["meta"], entry["stats"], entry["teams"]
+    if "deathmatch" in str(meta.get("mode", "")).lower():
+        return None
+    own = str(stats["team"]).lower()
+    rounds_won, rounds_lost = int(teams[own]), int(teams["blue" if own == "red" else "red"])
+    if rounds_won + rounds_lost == 0:
+        return None
+    won = None if rounds_won == rounds_lost else int(rounds_won > rounds_lost)
+    started_at = int(datetime.fromisoformat(str(meta["started_at"]).replace("Z", "+00:00")).timestamp())
+    shots = stats["shots"]
+    return MatchStat(
+        str(meta["id"]), started_at, meta.get("mode"), meta["map"]["name"], stats["character"]["name"],
+        int(stats["kills"]), int(stats["deaths"]), int(stats["assists"]),
+        int(shots["head"]), int(shots["body"]), int(shots["leg"]),
+        int(stats["damage"]["made"]), int(stats["score"]), rounds_won + rounds_lost, won,
+    )
 
 
 RANK_CLIENT: HenrikDevClient | None = None
@@ -1338,8 +1487,52 @@ async def sync_all_ranks(guild: discord.Guild) -> int:
                 log.warning("Rang von %s konnte nicht aktualisiert werden: %s", profile.user_id, error)
             # Abstand halten, damit der API-Key nicht ins Rate-Limit läuft.
             await asyncio.sleep(setting("rank_sync_delay_seconds"))
+            try:
+                await sync_member_stats(guild.id, get_profile(guild.id, profile.user_id) or profile)
+            except RankLookupError as error:
+                log.warning("Matches von %s konnten nicht abgeholt werden: %s", profile.user_id, error)
+            await asyncio.sleep(setting("rank_sync_delay_seconds"))
         log.info("%s Ränge über Riot-ID aktualisiert", synced)
         return synced
+
+
+async def sync_member_stats(guild_id: int, profile: Profile) -> int:
+    """Holt die letzten Matches einer verknüpften Riot-ID und speichert sie. Gibt die Anzahl zurück."""
+    if RANK_CLIENT is None:
+        raise RankLookupError("Die Statistiken sind nicht eingerichtet (HENRIKDEV_API_KEY fehlt).")
+    matches, _ = await RANK_CLIENT.recent_matches(
+        profile.riot_name, profile.riot_tag, profile.region, setting("stats_match_count"), setting("stats_only_competitive"),
+    )
+    save_match_stats(guild_id, profile.user_id, matches, int(time.time()))
+    return len(matches)
+
+
+async def sync_stats_now(guild: discord.Guild, member: discord.Member) -> str:
+    """Matches einer Person auf Befehl aus dem Panel neu holen. Gibt eine Rückmeldung zurück."""
+    profile = get_profile(guild.id, member.id)
+    if profile is None or profile.riot_id is None:
+        return f"{member.display_name} hat keine Riot-ID verknüpft."
+    try:
+        count = await sync_member_stats(guild.id, profile)
+    except RankLookupError as error:
+        return f"Die Matches von {member.display_name} konnten nicht abgeholt werden: {error}"
+    return f"{count} Matches von {member.display_name} abgeholt."
+
+
+async def lookup_stats(riot_id: str) -> dict:
+    """Statistik zu einer beliebigen Riot-ID (z. B. Bewerber), ohne etwas zu speichern. Fehler als ValueError."""
+    parsed = parse_riot_id(riot_id)
+    if parsed is None:
+        raise ValueError("Bitte die Riot-ID als Name#Tag angeben, z. B. Duality#EUW.")
+    if RANK_CLIENT is None:
+        raise ValueError("Die Statistiken sind nicht eingerichtet (HENRIKDEV_API_KEY fehlt).")
+    try:
+        matches, region = await RANK_CLIENT.recent_matches(
+            parsed[0], parsed[1], None, setting("stats_match_count"), setting("stats_only_competitive"),
+        )
+    except RankLookupError as error:
+        raise ValueError(str(error)) from error
+    return {"riot_id": f"{parsed[0]}#{parsed[1]}", "region": region, "matches": matches}
 
 
 async def sync_ranks_now(guild: discord.Guild, member: discord.Member | None = None) -> str:
@@ -1549,6 +1742,16 @@ SETTING_DEFINITIONS = {definition.key: definition for definition in (
         "rank_sync_delay_seconds", "Pause beim Rang-Abgleich (Sekunden)",
         "Abstand zwischen zwei Abfragen bei der HenrikDev-API, damit der Schlüssel nicht ins Rate-Limit läuft.",
         "int", RANK_SYNC_DELAY_SECONDS, 1, 60,
+    ),
+    SettingDefinition(
+        "stats_match_count", "Statistiken: Matches pro Spieler",
+        "So viele der letzten Matches holt der Bot je Spieler bei der HenrikDev-API und wertet sie aus.",
+        "int", STATS_MATCH_COUNT, 5, 50,
+    ),
+    SettingDefinition(
+        "stats_only_competitive", "Statistiken: nur Competitive",
+        "An: nur gewertete Spiele. Aus: auch Unrated, Swiftplay und Premier (Deathmatch zählt nie).",
+        "bool", True,
     ),
     SettingDefinition(
         "rank_congrats_enabled", "Glückwunsch bei Rangaufstieg",
@@ -3179,6 +3382,9 @@ async def purge_expired_data(guild: discord.Guild | None) -> tuple[int, int]:
     removed_events = delete_past_events(now - setting("event_retention_days") * 24 * 60 * 60)
     if removed_events:
         log.info("%s vergangene Termine aus der Datenbank entfernt", removed_events)
+    removed_matches = delete_old_match_stats(now - MATCH_STATS_RETENTION_DAYS * 24 * 60 * 60)
+    if removed_matches:
+        log.info("%s Matches älter als %s Tage aus den Statistiken entfernt", removed_matches, MATCH_STATS_RETENTION_DAYS)
 
     staff_channel = find_text_channel(guild, "bewerbungen") if guild else None
     if staff_channel is None:
@@ -3293,7 +3499,7 @@ class MyDataView(DualityView):
             self.confirmed = True
             button.label = "Ja, endgültig löschen"
             await interaction.response.edit_message(
-                content="Sicher? Gelöscht werden Profil (Riot-ID, Rollen, Rang-Sync), Rangverlauf, Teamname, Terminantworten und "
+                content="Sicher? Gelöscht werden Profil (Riot-ID, Rollen, Rang-Sync), Rangverlauf, Match-Statistiken, Teamname, Terminantworten und "
                 "deine Bewerbungen samt Nachricht im Staff-Kanal. Deine Discord-Rollen bleiben bestehen. "
                 "Tickets und Staff-Stimmen bleiben als Nachweis erhalten; bei Änderungen im Web-Panel wird nur dein Name entfernt. "
                 "Datenbank-Backups mit diesen Daten werden nach Ablauf ihrer Aufbewahrungsfrist automatisch gelöscht.",
@@ -4873,6 +5079,16 @@ async def main(apply: bool) -> int | None:
                     settings_overview=settings_overview,
                     save_setting=save_setting,
                     reset_setting=reset_setting,
+                    match_stats=lambda guild_id: match_stats_by_user(guild_id, setting("stats_match_count")),
+                    summarize_matches=summarize_matches,
+                    sync_stats=sync_stats_now,
+                    lookup_stats=lookup_stats,
+                    stats_rules=lambda: {
+                        "match_count": setting("stats_match_count"),
+                        "only_competitive": setting("stats_only_competitive"),
+                        "retention_days": MATCH_STATS_RETENTION_DAYS,
+                        "enabled": RANK_CLIENT is not None,
+                    },
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

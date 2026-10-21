@@ -61,6 +61,8 @@ LOG_MESSAGE_LIMIT = 4000
 WS_QUEUE_SIZE = 2000
 WS_CHECK_SECONDS = 5
 COMMANDS_PER_MINUTE = 20
+# Riot-ID-Abfragen für Bewerber je Staff-Mitglied; jede kostet einen Aufruf beim HenrikDev-Schlüssel.
+LOOKUPS_PER_MINUTE = 6
 # Schließcode, wenn der Zugriff weg ist: Das Frontend lädt dann neu, statt sich wieder zu verbinden.
 WS_CLOSE_NO_ACCESS = 4403
 # Was nach Token oder Secret aussieht, kommt nie in die Konsole.
@@ -221,6 +223,7 @@ def json_error(status: int, message: str) -> web.HTTPException:
         400: web.HTTPBadRequest,
         401: web.HTTPUnauthorized,
         403: web.HTTPForbidden,
+        404: web.HTTPNotFound,
         409: web.HTTPConflict,
         429: web.HTTPTooManyRequests,
         503: web.HTTPServiceUnavailable,
@@ -673,6 +676,13 @@ class PanelHooks:
     settings_overview: Callable[[], list[dict]]
     save_setting: Callable[[str, Any, int], tuple[Any, Any]]
     reset_setting: Callable[[str], tuple[Any, Any]]
+    # Statistiken: gespeicherte Matches je Person (main.MatchStat, zuletzt abgeholt), Auswertung,
+    # Neu-Abholen für eine Person (Meldung), Abfrage einer beliebigen Riot-ID ohne Speichern (ValueError), Regeln
+    match_stats: Callable[[int], dict[int, tuple[list, int]]]
+    summarize_matches: Callable[[list], dict]
+    sync_stats: Callable[[discord.Guild, discord.Member], Awaitable[str]]
+    lookup_stats: Callable[[str], Awaitable[dict]]
+    stats_rules: Callable[[], dict]
 
 
 class Panel:
@@ -682,6 +692,7 @@ class Panel:
         self.revoked: dict[str, float] = {}
         self.login_limiter = RateLimiter(LOGIN_ATTEMPTS, LOGIN_WINDOW_SECONDS)
         self.command_limiter = RateLimiter(COMMANDS_PER_MINUTE, 60)
+        self.lookup_limiter = RateLimiter(LOOKUPS_PER_MINUTE, 60)
         self.http: aiohttp.ClientSession | None = None
         self.console = ConsoleLog()
         self.log_handler = ConsoleLogHandler(self.console)
@@ -717,6 +728,10 @@ class Panel:
             web.get("/api/events", self.api_events),
             web.get("/api/attendance", self.api_attendance),
             web.get("/api/ranking", self.api_ranking),
+            web.get("/api/stats", self.api_stats),
+            web.post("/api/stats/lookup", self.api_stats_lookup),
+            web.get("/api/stats/{user_id}", self.api_player_stats),
+            web.post("/api/stats/{user_id}/refresh", self.api_refresh_stats),
             web.get("/api/announcements", self.api_announcements),
             web.post("/api/announcements", self.api_create_announcement),
             web.post("/api/announcements/{announcement_id}", self.api_edit_announcement),
@@ -1686,6 +1701,89 @@ class Panel:
                 ],
             })
         return web.json_response({"players": players})
+
+    @staticmethod
+    def match_payload(match) -> dict:
+        data = match._asdict()
+        shots = match.head + match.body + match.leg
+        data["hs_percent"] = round(100 * match.head / shots, 1) if shots else None
+        data["acs"] = round(match.score / match.rounds) if match.rounds else None
+        return data
+
+    async def api_stats(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        only_players = request.query.get("filter", "players") == "players"
+        stored = self.hooks.match_stats(guild.id)
+        players = []
+        for profile in self.hooks.list_profiles(guild.id):
+            if profile.riot_id is None:
+                continue
+            member = guild.get_member(profile.user_id)
+            if only_players and self.team_role(guild, member) != "Spieler":
+                continue
+            matches, fetched_at = stored.get(profile.user_id, ([], None))
+            players.append({
+                "user": self.person(guild, profile.user_id),
+                "riot_id": profile.riot_id,
+                "rank_tier": profile.rank_tier,
+                "fetched_at": fetched_at,
+                "summary": self.hooks.summarize_matches(matches),
+            })
+        players.sort(key=lambda player: player["user"]["name"].casefold())
+        return web.json_response({"players": players, "rules": self.hooks.stats_rules()})
+
+    async def api_player_stats(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        user_id = parse_user_id(request.match_info["user_id"])
+        profile = next((entry for entry in self.hooks.list_profiles(guild.id) if entry.user_id == user_id), None)
+        if profile is None or profile.riot_id is None:
+            raise json_error(404, "Für diese Person ist keine Riot-ID verknüpft.")
+        matches, fetched_at = self.hooks.match_stats(guild.id).get(profile.user_id, ([], None))
+        return web.json_response({
+            "user": self.person(guild, profile.user_id),
+            "riot_id": profile.riot_id,
+            "rank_tier": profile.rank_tier,
+            "fetched_at": fetched_at,
+            "summary": self.hooks.summarize_matches(matches),
+            "matches": [self.match_payload(match) for match in matches],
+        })
+
+    async def api_refresh_stats(self, request: web.Request) -> web.Response:
+        _, staff_member, _ = self.authenticate(request, ADMIN)
+        guild = self.guild()
+        user_id = parse_user_id(request.match_info["user_id"])
+        member = guild.get_member(user_id) if user_id else None
+        if member is None:
+            raise json_error(404, "Diese Person ist nicht auf dem Server.")
+        message = await self.hooks.sync_stats(guild, member)
+        log.info("Panel: %s hat die Matches von %s neu abgeholt", staff_member, member.id)
+        return web.json_response({"message": message})
+
+    async def api_stats_lookup(self, request: web.Request) -> web.Response:
+        _, staff_member, _ = self.authenticate(request)
+        if not self.lookup_limiter.allow(str(staff_member.id)):
+            raise json_error(429, f"Höchstens {LOOKUPS_PER_MINUTE} Abfragen pro Minute. Bitte kurz warten.")
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        riot_id = body.get("riot_id") if isinstance(body, dict) else None
+        if not isinstance(riot_id, str) or not riot_id.strip():
+            raise json_error(400, "Bitte eine Riot-ID angeben.")
+        try:
+            result = await self.hooks.lookup_stats(riot_id.strip()[:40])
+        except ValueError as error:
+            raise json_error(400, str(error)) from error
+        # Nur protokollieren, dass abgefragt wurde; gespeichert wird nichts.
+        log.info("Panel: %s hat die Statistiken einer Riot-ID abgefragt", staff_member)
+        return web.json_response({
+            "riot_id": result["riot_id"],
+            "region": result["region"],
+            "summary": self.hooks.summarize_matches(result["matches"]),
+            "matches": [self.match_payload(match) for match in result["matches"]],
+        })
 
     async def api_attendance(self, request: web.Request) -> web.Response:
         self.authenticate(request)

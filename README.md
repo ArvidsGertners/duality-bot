@@ -38,7 +38,7 @@ Secrets gehören nie in den Code, sondern in die Umgebung (auf dem VPS in `/etc/
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | – (Pflicht) | Bot-Token |
 | `DISCORD_GUILD_ID` | Duality-Server | Server-ID |
-| `HENRIKDEV_API_KEY` | – | Rangabfrage über die Riot-ID; ohne Schlüssel ist sie aus |
+| `HENRIKDEV_API_KEY` | – | Rangabfrage und Match-Statistiken über die Riot-ID; ohne Schlüssel sind beide aus |
 | `ALERT_WEBHOOK_URL` | – | Discord-Webhook für Warnungen; ohne Webhook gehen sie nach `#audit-log` |
 | `ALERT_DISCONNECT_MINUTES` | `5` | Standard für „Warnung nach so vielen Minuten ohne Verbindung“ (im Panel änderbar) |
 | `BACKUP_DIR` | `backups/` neben `main.py` | Zielordner der Datenbank-Backups |
@@ -55,15 +55,17 @@ Fehlt eine Panel-Variable, startet der Bot normal ohne Panel und schreibt den Gr
 
 ## Web-Panel
 
-Das Panel ist ein aiohttp-Server im Bot-Prozess. Es zeigt Dashboard, Live-Konsole, Voice-Kanäle, Termine, Anwesenheit, Rangliste, Bewerbungen, Spieler, Tickets, Ankündigungen, Texte, Einstellungen, Server-Setup, Backups und Datenschutz. Anmelden geht nur mit Discord und nur mit einer Staff-Rolle; die Rolle wird bei jeder Anfrage neu geprüft.
+Das Panel ist ein aiohttp-Server im Bot-Prozess. Es zeigt Dashboard, Live-Konsole, Voice-Kanäle, Termine, Anwesenheit, Rangliste, Statistiken, Bewerbungen, Spieler, Tickets, Ankündigungen, Texte, Einstellungen, Server-Setup, Backups und Datenschutz. Anmelden geht nur mit Discord und nur mit einer Staff-Rolle; die Rolle wird bei jeder Anfrage neu geprüft.
 
 | Rolle | Darf |
 |---|---|
-| Coach | alles ansehen, Termine anlegen/verschieben/absagen, Anwesenheit inkl. CSV, Konsole `help`/`status`/`tasks` |
-| Admin | zusätzlich steuernde Konsolenbefehle (`sync-ranks`, `reminders`, `purge`, `cleanup-voice`, `backup`, `say`), Rang abgleichen, neue Saison, Ankündigungen, Texte, Einstellungen, Datenschutz, Setup-Vorschau |
+| Coach | alles ansehen, Termine anlegen/verschieben/absagen, Anwesenheit inkl. CSV, Riot-ID von Bewerbern auswerten (höchstens 6 pro Minute, nichts gespeichert), Konsole `help`/`status`/`tasks` |
+| Admin | zusätzlich steuernde Konsolenbefehle (`sync-ranks`, `reminders`, `purge`, `cleanup-voice`, `backup`, `say`), Rang abgleichen, Matches neu abholen, neue Saison, Ankündigungen, Texte, Einstellungen, Datenschutz, Setup-Vorschau |
 | Owner | zusätzlich `restart`, Backup-Download, Server-Setup anwenden |
 
 Jede steuernde Aktion landet mit Name im Audit-Kanal.
+
+**Statistiken:** Beim täglichen Rang-Abgleich holt der Bot zusätzlich die letzten Matches jedes verknüpften Spielers (`/valorant/v1/stored-matches`, Standard: 20 Competitive-Matches, einstellbar) und speichert Map, Agent, K/D/A, Treffer, Schaden, Punkte und Ergebnis in `match_stats`. Matches älter als 90 Tage löscht er; eine neue oder gelöste Riot-ID löscht die Matches des alten Kontos. Die Daten sind Teil von Auskunft und Löschung.
 
 ### 1. Discord-Application vorbereiten
 

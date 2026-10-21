@@ -203,6 +203,11 @@ def make_hooks(client=None) -> panel.PanelHooks:
         }],
         save_setting=mock.Mock(return_value=(2, 3)),
         reset_setting=mock.Mock(return_value=(3, 2)),
+        match_stats=lambda guild_id: {},
+        summarize_matches=main.summarize_matches,
+        sync_stats=mock.AsyncMock(return_value="5 Matches abgeholt."),
+        lookup_stats=mock.AsyncMock(),
+        stats_rules=lambda: {"match_count": 20, "only_competitive": True, "retention_days": 90, "enabled": True},
     )
 
 
@@ -1251,6 +1256,84 @@ class RankingPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((first["position"], first["name"], first["rank_value"]), (1, "Zoe (Kader)", [4, 1]))
         self.assertEqual([entry["rank_tier"] for entry in first["history"]], ["Gold 3", "Platinum 1"])
         self.assertEqual((second["rank_tier"], second["rank_value"], second["history"]), (None, None, []))
+
+
+def match(match_id: str, won: int | None = 1, agent: str = "Jett") -> main.MatchStat:
+    return main.MatchStat(match_id, 1792500000, "Competitive", "Ascent", agent, 20, 10, 4, 5, 15, 0, 3000, 4000, 20, won)
+
+
+class StatsPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        guild = self.hooks.client.guild
+        self.player_role = SimpleNamespace(name="Spieler", members=[])
+        guild.get_member(PLAYER_ID).roles = [self.player_role]
+        self.hooks.find_role = lambda guild, name: self.player_role if name == "Spieler" else None
+        self.hooks.list_profiles = lambda guild_id: [
+            profile(PLAYER_ID, ("Zoe", "EUW"), "Gold 2"),
+            profile(COACH_ID, ("Coach", "1234")),
+            profile(ADMIN_ID),
+        ]
+        self.hooks.match_stats = lambda guild_id: {PLAYER_ID: ([match("a"), match("b", 0, "Sova")], 1792600000)}
+        self.panel = panel.Panel(CONFIG, self.hooks)
+        self.client = TestClient(TestServer(self.panel.build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def get(self, path: str):
+        _, cookie = session_cookie(COACH_ID)
+        return await self.client.get(path, headers={"Cookie": cookie})
+
+    async def post(self, user_id: int, path: str, body=None):
+        session, cookie = session_cookie(user_id)
+        return await self.client.post(
+            path, json=body, headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]},
+        )
+
+    async def test_overview(self):
+        data = await (await self.get("/api/stats")).json()
+        self.assertEqual(data["rules"]["match_count"], 20)
+        (player,) = data["players"]
+        self.assertEqual((player["riot_id"], player["fetched_at"]), ("Zoe#EUW", 1792600000))
+        self.assertEqual((player["summary"]["matches"], player["summary"]["win_rate"]), (2, 50.0))
+        everyone = (await (await self.get("/api/stats?filter=all")).json())["players"]
+        coach = next(entry for entry in everyone if entry["user"]["id"] == str(COACH_ID))
+        self.assertEqual((coach["summary"]["matches"], coach["fetched_at"]), (0, None))
+        self.assertNotIn(str(ADMIN_ID), [entry["user"]["id"] for entry in everyone])  # ohne Riot-ID
+
+    async def test_detail(self):
+        data = await (await self.get(f"/api/stats/{PLAYER_ID}")).json()
+        self.assertEqual([entry["match_id"] for entry in data["matches"]], ["a", "b"])
+        self.assertEqual((data["matches"][0]["hs_percent"], data["matches"][0]["acs"]), (25.0, 200))
+        self.assertEqual(data["summary"]["agents"][0]["name"], "Jett")
+        for target in (ADMIN_ID, "abc"):
+            self.assertEqual((await self.get(f"/api/stats/{target}")).status, 404)
+
+    async def test_refresh_needs_admin(self):
+        self.assertEqual((await self.post(COACH_ID, f"/api/stats/{PLAYER_ID}/refresh")).status, 403)
+        response = await self.post(ADMIN_ID, f"/api/stats/{PLAYER_ID}/refresh")
+        self.assertEqual(await response.json(), {"message": "5 Matches abgeholt."})
+        self.assertEqual(self.hooks.sync_stats.await_args.args[1].id, PLAYER_ID)
+        self.assertEqual((await self.post(ADMIN_ID, "/api/stats/888888888888888888/refresh")).status, 404)
+
+    async def test_lookup(self):
+        self.hooks.lookup_stats.return_value = {"riot_id": "Bewerber#1234", "region": "eu", "matches": [match("a")]}
+        response = await self.post(COACH_ID, "/api/stats/lookup", {"riot_id": " Bewerber#1234 "})
+        data = await response.json()
+        self.assertEqual((data["riot_id"], data["summary"]["matches"], len(data["matches"])), ("Bewerber#1234", 1, 1))
+        self.assertEqual(self.hooks.lookup_stats.await_args.args, ("Bewerber#1234",))
+        for body in ({}, {"riot_id": 5}, None):
+            self.assertEqual((await self.post(COACH_ID, "/api/stats/lookup", body)).status, 400)
+        self.hooks.lookup_stats.side_effect = ValueError("Diese Riot-ID wurde nicht gefunden.")
+        response = await self.post(COACH_ID, "/api/stats/lookup", {"riot_id": "X#1"})
+        self.assertEqual((response.status, (await response.json())["error"]), (400, "Diese Riot-ID wurde nicht gefunden."))
+
+    async def test_lookup_rate_limit(self):
+        self.hooks.lookup_stats.return_value = {"riot_id": "A#1", "region": "eu", "matches": []}
+        statuses = [(await self.post(ADMIN_ID, "/api/stats/lookup", {"riot_id": "A#1"})).status for _ in range(panel.LOOKUPS_PER_MINUTE + 1)]
+        self.assertEqual(statuses, [200] * panel.LOOKUPS_PER_MINUTE + [429])
+        # Das Limit gilt pro Person.
+        self.assertEqual((await self.post(COACH_ID, "/api/stats/lookup", {"riot_id": "A#1"})).status, 200)
 
 
 class SettingsPanelTests(unittest.IsolatedAsyncioTestCase):

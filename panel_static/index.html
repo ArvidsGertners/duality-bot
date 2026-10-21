@@ -30,6 +30,7 @@
               <li><a href="#termine" data-page="termine" data-level="1">Termine</a></li>
               <li><a href="#anwesenheit" data-page="anwesenheit" data-level="1">Anwesenheit</a></li>
               <li><a href="#rangliste" data-page="rangliste" data-level="1">Rangliste</a></li>
+              <li><a href="#statistiken" data-page="statistiken" data-level="1">Statistiken</a></li>
               <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
             </ul>
           </li>
@@ -209,6 +210,81 @@
             <tbody id="ranking-list"></tbody>
           </table>
         </div>
+      </section>
+
+      <section id="page-statistiken" class="page" aria-labelledby="title-statistiken" hidden>
+        <h1 id="title-statistiken">Statistiken</h1>
+        <p class="muted" id="stats-rules"></p>
+        <div class="toolbar">
+          <label><input class="checkbox checkbox-sm" type="checkbox" id="stats-players-only" checked> Nur Spieler</label>
+          <span class="muted" id="stats-summary" role="status"></span>
+        </div>
+        <div class="card table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th scope="col" aria-sort="ascending"><button type="button" class="sort" data-sort="name">Spieler</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="matches">Matches</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="kd">K/D</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="hs_percent">HS %</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="acs">ACS</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="adr">ADR</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="win_rate">Win-Rate</button></th>
+                <th scope="col">Top-Agent</th>
+                <th scope="col"><span class="visually-hidden">Aktion</span></th>
+              </tr>
+            </thead>
+            <tbody id="stats-list"></tbody>
+          </table>
+        </div>
+
+        <form class="card spaced form-grid" id="stats-lookup-form">
+          <h2>Bewerber prüfen</h2>
+          <p class="muted small">Wertet die letzten Matches einer beliebigen Riot-ID aus, z. B. aus einer Bewerbung. Es wird nichts gespeichert.</p>
+          <label for="stats-lookup-input">Riot-ID</label>
+          <div class="command-line">
+            <input class="input" id="stats-lookup-input" required maxlength="40" placeholder="Name#Tag" autocomplete="off" spellcheck="false">
+            <button type="submit" class="btn btn-primary">Auswerten</button>
+          </div>
+          <p class="small" id="stats-lookup-message" role="status"></p>
+        </form>
+
+        <article class="card spaced" id="stats-detail" hidden aria-labelledby="stats-detail-title">
+          <h2 id="stats-detail-title"></h2>
+          <div class="toolbar">
+            <span class="muted small" id="stats-detail-meta"></span>
+            <button type="button" class="btn btn-sm" id="stats-refresh" data-level="2" hidden>Jetzt aktualisieren</button>
+            <span class="small" id="stats-refresh-message" role="status"></span>
+          </div>
+          <div class="stat-tiles" id="stats-tiles"></div>
+          <div class="stats-columns">
+            <div>
+              <h3 class="small muted">Agents</h3>
+              <div class="table-wrap">
+                <table class="table">
+                  <thead><tr><th scope="col">Agent</th><th scope="col">Spiele</th><th scope="col">Win-Rate</th><th scope="col">K/D</th></tr></thead>
+                  <tbody id="stats-agents"></tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <h3 class="small muted">Maps</h3>
+              <div class="table-wrap">
+                <table class="table">
+                  <thead><tr><th scope="col">Map</th><th scope="col">Spiele</th><th scope="col">Win-Rate</th></tr></thead>
+                  <tbody id="stats-maps"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <h3 class="small muted spaced">Letzte Matches</h3>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th scope="col">Datum</th><th scope="col">Map</th><th scope="col">Agent</th><th scope="col">K / D / A</th><th scope="col">HS %</th><th scope="col">ACS</th><th scope="col">Ergebnis</th></tr></thead>
+              <tbody id="stats-matches"></tbody>
+            </table>
+          </div>
+        </article>
       </section>
 
       <section id="page-bewerbungen" class="page" aria-labelledby="title-bewerbungen" hidden>
@@ -405,7 +481,7 @@
           </div>
           <form class="form-grid spaced" id="privacy-delete-form">
             <h3>Daten löschen</h3>
-            <p class="muted small">Gelöscht werden Profil, Rangverlauf, Teamname, Terminantworten und Bewerbungen samt Nachricht im Staff-Kanal.
+            <p class="muted small">Gelöscht werden Profil, Rangverlauf, Match-Statistiken, Teamname, Terminantworten und Bewerbungen samt Nachricht im Staff-Kanal.
               Tickets und Staff-Stimmen bleiben als Nachweis; bei Änderungen im Panel wird nur der Name entfernt. Discord-Rollen und Nachrichten bleiben.
               In Datenbank-Backups stehen die Daten noch, bis diese nach ihrer Aufbewahrungsfrist (Standard 14 Tage) gelöscht werden.</p>
             <label for="privacy-reason">Grund / Anfrage vom (Pflicht)</label>

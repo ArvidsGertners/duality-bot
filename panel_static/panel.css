@@ -354,7 +354,22 @@ button.sort { background: none; border: 0; padding: 0; color: inherit; font: inh
 th[aria-sort="ascending"] button.sort::after { content: " ▲"; }
 th[aria-sort="descending"] button.sort::after { content: " ▼"; }
 tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--color-error); }
-.num { text-align: right; font-variant-numeric: tabular-nums; }
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Statistiken: große Kennzahlen wie im Dashboard-Entwurf, Win-Rate als Balken */
+/* Kacheln mit gemeinsamen Linien; leere Plätze in der letzten Reihe bleiben unsichtbar */
+.stat-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); padding: 1px 0 0 1px; margin-bottom: 1.5rem; }
+.stat-tile { border: var(--border) solid var(--line); margin: -1px 0 0 -1px; padding: 1rem 1.1rem; }
+.stat-tile .label { display: block; font-size: .72rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.stat-tile .value { display: block; margin-top: .3rem; font-family: var(--mono); font-size: 1.9rem; font-weight: 700; line-height: 1.1; }
+.stat-tile .hint { display: block; margin-top: .2rem; font-family: var(--mono); font-size: .75rem; color: var(--muted); }
+.stats-columns { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.rate { display: inline-flex; align-items: center; gap: .5rem; white-space: nowrap; }
+.stack { display: flex; flex-direction: column; gap: .15rem; }
+.rate-bar { display: inline-block; width: 70px; height: 6px; background: var(--color-base-300); }
+.rate-bar > span { display: block; height: 100%; background: var(--color-success); }
+.rate-bar.low > span { background: var(--color-primary); }
+#stats-list tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--color-primary); }
 
 /* Rangliste */
 .sparkline { display: block; }

@@ -26,6 +26,9 @@ const state = {
   editingEvent: null,
   attendance: null,
   attendanceSort: { key: "name", ascending: true },
+  stats: null,
+  statsSort: { key: "name", ascending: true },
+  statsUser: null,
   texts: [],
   announcementData: null,
   editingAnnouncement: null,
@@ -698,6 +701,163 @@ async function loadRanking() {
   $("#ranking-list").replaceChildren(...(rows.length ? rows : [emptyRow(5, "Noch kein Spieler hat seine Riot-ID verknüpft.")]));
 }
 
+/* Statistiken */
+
+const decimal = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
+
+function rateCell(rate) {
+  if (rate === null || rate === undefined) return "–";
+  const wrapper = span("rate", "");
+  const bar = span(`rate-bar${rate < 50 ? " low" : ""}`, "");
+  bar.setAttribute("aria-hidden", "true");
+  const fill = document.createElement("span");
+  fill.style.width = `${Math.max(0, Math.min(100, rate))}%`;
+  bar.append(fill);
+  wrapper.append(bar, `${decimal.format(rate)} %`);
+  return wrapper;
+}
+
+function statValue(value, suffix = "") {
+  return value === null || value === undefined ? "–" : `${decimal.format(value)}${suffix}`;
+}
+
+function renderStats() {
+  const data = state.stats;
+  const { key, ascending } = state.statsSort;
+  const value = (row) => (key === "name" ? row.user.name.toLowerCase() : row.summary[key] ?? -1);
+  const rows = [...data.players].sort((a, b) => {
+    const order = value(a) < value(b) ? -1 : value(a) > value(b) ? 1 : 0;
+    return ascending ? order : -order;
+  });
+  $("#stats-list").replaceChildren(...(rows.length ? rows.map((row) => {
+    const { summary } = row;
+    const name = span("stack", "");
+    name.append(personCell(row.user), span("muted small mono", row.riot_id));
+    const details = document.createElement("button");
+    details.type = "button";
+    details.className = "btn btn-sm";
+    details.textContent = "Details";
+    details.setAttribute("aria-label", `Statistiken von ${row.user.name} anzeigen`);
+    details.addEventListener("click", () => showPlayerStats(row).catch((error) => setBanner(error.message)));
+    const element = tableRow(
+      name, String(summary.matches), statValue(summary.kd), statValue(summary.hs_percent, " %"),
+      statValue(summary.acs), statValue(summary.adr), rateCell(summary.win_rate),
+      summary.agents.length ? summary.agents[0].name : "–", details,
+    );
+    for (const cell of [...element.children].slice(1, 6)) cell.classList.add("num");
+    if (row.user.id === state.statsUser) element.classList.add("selected");
+    return element;
+  }) : [emptyRow(9, "Niemand hat eine Riot-ID verknüpft (/riot-id).")]));
+  for (const header of document.querySelectorAll("#page-statistiken th")) {
+    const button = header.querySelector("button.sort");
+    if (button && button.dataset.sort === key) header.setAttribute("aria-sort", ascending ? "ascending" : "descending");
+    else header.removeAttribute("aria-sort");
+  }
+  const withMatches = data.players.filter((row) => row.summary.matches).length;
+  $("#stats-summary").textContent = `${data.players.length} Spieler · ${withMatches} mit Matches`;
+}
+
+async function loadStats() {
+  const filter = $("#stats-players-only").checked ? "players" : "all";
+  state.stats = await api(`/api/stats?filter=${filter}`);
+  const rules = state.stats.rules;
+  $("#stats-rules").textContent = rules.enabled
+    ? `Ausgewertet werden die letzten ${rules.match_count} ${rules.only_competitive ? "Competitive-Matches" : "Matches (ohne Deathmatch)"} je Spieler aus der HenrikDev-API. `
+      + `Der Bot holt sie täglich beim Rang-Abgleich und löscht Matches nach ${rules.retention_days} Tagen. ACS und ADR sind Punkte bzw. Schaden pro Runde.`
+    : "Die Statistiken sind ausgeschaltet, weil der HenrikDev-API-Schlüssel fehlt (HENRIKDEV_API_KEY).";
+  renderStats();
+}
+
+function sortStats(key) {
+  const current = state.statsSort;
+  state.statsSort = { key, ascending: current.key === key ? !current.ascending : key === "name" };
+  if (state.stats) renderStats();
+}
+
+function statTile(label, value, hint = "") {
+  const tile = span("stat-tile", "");
+  tile.append(span("label", label), span("value", value), span("hint", hint));
+  return tile;
+}
+
+const MATCH_RESULTS = { 1: ["Sieg", "ok"], 0: ["Niederlage", "bad"] };
+
+function renderStatsDetail(data, title, meta, userId = null) {
+  const { summary } = data;
+  state.statsUser = userId;
+  $("#stats-detail").hidden = false;
+  $("#stats-detail-title").textContent = title;
+  $("#stats-detail-meta").textContent = meta;
+  $("#stats-refresh").hidden = !userId || state.me.level < 2;
+  $("#stats-refresh-message").textContent = "";
+  $("#stats-tiles").replaceChildren(
+    statTile("K/D", statValue(summary.kd), `${summary.kills} / ${summary.deaths} / ${summary.assists}`),
+    statTile("Headshot", statValue(summary.hs_percent, " %"), "aller Treffer"),
+    statTile("ACS", statValue(summary.acs), "Punkte pro Runde"),
+    statTile("ADR", statValue(summary.adr), "Schaden pro Runde"),
+    statTile("Win-Rate", statValue(summary.win_rate, " %"), `${summary.wins} Siege · ${summary.losses} Niederlagen`),
+    statTile("Matches", String(summary.matches), summary.matches ? "ausgewertet" : "noch keine"),
+  );
+  $("#stats-agents").replaceChildren(...(summary.agents.length
+    ? summary.agents.map((agent) => tableRow(agent.name, String(agent.games), rateCell(agent.win_rate), statValue(agent.kd)))
+    : [emptyRow(4, "Keine Matches.")]));
+  $("#stats-maps").replaceChildren(...(summary.maps.length
+    ? summary.maps.map((map) => tableRow(map.name, String(map.games), rateCell(map.win_rate)))
+    : [emptyRow(3, "Keine Matches.")]));
+  $("#stats-matches").replaceChildren(...(data.matches.length ? data.matches.map((match) => {
+    const [label, kind] = MATCH_RESULTS[match.won] || ["Unentschieden", "neutral"];
+    return tableRow(
+      formatTime(match.started_at), match.map || "–", match.agent || "–", `${match.kills} / ${match.deaths} / ${match.assists}`,
+      statValue(match.hs_percent, " %"), statValue(match.acs), pill(label, kind),
+    );
+  }) : [emptyRow(7, "Noch keine Matches gespeichert.")]));
+  if (state.stats) renderStats();
+  $("#stats-detail").scrollIntoView({ block: "start" });
+}
+
+async function showPlayerStats(row) {
+  const data = await api(`/api/stats/${row.user.id}`);
+  const meta = data.fetched_at
+    ? `Zuletzt abgeholt: ${formatTime(data.fetched_at)}${data.rank_tier ? ` · Rang: ${data.rank_tier}` : ""}`
+    : "Noch keine Matches abgeholt; der Bot holt sie beim nächsten täglichen Abgleich.";
+  renderStatsDetail(data, `${data.user.name} · ${data.riot_id}`, meta, data.user.id);
+}
+
+async function refreshStats() {
+  const userId = state.statsUser;
+  const button = $("#stats-refresh");
+  button.disabled = true;
+  $("#stats-refresh-message").textContent = "Hole Matches …";
+  try {
+    const result = await api(`/api/stats/${userId}/refresh`, { method: "POST" });
+    await loadStats();
+    const row = state.stats.players.find((player) => player.user.id === userId);
+    if (row) await showPlayerStats(row);
+    $("#stats-refresh-message").textContent = result.message;
+  } catch (error) {
+    $("#stats-refresh-message").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function lookupStats(event) {
+  event.preventDefault();
+  const input = $("#stats-lookup-input");
+  const button = event.submitter || $("#stats-lookup-form button[type=submit]");
+  button.disabled = true;
+  $("#stats-lookup-message").textContent = "Frage die HenrikDev-API ab …";
+  try {
+    const data = await api("/api/stats/lookup", { method: "POST", body: { riot_id: input.value } });
+    $("#stats-lookup-message").textContent = "";
+    renderStatsDetail(data, `Bewerber · ${data.riot_id}`, `Region ${data.region.toUpperCase()} · nicht gespeichert`);
+  } catch (error) {
+    $("#stats-lookup-message").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /* Vorschau im Discord-Stil (vereinfacht, ohne verschachtelte Formatierung) */
 
 const MARKDOWN_TOKENS = /(\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|`[^`\n]+`|\*[^*\n]+\*|_[^_\n]+_)/g;
@@ -1054,6 +1214,7 @@ const PRIVACY_LABELS = {
   tickets: "Tickets",
   eigene_voice_channels: "Eigene Voice-Kanäle",
   rangverlauf: "Rangverlauf",
+  match_statistiken: "Match-Statistiken",
   geaenderte_einstellungen: "Geänderte Einstellungen (Panel)",
   geaenderte_texte: "Geänderte Texte (Panel)",
   ankuendigungen: "Ankündigungen (Panel)",
@@ -1331,7 +1492,7 @@ async function loadTickets() {
 
 const pageLoaders = {
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
-  anwesenheit: loadAttendance, rangliste: loadRanking, einstellungen: loadSettings, texte: loadTexts,
+  anwesenheit: loadAttendance, rangliste: loadRanking, statistiken: loadStats, einstellungen: loadSettings, texte: loadTexts,
   ankuendigungen: loadAnnouncements, setup: loadSetup,
 };
 
@@ -1660,6 +1821,12 @@ async function init() {
   for (const button of document.querySelectorAll("#page-anwesenheit button.sort")) {
     button.addEventListener("click", () => sortAttendance(button.dataset.sort));
   }
+  $("#stats-players-only").addEventListener("change", () => loadStats().catch((error) => setBanner(error.message)));
+  for (const button of document.querySelectorAll("#page-statistiken button.sort")) {
+    button.addEventListener("click", () => sortStats(button.dataset.sort));
+  }
+  $("#stats-lookup-form").addEventListener("submit", lookupStats);
+  $("#stats-refresh").addEventListener("click", refreshStats);
   $("#setup-refresh").addEventListener("click", loadSetup);
   $("#setup-apply").addEventListener("click", applySetup);
   $("#privacy-search-form").addEventListener("submit", searchPrivacy);

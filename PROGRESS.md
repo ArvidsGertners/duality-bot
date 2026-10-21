@@ -162,6 +162,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] Stil nach Arvids' Variant-Entwurf: schwarze Seitenleiste (auch im hellen Theme), eckige Flächen, Seitentitel in Großbuchstaben mit rotem „//“ und Überzeile aus der Navigationsgruppe, Kartenköpfe mit rotem Strich, Daten/Tabellen/Felder in Monospace, gefüllte Status-Badges, Punktraster im Hintergrund, Theme-Knopf (System → Hell → Dunkel). Deutsche Texte und echte Funktionen bleiben; Beispielinhalte aus dem Entwurf (Annehmen/Ablehnen, Auto-Moderation, Reset) bewusst nicht übernommen — fertig (46e9a8a)
 - [x] Duality-Logo (DM-Zeichen aus `Duality-DM.svg`/`Duality-DM-LightBG.svg`) statt Raute: als Inline-SVG in Seitenleiste und Anmeldeseite, linker Teil folgt der Textfarbe (weiß auf dunkel, schwarz auf hell), rechter Teil rot; dazu `favicon.svg` auf schwarzem Feld — fertig (b169451)
 
+## Neue Features (Wunsch von Arvids, 21.10.2026)
+- [x] Spieler-Statistiken: HenrikDev `stored-matches` beim täglichen Rang-Abgleich, Tabelle `match_stats` (90 Tage, in Auskunft/Löschung, neue Riot-ID löscht alte Matches), Seite „Statistiken“ (Team-Tabelle sortierbar, Detail mit Kennzahlen, Agents, Maps, letzten Matches), „Bewerber prüfen“ ohne Speichern (6/min je Staff), „Jetzt aktualisieren“ ab Admin, Einstellungen `stats_match_count` (20) und `stats_only_competitive` (an) — fertig (Commit folgt)
+- [ ] Server-Wachstum: Tageszahlen ohne User-IDs, Diagramm auf dem Dashboard — in Arbeit
+
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
 |---|---|---|

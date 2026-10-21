@@ -593,6 +593,103 @@ class RankHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(len(field.value) <= 1024 for field in help_embed.fields))
 
 
+def stored_match(match_id="m1", team="Red", red=13, blue=7, mode="Competitive", kills=20, deaths=10, head=5, body=15, leg=0,
+                 agent="Jett", map_name="Ascent", started_at="2026-10-20T18:00:00.000Z"):
+    """Ein Eintrag wie aus /valorant/v1/stored-matches."""
+    return {
+        "meta": {"id": match_id, "map": {"id": "x", "name": map_name}, "mode": mode, "started_at": started_at,
+                 "version": "1", "season": {"id": "s", "short": "e9a3"}, "region": "eu"},
+        "stats": {"puuid": "p", "team": team, "level": 100, "character": {"id": "c", "name": agent}, "tier": 15,
+                  "score": 4000, "kills": kills, "deaths": deaths, "assists": 4,
+                  "shots": {"head": head, "body": body, "leg": leg}, "damage": {"made": 3000, "received": 2000}},
+        "teams": {"red": red, "blue": blue},
+    }
+
+
+class MatchStatsTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for patcher in (
+            mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3"),
+            mock.patch.object(main, "SETTINGS_CACHE", None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        main.initialize_storage()
+
+    def test_parse_stored_match(self):
+        win = main.parse_stored_match(stored_match())
+        self.assertEqual((win.won, win.rounds, win.map, win.agent, win.kills), (1, 20, "Ascent", "Jett", 20))
+        self.assertEqual(win.started_at, int(datetime(2026, 10, 20, 18, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(main.parse_stored_match(stored_match(team="Blue")).won, 0)
+        self.assertIsNone(main.parse_stored_match(stored_match(red=12, blue=12)).won)
+        self.assertIsNone(main.parse_stored_match(stored_match(mode="Deathmatch")))
+        self.assertIsNone(main.parse_stored_match(stored_match(red=0, blue=0)))
+
+    def test_summary(self):
+        matches = [
+            main.parse_stored_match(stored_match("a", agent="Jett", map_name="Ascent")),
+            main.parse_stored_match(stored_match("b", team="Blue", agent="Jett", map_name="Bind", kills=10, deaths=20)),
+            main.parse_stored_match(stored_match("c", agent="Sova", map_name="Ascent", red=12, blue=12)),
+        ]
+        summary = main.summarize_matches(matches)
+        self.assertEqual((summary["matches"], summary["wins"], summary["losses"]), (3, 1, 1))
+        self.assertEqual(summary["win_rate"], 50.0)  # Unentschieden zählt nicht mit
+        self.assertEqual(summary["kd"], round(50 / 40, 2))
+        self.assertEqual(summary["hs_percent"], round(100 * 15 / 60, 1))
+        self.assertEqual(summary["acs"], round(12000 / 64))
+        self.assertEqual(summary["adr"], round(9000 / 64))
+        self.assertEqual([(agent["name"], agent["games"]) for agent in summary["agents"]], [("Jett", 2), ("Sova", 1)])
+        self.assertEqual(summary["maps"][0], {"name": "Ascent", "games": 2, "wins": 1, "win_rate": 100.0, "kd": 2.0})
+        empty = main.summarize_matches([])
+        self.assertEqual((empty["matches"], empty["kd"], empty["win_rate"], empty["agents"]), (0, None, None, []))
+
+    def test_storage_limit_retention_and_privacy(self):
+        main.update_profile(1, 5, riot_name="Zoe", riot_tag="EUW")
+        matches = [main.parse_stored_match(stored_match(f"m{day}", started_at=f"2026-10-{day:02d}T18:00:00Z")) for day in range(1, 6)]
+        main.save_match_stats(1, 5, matches, fetched_at=1000)
+        main.save_match_stats(1, 5, matches[-1:], fetched_at=2000)  # gleiches Match nochmal: kein Duplikat
+        main.save_match_stats(1, 6, matches[:1], fetched_at=1500)
+        stored = main.match_stats_by_user(1, limit=3)
+        self.assertEqual([match.match_id for match in stored[5][0]], ["m5", "m4", "m3"])
+        self.assertEqual(stored[5][1], 2000)
+        self.assertEqual(len(main.collect_user_data(1, 5)["match_statistiken"]), 5)
+        # Ältere Matches fallen nach der Löschfrist weg (zwei von Person 5, eins von Person 6).
+        self.assertEqual(main.delete_old_match_stats(matches[2].started_at), 3)
+        self.assertEqual(len(main.match_stats_by_user(1, limit=10)[5][0]), 3)
+        # Neue Riot-ID: Matches des alten Kontos verschwinden; andere Profiländerungen lassen sie stehen.
+        main.update_profile(1, 5, rank_tier="Gold 1")
+        self.assertIn(5, main.match_stats_by_user(1, limit=10))
+        main.update_profile(1, 5, riot_name="Neu", riot_tag="EUW")
+        self.assertNotIn(5, main.match_stats_by_user(1, limit=10))
+        main.delete_user_data(1, 6)
+        self.assertEqual(main.match_stats_by_user(1, limit=10), {})
+
+    async def test_api_request_and_lookup(self):
+        client = main.HenrikDevClient("key")
+        client.get = mock.AsyncMock(return_value={"status": 200, "data": [stored_match("a"), stored_match("dm", mode="Deathmatch")]})
+        matches, region = await client.recent_matches("Zoe Z", "EUW", "eu", 20)
+        self.assertEqual(client.get.await_args.args[0], "/valorant/v1/stored-matches/eu/Zoe%20Z/EUW?size=20&mode=competitive")
+        self.assertEqual(([match.match_id for match in matches], region), (["a"], "eu"))
+        await client.recent_matches("Zoe", "EUW", "eu", 10, only_competitive=False)
+        self.assertEqual(client.get.await_args.args[0], "/valorant/v1/stored-matches/eu/Zoe/EUW?size=10")
+        client.get = mock.AsyncMock(return_value={"data": [{"meta": {}}]})
+        with self.assertRaises(main.RankLookupError):
+            await client.recent_matches("Zoe", "EUW", "eu", 20)
+
+        rank_client = SimpleNamespace(recent_matches=mock.AsyncMock(return_value=(matches, "eu")))
+        with mock.patch.object(main, "RANK_CLIENT", rank_client):
+            with self.assertRaises(ValueError):
+                await main.lookup_stats("ohne Tag")
+            result = await main.lookup_stats(" Bewerber#1234 ")
+        self.assertEqual((result["riot_id"], result["region"], len(result["matches"])), ("Bewerber#1234", "eu", 1))
+        self.assertEqual(rank_client.recent_matches.await_args.args[:4], ("Bewerber", "1234", None, 20))
+        self.assertEqual(main.match_stats_by_user(1, limit=10), {})  # Abfrage speichert nichts
+        with mock.patch.object(main, "RANK_CLIENT", None), self.assertRaises(ValueError):
+            await main.lookup_stats("Bewerber#1234")
+
+
 class SettingsTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
