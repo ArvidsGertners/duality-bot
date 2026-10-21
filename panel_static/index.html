@@ -26,6 +26,7 @@
           <li><a href="#ankuendigungen" data-page="ankuendigungen" data-level="2">Ankündigungen</a></li>
           <li><a href="#texte" data-page="texte" data-level="2">Texte</a></li>
           <li><a href="#einstellungen" data-page="einstellungen" data-level="2">Einstellungen</a></li>
+          <li><a href="#setup" data-page="setup" data-level="2">Server-Setup</a></li>
           <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
           <li><a href="#datenschutz" data-page="datenschutz" data-level="2">Datenschutz</a></li>
         </ul>
@@ -383,6 +384,19 @@
             <p class="small" id="privacy-message" role="status"></p>
           </form>
         </article>
+      </section>
+
+      <section id="page-setup" class="page" aria-labelledby="title-setup" hidden>
+        <h1 id="title-setup">Server-Setup</h1>
+        <p class="muted">Vorschau dessen, was <code>main.py --apply</code> am Server ändern würde: fehlende Rollen und Kanäle, Rechte,
+          Aufräumschritte und die festen Nachrichten. Anwenden darf nur der Owner.</p>
+        <div class="toolbar">
+          <button type="button" id="setup-refresh">Vorschau neu laden</button>
+          <button type="button" class="danger" id="setup-apply" data-level="3" disabled>Anwenden …</button>
+          <span class="muted" id="setup-summary" role="status"></span>
+        </div>
+        <p class="form-error" id="setup-error" role="alert"></p>
+        <div id="setup-groups"></div>
       </section>
 
       <section id="page-backups" class="page" aria-labelledby="title-backups" hidden>

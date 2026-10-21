@@ -39,10 +39,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] D3 Einstellungen (`bot_settings`, `setting()`-Helfer mit Cache) — fertig (283261a)
 - [x] D2 Texte bearbeiten (`bot_texts`, Verlauf, Discord-Nachrichten aktualisieren) — fertig (08bf42d)
 - [x] D1 Ankündigungs-Editor (sofort/zeitgesteuert, `scheduled_announcements`) — fertig (ce5de97)
-- [x] E1 Datenschutz-Seite (Auskunft/Löschung) — fertig (Commit „Datenschutz im Panel …“)
+- [x] E1 Datenschutz-Seite (Auskunft/Löschung) — fertig (e5499f4)
 
 ### Phase 5 – Setup-Diff
-- [ ] B3 `setup_guild` liefert strukturierten Diff, Panel-Seite, Anwenden mit Lock — offen
+- [x] B3 `setup_guild` liefert strukturierten Diff, Panel-Seite, Anwenden mit Lock — fertig (Commit „Server-Setup als Diff …“)
 
 ### Phase 6 – Scrim-Suche
 - [ ] Recherche-Tabelle vorlegen und auf Entscheidung warten — offen
@@ -121,6 +121,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Handy-Ansicht korrigiert: Mit 16 Menüpunkten zog die Navigationsleiste die Seite auf 1320 px; jetzt `minmax(0, 1fr)`, die Leiste scrollt seitlich und der aktive Punkt wird sichtbar gescrollt.
 - Phase 4 im Browser geprüft (Wegwerf-DB, Discord simuliert): Einstellungen (inkl. abgelehnter Eingabe), Texte (Speichern, Platzhalter, Verlauf), Ankündigungen (Vorschau, Planen, Bearbeiten, Löschen), Datenschutz (Suche, Auskunft), Handy-Layout.
 
+- **B3 Setup-Diff:** `setup_guild(guild, apply, echo=True)` gibt eine Liste `SetupChange(action create/change/delete/info, kind, target, text)` zurück. Alle `print` laufen über `SetupPlan.say/note`; die Terminal-Ausgabe ist zeichengleich (Vergleich alt/neu mit nachgebauten Servern in 8 Läufen, Skript im Scratchpad). Zusätzlich nur im Diff (ohne Ausgabe): einzelne Löschungen in alten Kategorien, Rechte-Änderungen an Kanälen in der Vorschau, feste Nachrichten (veröffentlichen/aktualisieren), alte Bewerbungsnachricht in #willkommen. Eine nur umbenannte Kategorie erscheint nicht zusätzlich als „neu“ (bekannte Restungenauigkeit: `bewerber-chat` erscheint als neu, obwohl aus `looking-for-team` umbenannt). `SETUP_LOCK` + `run_setup()` für den Start; das Panel hält den Lock selbst über Vorschau + Anwenden. Panel: Vorschau ab Admin (`echo=False`, damit die Konsole sauber bleibt), Anwenden nur Owner mit `{"confirm": true, "deletions": n}`; der Server rechnet die Vorschau unter dem Lock neu und bricht mit 409 ab, wenn sich die Zahl der Löschungen geändert hat. Beim Anwenden `echo=True` (Ausgabe in der Konsole), Audit mit Zahlen, Fehler → 502 + Audit „brach ab“. Nach dem Anwenden bleiben immer die 4 Nachrichten-Aktualisierungen übrig (so wie bei jedem Start).
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -134,6 +136,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Alte root-eigene Kopie `/home/duality-bot/main.py` liegt ungenutzt herum (nicht angefasst).
 - **21.10.2026, 12:29 UTC: Phase 2 deployt (a770e37)**, `update-vps.sh` Exit 0, Dienst aktiv, keine Fehler im Log, `/healthz` lokal und öffentlich 200, API ohne Login 401. Test-Backup als `dualitybot` erstellt (`/home/duality-bot/app/backups/`, Ordner 700, Datei 600), `git status` sauber. Kein `ALERT_WEBHOOK_URL` gesetzt → Warnungen nach `#audit-log`.
 - **21.10.2026, 12:52 UTC: Phase 3 deployt (aa72e6d)**, vorher Backup `duality-backup-2026-10-21_145223.sqlite3`. `update-vps.sh` Exit 0, Dienst aktiv, 0 Fehler im Log, Schema migriert (`scheduled_events` + `title`/`details`/`cancelled_at`, `rank_history` da), `/rangliste` bei Discord registriert, Panel lokal/öffentlich ok. Hinweise: ein verknüpftes Profil gehört zu jemandem, der den Server verlassen hat (wird beim Abgleich übersprungen); der gespeicherte Termin am 24.10. 17:00 hat eine in Discord gelöschte Nachricht (kein Titel, verschwindet beim Erinnerungs-Check 24 h vorher von selbst).
+- **21.10.2026, 13:12 UTC: Phase 4 deployt (e5499f4)**, vorher Backup `duality-backup-2026-10-21_151242.sqlite3`. `update-vps.sh` Exit 0, Dienst aktiv, 0 Fehler, neue Tabellen da, Standardwerte aktiv, feste Nachrichten mit den (unveränderten) Standardtexten neu gesetzt, Panel lokal/öffentlich ok.
 
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
@@ -164,4 +167,4 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Phase 4 ist fertig. Auf Arvids' OK für Phase 5 (B3 Setup-Diff) warten; VPS-Update vorschlagen (vorher fragen, vorher Backup). Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Phase 4 läuft (OK von Arvids). Phase 5 ist fertig. Auf Arvids' OK warten; VPS-Update vorschlagen (vorher Backup). Danach Phase 6: zuerst Recherche-Tabelle zu Scrim-Plattformen vorlegen und auf Entscheidung warten. Phase 4 beginnt mit D3 Einstellungen (macht u. a. `RANK_CONGRATS_ENABLED` und Anwesenheits-Schwellen einstellbar). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

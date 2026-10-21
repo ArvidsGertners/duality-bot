@@ -4092,8 +4092,62 @@ async def build_data_export(guild: discord.Guild, user_id: int) -> dict:
     }
 
 
-async def setup_guild(guild: discord.Guild, apply: bool) -> None:
-    print(f"Server: {guild.name} ({guild.id})")
+class SetupChange(NamedTuple):
+    # "create", "change", "delete" oder "info"
+    action: str
+    # "role", "category", "channel", "permissions", "message", "member" oder "data"
+    kind: str
+    target: str
+    text: str
+
+
+class SetupPlan:
+    """Sammelt, was das Setup ändert oder ändern würde, ohne die Terminal-Ausgabe zu verändern."""
+
+    def __init__(self, echo: bool = True):
+        self.echo = echo
+        self.changes: list[SetupChange] = []
+        # Neuer Name → alte Kategorie, falls die Vorschau eine Umbenennung plant.
+        self.renamed_categories: dict[str, discord.CategoryChannel] = {}
+
+    def say(self, text: str) -> None:
+        if self.echo:
+            print(text)
+
+    def note(self, action: str, kind: str, target: str, text: str | None = None, *, detail: str | None = None) -> None:
+        """text wird wie bisher ausgegeben und gespeichert; detail landet nur im Diff."""
+        if text is not None:
+            self.say(text)
+        self.changes.append(SetupChange(action, kind, target, (detail or text or "").strip()))
+
+    def note_category_removal(self, category: discord.CategoryChannel) -> None:
+        # Die Vorschau gibt nur eine Zeile aus; im Diff zählt jede Löschung einzeln.
+        for channel in category.channels:
+            self.note("delete", "channel", channel.name, detail=f"Kanal würde entfernt: {channel.name} (in {category.name})")
+        self.note("delete", "category", category.name, detail=f"Kategorie würde entfernt: {category.name}")
+
+    async def note_message(self, guild: discord.Guild, channel: discord.TextChannel, markers: set[str], label: str) -> None:
+        async for message in channel.history(limit=50):
+            if message.author == guild.me and message.embeds and message.embeds[0].footer.text in markers:
+                self.note("change", "message", f"#{channel.name}", detail=f"{label} in #{channel.name} würde aktualisiert")
+                return
+        self.note("create", "message", f"#{channel.name}", detail=f"{label} in #{channel.name} würde veröffentlicht")
+
+
+SETUP_LOCK = asyncio.Lock()
+
+
+async def run_setup(guild: discord.Guild, apply: bool, echo: bool = True) -> list[SetupChange]:
+    """Vorschau und Anwenden laufen nie gleichzeitig, auch nicht aus Panel und Neustart heraus."""
+    async with SETUP_LOCK:
+        return await setup_guild(guild, apply, echo)
+
+
+async def setup_guild(guild: discord.Guild, apply: bool, echo: bool = True) -> list[SetupChange]:
+    """Richtet den Server ein (apply) oder zeigt nur, was sich ändern würde.
+    Gibt die Änderungen zurück; die Terminal-Ausgabe ist dieselbe wie früher."""
+    plan = SetupPlan(echo)
+    plan.say(f"Server: {guild.name} ({guild.id})")
     if apply:
         adopt_unscoped_migrations(guild.id)
 
@@ -4120,9 +4174,10 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                     await old_category.edit(name=new_name, reason="Duality Mannheim Kanalstruktur aktualisiert")
                     existing_category_names.discard(old_name)
                     existing_category_names.add(new_name)
-                    print(f"  Kategorie umbenannt: {old_name} → {new_name}")
+                    plan.note("change", "category", new_name, f"  Kategorie umbenannt: {old_name} → {new_name}")
                 else:
-                    print(f"  Kategorie würde umbenannt: {old_name} → {new_name}")
+                    plan.note("change", "category", new_name, f"  Kategorie würde umbenannt: {old_name} → {new_name}")
+                    plan.renamed_categories[new_name] = old_category
         return True
 
     await migrate("category_renames_v1", rename_old_categories)
@@ -4130,14 +4185,14 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
     roles = managed_roles(guild)
     for name in ROLE_NAMES:
         if name in roles:
-            print(f"  Rolle vorhanden: {name}")
+            plan.say(f"  Rolle vorhanden: {name}")
         elif apply:
             role = await guild.create_role(name=name, reason="Duality Mannheim Setup")
             roles[name] = role
             remember_id(guild.id, "role", name, role.id)
-            print(f"  Rolle erstellt: {name}")
+            plan.note("create", "role", name, f"  Rolle erstellt: {name}")
         else:
-            print(f"  Rolle würde erstellt: {name}")
+            plan.note("create", "role", name, f"  Rolle würde erstellt: {name}")
 
     async def migrate_lft_role() -> bool:
         legacy_lft_role = discord.utils.get(guild.roles, name="LFT")
@@ -4153,9 +4208,9 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 if applicant_role not in member.roles and player_role not in member.roles:
                     await member.add_roles(applicant_role, reason="Bisherige LFT-Bewerbung auf Bewerber umgestellt")
                 await member.remove_roles(legacy_lft_role, reason="Duality Mannheim verwendet keine LFT-Rolle mehr")
-            print(f"  Alte LFT-Zuweisungen auf Bewerber umgestellt oder entfernt: {len(old_lft_members)}")
+            plan.note("change", "member", "LFT", f"  Alte LFT-Zuweisungen auf Bewerber umgestellt oder entfernt: {len(old_lft_members)}")
         elif old_lft_members:
-            print(f"  Alte LFT-Zuweisungen würden auf Bewerber umgestellt oder entfernt: {len(old_lft_members)}")
+            plan.note("change", "member", "LFT", f"  Alte LFT-Zuweisungen würden auf Bewerber umgestellt oder entfernt: {len(old_lft_members)}")
         return True
 
     await migrate("lft_to_bewerber_v1", migrate_lft_role)
@@ -4172,7 +4227,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
         if not old_announcements:
             return True
         if not apply:
-            print("  Kanal würde entfernt: #announcements")
+            plan.note("delete", "channel", "#announcements", "  Kanal würde entfernt: #announcements")
             return False
         try:
             await old_announcements.delete(
@@ -4187,12 +4242,13 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             if guild.public_updates_channel and guild.public_updates_channel.id == old_announcements.id:
                 required_as.append("Community-Updates-Kanal")
             purpose = " und ".join(required_as) if required_as else "Pflichtkanal des Community-Servers"
-            print(
+            plan.note(
+                "info", "channel", "#announcements",
                 f"  #announcements bleibt bestehen: Discord verwendet ihn noch als {purpose}. "
-                "Ändere die Zuordnung unter Servereinstellungen → Community → Übersicht und starte --apply erneut."
+                "Ändere die Zuordnung unter Servereinstellungen → Community → Übersicht und starte --apply erneut.",
             )
             return False
-        print("  Überflüssigen Kanal entfernt: #announcements")
+        plan.note("delete", "channel", "#announcements", "  Überflüssigen Kanal entfernt: #announcements")
         return True
 
     await migrate("remove_announcements_v1", remove_old_announcements)
@@ -4204,9 +4260,9 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 await old_valorant_announcements.delete(
                     reason="Duality Mannheim nutzt den zentralen Ankündigungskanal"
                 )
-                print("  Überflüssigen Kanal entfernt: #valo-announcements")
+                plan.note("delete", "channel", "#valo-announcements", "  Überflüssigen Kanal entfernt: #valo-announcements")
             else:
-                print("  Kanal würde entfernt: #valo-announcements")
+                plan.note("delete", "channel", "#valo-announcements", "  Kanal würde entfernt: #valo-announcements")
         return True
 
     await migrate("remove_valo_announcements_v1", remove_old_valorant_announcements)
@@ -4217,11 +4273,12 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             if apply:
                 for old_channel in list(old_tryout_category.channels):
                     await old_channel.delete(reason="Duality Mannheim entfernt Tryout-Kanäle")
-                    print(f"  Alten Kanal entfernt: {old_channel.name}")
+                    plan.note("delete", "channel", old_channel.name, f"  Alten Kanal entfernt: {old_channel.name}")
                 await old_tryout_category.delete(reason="Duality Mannheim entfernt Tryout-Kategorie")
-                print("  Alte Kategorie entfernt: 🧪 TRYOUTS")
+                plan.note("delete", "category", "🧪 TRYOUTS", "  Alte Kategorie entfernt: 🧪 TRYOUTS")
             else:
-                print("  Alte Tryout-Kategorie und alle darin liegenden Kanäle würden entfernt")
+                plan.say("  Alte Tryout-Kategorie und alle darin liegenden Kanäle würden entfernt")
+                plan.note_category_removal(old_tryout_category)
         return True
 
     await migrate("remove_tryouts_v1", remove_old_tryout_category)
@@ -4232,11 +4289,12 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             if apply:
                 for old_channel in list(old_training_category.channels):
                     await old_channel.delete(reason="Duality Mannheim entfernt Training- und Scrim-Bereich")
-                    print(f"  Alten Training-/Scrim-Kanal entfernt: {old_channel.name}")
+                    plan.note("delete", "channel", old_channel.name, f"  Alten Training-/Scrim-Kanal entfernt: {old_channel.name}")
                 await old_training_category.delete(reason="Duality Mannheim entfernt Training- und Scrim-Bereich")
-                print("  Alte Kategorie entfernt: 🏆 TRAINING & SCRIMS")
+                plan.note("delete", "category", "🏆 TRAINING & SCRIMS", "  Alte Kategorie entfernt: 🏆 TRAINING & SCRIMS")
             else:
-                print("  Training-/Scrim-Kategorie und alle darin enthaltenen Kanäle würden entfernt")
+                plan.say("  Training-/Scrim-Kategorie und alle darin enthaltenen Kanäle würden entfernt")
+                plan.note_category_removal(old_training_category)
         return True
 
     await migrate("remove_training_scrims_v1", remove_old_training_category)
@@ -4249,9 +4307,9 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 continue
             if apply:
                 await old_voice_channel.delete(reason="Duality Mannheim entfernt nicht mehr gewünschte Legion-/Radiants-Voice-Channels")
-                print(f"  Unerwünschten Voice-Channel entfernt: {old_voice_channel.name}")
+                plan.note("delete", "channel", old_voice_channel.name, f"  Unerwünschten Voice-Channel entfernt: {old_voice_channel.name}")
             else:
-                print(f"  Voice-Channel würde entfernt: {old_voice_channel.name}")
+                plan.note("delete", "channel", old_voice_channel.name, f"  Voice-Channel würde entfernt: {old_voice_channel.name}")
         return True
 
     await migrate("remove_legion_radiants_voice_v1", remove_unwanted_voice_channels)
@@ -4267,23 +4325,32 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
         expected_overwrites = category_overwrites(guild, roles, config["roles"])
         if category is None:
             if not apply:
-                print(f"  Kategorie würde erstellt: {name}")
+                # Eine Kategorie, die nur umbenannt würde, ist im Diff nicht neu; nur fehlende Kanäle sind es.
+                renamed = plan.renamed_categories.get(name)
+                renamed_channels = {channel.name for channel in renamed.channels} if renamed else set()
+                if renamed:
+                    plan.say(f"  Kategorie würde erstellt: {name}")
+                else:
+                    plan.note("create", "category", name, f"  Kategorie würde erstellt: {name}")
                 for kind, channel_name in config["channels"]:
-                    print(f"    {kind.capitalize()}-Kanal würde erstellt: {channel_name}")
+                    if channel_name in renamed_channels or stored_channel(guild, "channel", channel_name):
+                        plan.say(f"    {kind.capitalize()}-Kanal würde erstellt: {channel_name}")
+                    else:
+                        plan.note("create", "channel", channel_name, f"    {kind.capitalize()}-Kanal würde erstellt: {channel_name}")
                 continue
             category = await guild.create_category(
                 name, overwrites=expected_overwrites, reason="Duality Mannheim Setup"
             )
             category_lookup[name] = category
             remember_id(guild.id, "category", name, category.id)
-            print(f"  Kategorie erstellt: {name}")
+            plan.note("create", "category", name, f"  Kategorie erstellt: {name}")
         elif not sync_permissions:
-            print(f"  Kategorie vorhanden: {name}")
+            plan.say(f"  Kategorie vorhanden: {name}")
         elif apply:
             await category.edit(overwrites=expected_overwrites, reason="Duality Mannheim Rollen-Zugänge")
-            print(f"  Kategorie-Berechtigungen gesetzt: {name}")
+            plan.note("change", "permissions", name, f"  Kategorie-Berechtigungen gesetzt: {name}")
         else:
-            print(f"  Kategorie vorhanden: {name}; Zugänge würden aktualisiert")
+            plan.note("change", "permissions", name, f"  Kategorie vorhanden: {name}; Zugänge würden aktualisiert")
 
         existing = {channel.name: channel for channel in category.channels}
         if name == "💬 LOUNGE" and not migration_applied(guild.id, "lounge_general_v1"):
@@ -4293,16 +4360,16 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                     await old_general.edit(name="allgemein", reason="Duality Mannheim: allgemeiner Chat auf Deutsch")
                     existing.pop("general")
                     existing["allgemein"] = old_general
-                    print("    Kanal umbenannt: general → allgemein")
+                    plan.note("change", "channel", "allgemein", "    Kanal umbenannt: general → allgemein")
                 else:
-                    print("    Kanal würde umbenannt: general → allgemein")
+                    plan.note("change", "channel", "allgemein", "    Kanal würde umbenannt: general → allgemein")
             elif old_general:
                 if apply:
                     await old_general.delete(reason="Duality Mannheim entfernt doppelten #general-Kanal")
                     existing.pop("general")
-                    print("    Doppelter Kanal entfernt: general")
+                    plan.note("delete", "channel", "general", "    Doppelter Kanal entfernt: general")
                 else:
-                    print("    Doppelter Kanal general würde entfernt")
+                    plan.note("delete", "channel", "general", "    Doppelter Kanal general würde entfernt")
             if apply:
                 mark_migration_applied(guild.id, "lounge_general_v1")
 
@@ -4316,11 +4383,11 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                     )
                     existing.pop("looking-for-team")
                     existing["bewerber-chat"] = old_applicant_chat
-                    print("    Kanal umbenannt: looking-for-team → bewerber-chat")
+                    plan.note("change", "channel", "bewerber-chat", "    Kanal umbenannt: looking-for-team → bewerber-chat")
                 else:
-                    print("    Kanal würde umbenannt: looking-for-team → bewerber-chat")
+                    plan.note("change", "channel", "bewerber-chat", "    Kanal würde umbenannt: looking-for-team → bewerber-chat")
             elif old_applicant_chat:
-                print("    Alter Kanal looking-for-team bleibt bestehen, da bewerber-chat bereits existiert")
+                plan.note("info", "channel", "looking-for-team", "    Alter Kanal looking-for-team bleibt bestehen, da bewerber-chat bereits existiert")
             if apply:
                 mark_migration_applied(guild.id, "applicant_chat_rename_v1")
 
@@ -4331,18 +4398,23 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             if channel:
                 remember_id(guild.id, "channel", channel_name, channel.id)
                 if not sync_permissions:
-                    print(f"    Kanal vorhanden: {channel_name}")
+                    plan.say(f"    Kanal vorhanden: {channel_name}")
                 elif apply and channel_name in SPECIAL_CHANNEL_OVERWRITES:
                     await channel.edit(
                         overwrites=SPECIAL_CHANNEL_OVERWRITES[channel_name](guild, roles),
                         reason="Duality Mannheim Kanal-Zugänge",
                     )
-                    print(f"    Eigene Zugänge gesetzt: {channel_name}")
+                    plan.note("change", "permissions", channel_name, f"    Eigene Zugänge gesetzt: {channel_name}")
                 elif apply and not channel.permissions_synced:
                     await channel.edit(sync_permissions=True, reason="Duality Mannheim Kategorie-Zugänge")
-                    print(f"    Kanal an Kategorie-Zugänge angepasst: {channel_name}")
+                    plan.note("change", "permissions", channel_name, f"    Kanal an Kategorie-Zugänge angepasst: {channel_name}")
                 else:
-                    print(f"    Kanal vorhanden: {channel_name}")
+                    plan.say(f"    Kanal vorhanden: {channel_name}")
+                    # Die Vorschau hat das nie ausgegeben; im Diff soll es trotzdem stehen.
+                    if not apply and channel_name in SPECIAL_CHANNEL_OVERWRITES:
+                        plan.note("change", "permissions", channel_name, detail=f"Eigene Zugänge würden gesetzt: {channel_name}")
+                    elif not apply and not channel.permissions_synced:
+                        plan.note("change", "permissions", channel_name, detail=f"Kanal würde an Kategorie-Zugänge angepasst: {channel_name}")
             elif apply:
                 if kind == "voice":
                     channel = await guild.create_voice_channel(channel_name, category=category, reason="Duality Mannheim Setup")
@@ -4356,20 +4428,20 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 else:
                     channel = await guild.create_text_channel(channel_name, category=category, reason="Duality Mannheim Setup")
                 remember_id(guild.id, "channel", channel_name, channel.id)
-                print(f"    {kind.capitalize()}-Kanal erstellt: {channel_name}")
+                plan.note("create", "channel", channel_name, f"    {kind.capitalize()}-Kanal erstellt: {channel_name}")
             else:
-                print(f"    {kind.capitalize()}-Kanal würde erstellt: {channel_name}")
+                plan.note("create", "channel", channel_name, f"    {kind.capitalize()}-Kanal würde erstellt: {channel_name}")
 
     if apply and sync_permissions:
         mark_migration_applied(guild.id, permissions_key)
-        print(f"  Rechte-Version {PERMISSIONS_VERSION} gespeichert; Neustarts lassen manuelle Rechte unverändert")
+        plan.say(f"  Rechte-Version {PERMISSIONS_VERSION} gespeichert; Neustarts lassen manuelle Rechte unverändert")
 
     async def import_legacy_applications() -> bool:
         staff_channel = find_text_channel(guild, "bewerbungen")
         if staff_channel is None:
             return False
         if not apply:
-            print("  Bestehende Bewerbungen würden in die Datenbank übernommen")
+            plan.note("change", "data", "Bewerbungen", "  Bestehende Bewerbungen würden in die Datenbank übernommen")
             return False
         imported = 0
         async for message in staff_channel.history(limit=None):
@@ -4379,7 +4451,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             if application:
                 save_application(application)
                 imported += 1
-        print(f"  {imported} bestehende Bewerbungen in die Datenbank übernommen")
+        plan.note("change", "data", "Bewerbungen", f"  {imported} bestehende Bewerbungen in die Datenbank übernommen")
         return True
 
     await migrate("applications_to_db_v1", import_legacy_applications)
@@ -4394,12 +4466,14 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 await show_application(message, application)
             except discord.HTTPException:
                 log.warning("Offene Bewerbung %s konnte nicht aktualisiert werden", application.message_id)
-        print("  Offene Bewerbungen haben jetzt Abstimm-Buttons")
+        plan.note("change", "message", "#bewerbungen", "  Offene Bewerbungen haben jetzt Abstimm-Buttons")
         return True
 
     await migrate("application_vote_buttons_v1", add_vote_buttons_to_open_applications)
 
     tickets_channel = find_text_channel(guild, "tickets")
+    if not apply and tickets_channel:
+        await plan.note_message(guild, tickets_channel, {TICKETS_MARKER}, "Ticket-Nachricht")
     if apply and tickets_channel:
         tickets_embed = discord.Embed(
             title="Tickets an den Staff",
@@ -4416,13 +4490,16 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
         async for message in tickets_channel.history(limit=50):
             if message.author == guild.me and message.embeds and message.embeds[0].footer.text == TICKETS_MARKER:
                 await message.edit(embed=tickets_embed, view=TicketStartView())
+                plan.note("change", "message", "#tickets", detail="Ticket-Nachricht in #tickets aktualisiert")
                 found_tickets_message = True
                 break
         if not found_tickets_message:
             await tickets_channel.send(embed=tickets_embed, view=TicketStartView())
-            print("  Ticket-Start in #tickets veröffentlicht")
+            plan.note("create", "message", "#tickets", "  Ticket-Start in #tickets veröffentlicht")
 
     application_channel = find_text_channel(guild, "bewerbung")
+    if not apply and application_channel:
+        await plan.note_message(guild, application_channel, TEXT_MESSAGES["application_info"][1], "Bewerbungsnachricht")
     if apply and application_channel:
         embed = application_message_embed()
         found_application_message = False
@@ -4431,14 +4508,16 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 marker = message.embeds[0].footer.text
                 if marker in {"DUALITY_ONBOARDING_V1", "DUALITY_ONBOARDING_V2", APPLICATION_MARKER}:
                     await message.edit(embed=embed, view=OnboardingView())
-                    print("  Bewerbungsnachricht in #bewerbung aktualisiert")
+                    plan.note("change", "message", "#bewerbung", "  Bewerbungsnachricht in #bewerbung aktualisiert")
                     found_application_message = True
                     break
         if not found_application_message:
             await application_channel.send(embed=embed, view=OnboardingView())
-            print("  Bewerbungsstart in #bewerbung veröffentlicht")
+            plan.note("create", "message", "#bewerbung", "  Bewerbungsstart in #bewerbung veröffentlicht")
 
     rules_channel = find_text_channel(guild, "regeln")
+    if not apply and rules_channel:
+        await plan.note_message(guild, rules_channel, {RULES_MARKER}, "Regelwerk")
     if apply and rules_channel:
         rules_embed = rules_message_embed()
         found_rules_message = False
@@ -4446,20 +4525,26 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             if message.author == guild.me and message.embeds:
                 if message.embeds[0].footer.text == RULES_MARKER:
                     await message.edit(embed=rules_embed)
-                    print("  Regelwerk in #regeln aktualisiert")
+                    plan.note("change", "message", "#regeln", "  Regelwerk in #regeln aktualisiert")
                     found_rules_message = True
                     break
         if not found_rules_message:
             await rules_channel.send(embed=rules_embed)
-            print("  Regelwerk in #regeln veröffentlicht")
+            plan.note("create", "message", "#regeln", "  Regelwerk in #regeln veröffentlicht")
 
     welcome = find_text_channel(guild, "willkommen")
+    if not apply and welcome:
+        old_markers = {"DUALITY_ONBOARDING_V1", "DUALITY_ONBOARDING_V2", APPLICATION_MARKER}
+        async for message in welcome.history(limit=50):
+            if message.author == guild.me and message.embeds and message.embeds[0].footer.text in old_markers:
+                plan.note("delete", "message", "#willkommen", detail="Alte Bewerbungsnachricht aus #willkommen würde entfernt")
+        await plan.note_message(guild, welcome, {WELCOME_MARKER}, "Willkommensnachricht")
     if apply and welcome:
         old_markers = {"DUALITY_ONBOARDING_V1", "DUALITY_ONBOARDING_V2", APPLICATION_MARKER}
         async for message in welcome.history(limit=50):
             if message.author == guild.me and message.embeds and message.embeds[0].footer.text in old_markers:
                 await message.delete()
-                print("  Alte Bewerbungsnachricht aus #willkommen entfernt")
+                plan.note("delete", "message", "#willkommen", "  Alte Bewerbungsnachricht aus #willkommen entfernt")
 
         welcome_embed = welcome_message_embed()
         found_welcome_message = False
@@ -4467,12 +4552,13 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             if message.author == guild.me and message.embeds:
                 if message.embeds[0].footer.text == WELCOME_MARKER:
                     await message.edit(embed=welcome_embed, view=NotificationView())
-                    print("  Willkommensnachricht in #willkommen aktualisiert")
+                    plan.note("change", "message", "#willkommen", "  Willkommensnachricht in #willkommen aktualisiert")
                     found_welcome_message = True
                     break
         if not found_welcome_message:
             await welcome.send(embed=welcome_embed, view=NotificationView())
-            print("  Willkommensnachricht in #willkommen veröffentlicht")
+            plan.note("create", "message", "#willkommen", "  Willkommensnachricht in #willkommen veröffentlicht")
+    return plan.changes
 
 
 async def main(apply: bool) -> int | None:
@@ -4673,7 +4759,7 @@ async def main(apply: bool) -> int | None:
             return
         if not setup_complete:
             print(f"Server gefunden: {guild.name}. Richte Serverstruktur ein ...", flush=True)
-            await setup_guild(guild, apply)
+            await run_setup(guild, apply)
             setup_complete = True
         if apply:
             if not existing_events_registered:
@@ -4745,6 +4831,8 @@ async def main(apply: bool) -> int | None:
                     reopen_applications=reopen_applications,
                     list_profiles=list_profiles,
                     list_tickets=list_tickets,
+                    setup_guild=setup_guild,
+                    setup_lock=SETUP_LOCK,
                     build_data_export=build_data_export,
                     collect_user_data=collect_user_data,
                     delete_user_data=delete_user_data,

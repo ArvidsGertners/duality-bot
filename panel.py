@@ -221,6 +221,7 @@ def json_error(status: int, message: str) -> web.HTTPException:
         400: web.HTTPBadRequest,
         401: web.HTTPUnauthorized,
         403: web.HTTPForbidden,
+        409: web.HTTPConflict,
         429: web.HTTPTooManyRequests,
         503: web.HTTPServiceUnavailable,
     }[status]
@@ -609,6 +610,10 @@ class PanelHooks:
     list_profiles: Callable[[int], list]
     # Tickets: (Thread, meldende Person, erstellt, geschlossen); Inhalte bleiben im Thread.
     list_tickets: Callable[[int], list[tuple[int, int, int, int | None]]]
+    # Server-Setup (B3): setup_guild(guild, apply, echo) → Liste von main.SetupChange; der Lock verhindert
+    # gleichzeitige Läufe (Panel holt ihn selbst, damit Vorschau und Anwenden zusammen geschützt sind)
+    setup_guild: Callable[..., Awaitable[list]]
+    setup_lock: asyncio.Lock
     # Datenschutz (E1): dieselbe Auskunft wie /meine-daten, Löschung wie dort
     build_data_export: Callable[[discord.Guild, int], Awaitable[dict]]
     collect_user_data: Callable[[int, int], dict]
@@ -702,6 +707,8 @@ class Panel:
             web.post("/api/announcements", self.api_create_announcement),
             web.post("/api/announcements/{announcement_id}", self.api_edit_announcement),
             web.delete("/api/announcements/{announcement_id}", self.api_delete_announcement),
+            web.get("/api/setup/preview", self.api_setup_preview),
+            web.post("/api/setup/apply", self.api_setup_apply),
             web.get("/api/privacy/search", self.api_privacy_search),
             web.get("/api/privacy/{user_id}", self.api_privacy_export),
             web.post("/api/privacy/{user_id}/delete", self.api_privacy_delete),
@@ -1404,6 +1411,69 @@ class Panel:
             raise json_error(400, "Gesendete Ankündigungen lassen sich hier nicht löschen.")
         await self.audit_action(member, f"hat eine geplante Ankündigung für <#{announcement.channel_id}> gelöscht")
         return web.json_response({"message": "Geplante Ankündigung gelöscht."})
+
+    @staticmethod
+    def setup_json(changes: list) -> dict:
+        counts = {action: 0 for action in ("create", "change", "delete", "info")}
+        for change in changes:
+            counts[change.action] = counts.get(change.action, 0) + 1
+        return {
+            "changes": [
+                {"action": change.action, "kind": change.kind, "target": change.target, "text": change.text}
+                for change in changes
+            ],
+            "counts": counts,
+        }
+
+    async def api_setup_preview(self, request: web.Request) -> web.Response:
+        self.authenticate(request, ADMIN)
+        if self.hooks.setup_lock.locked():
+            raise json_error(409, "Das Setup läuft gerade. Bitte gleich noch einmal versuchen.")
+        try:
+            async with self.hooks.setup_lock:
+                changes = await self.hooks.setup_guild(self.guild(), False, echo=False)
+        except discord.HTTPException:
+            log.exception("Setup-Vorschau ist fehlgeschlagen")
+            return web.json_response({"error": "Discord hat eine Abfrage abgelehnt. Details stehen im Log."}, status=502)
+        return web.json_response(self.setup_json(changes))
+
+    async def api_setup_apply(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, OWNER)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or body.get("confirm") is not True or not isinstance(body.get("deletions"), int):
+            raise json_error(400, "Das Anwenden muss mit der Zahl der Löschungen bestätigt werden.")
+        if self.hooks.setup_lock.locked():
+            raise json_error(409, "Das Setup läuft gerade. Bitte gleich noch einmal versuchen.")
+        guild = self.guild()
+        try:
+            async with self.hooks.setup_lock:
+                # Erst neu prüfen: Hat sich seit der Bestätigung etwas geändert, wird nichts angewendet.
+                preview = await self.hooks.setup_guild(guild, False, echo=False)
+                deletions = sum(change.action == "delete" for change in preview)
+                if deletions != body["deletions"]:
+                    return web.json_response(
+                        {"error": f"Die Vorschau hat sich geändert (jetzt {deletions} Löschungen). Bitte neu prüfen.", **self.setup_json(preview)},
+                        status=409,
+                    )
+                log.info("Panel: %s (%s) wendet das Server-Setup an", member, member.id)
+                changes = await self.hooks.setup_guild(guild, True, echo=True)
+        except discord.HTTPException:
+            log.exception("Server-Setup aus dem Panel ist fehlgeschlagen")
+            await self.audit_action(member, "hat das Server-Setup angewendet; es brach mit einem Fehler ab (Details im Log)")
+            return web.json_response(
+                {"error": "Discord hat eine Änderung abgelehnt; das Setup wurde nur teilweise angewendet. Details stehen im Log."},
+                status=502,
+            )
+        result = self.setup_json(changes)
+        counts = result["counts"]
+        await self.audit_action(
+            member,
+            f"hat das Server-Setup angewendet: {counts['create']} neu, {counts['change']} geändert, {counts['delete']} gelöscht",
+        )
+        return web.json_response(result)
 
     def stored_count(self, user_id: int) -> int:
         return sum(len(rows) for rows in self.hooks.collect_user_data(self.hooks.guild_id, user_id).values())

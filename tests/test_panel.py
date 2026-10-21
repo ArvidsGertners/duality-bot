@@ -156,6 +156,8 @@ def make_hooks(client=None) -> panel.PanelHooks:
         reopen_applications=mock.AsyncMock(return_value=3),
         list_profiles=lambda guild_id: [],
         list_tickets=lambda guild_id: [],
+        setup_guild=mock.AsyncMock(return_value=[]),
+        setup_lock=asyncio.Lock(),
         build_data_export=mock.AsyncMock(return_value={"server": "Duality Test", "nutzer_id": 1, "daten": {"profil": [{"riot_name": "Geheim"}]}}),
         collect_user_data=lambda guild_id, user_id: {"profil": [{}], "tickets": [{}, {}]} if user_id == PLAYER_ID else {"profil": []},
         delete_user_data=mock.Mock(),
@@ -1474,6 +1476,66 @@ class PrivacyPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 502)
         self.hooks.delete_user_data.assert_not_called()
         self.hooks.audit.assert_not_awaited()
+
+
+def setup_changes(deletions: int) -> list:
+    return [main.SetupChange("create", "role", "Coach", "Rolle würde erstellt: Coach")] + [
+        main.SetupChange("delete", "channel", f"alt-{number}", f"Kanal würde entfernt: alt-{number}") for number in range(deletions)
+    ]
+
+
+class SetupPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.hooks.setup_guild = mock.AsyncMock(side_effect=lambda guild, apply, echo=True: setup_changes(2))
+        self.client = TestClient(TestServer(panel.Panel(CONFIG, self.hooks).build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def apply(self, body, user_id: int = OWNER_ID):
+        session, cookie = session_cookie(user_id)
+        return await self.client.post("/api/setup/apply", json=body, headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]})
+
+    async def test_preview(self):
+        _, cookie = session_cookie(COACH_ID)
+        self.assertEqual((await self.client.get("/api/setup/preview", headers={"Cookie": cookie})).status, 403)
+        _, cookie = session_cookie(ADMIN_ID)
+        data = await (await self.client.get("/api/setup/preview", headers={"Cookie": cookie})).json()
+        self.assertEqual(data["counts"], {"create": 1, "change": 0, "delete": 2, "info": 0})
+        self.assertEqual(self.hooks.setup_guild.await_args.args[1:], (False,))
+        self.assertFalse(self.hooks.setup_guild.await_args.kwargs["echo"])
+
+    async def test_apply_only_owner_with_matching_deletions(self):
+        self.assertEqual((await self.apply({"confirm": True, "deletions": 2}, ADMIN_ID)).status, 403)
+        self.assertEqual((await self.apply({"confirm": True})).status, 400)
+        self.assertEqual((await self.apply({"deletions": 2})).status, 400)
+        self.hooks.setup_guild.assert_not_awaited()
+        response = await self.apply({"confirm": True, "deletions": 1})
+        self.assertEqual(response.status, 409)
+        self.assertIn("jetzt 2 Löschungen", (await response.json())["error"])
+        self.assertEqual([call.args[1] for call in self.hooks.setup_guild.await_args_list], [False])
+        response = await self.apply({"confirm": True, "deletions": 2})
+        self.assertEqual((await response.json())["counts"]["delete"], 2)
+        self.assertEqual([call.args[1] for call in self.hooks.setup_guild.await_args_list], [False, False, True])
+        self.assertIn("1 neu, 0 geändert, 2 gelöscht", self.hooks.audit.await_args.args[1])
+
+    async def test_locked_and_failing(self):
+        async with self.hooks.setup_lock:
+            self.assertEqual((await self.apply({"confirm": True, "deletions": 2})).status, 409)
+        calls = 0
+
+        async def failing(guild, apply, echo=True):
+            nonlocal calls
+            calls += 1
+            if apply:
+                raise discord.HTTPException(mock.Mock(status=403, reason="x"), "fehlt")
+            return setup_changes(0)
+
+        self.hooks.setup_guild = failing
+        response = await self.apply({"confirm": True, "deletions": 0})
+        self.assertEqual(response.status, 502)
+        self.assertIn("Fehler", self.hooks.audit.await_args.args[1])
+        self.assertFalse(self.hooks.setup_lock.locked())
 
 
 if __name__ == "__main__":

@@ -264,6 +264,17 @@ tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .embed-preview .embed-field-name { font-weight: 700; }
 .embed-preview .embed-footer { font-size: .75rem; color: #b5bac1; margin-top: .5rem; }
 
+/* Server-Setup */
+.setup-group { margin-bottom: 1rem; }
+.setup-group h2 { display: flex; align-items: center; gap: .5rem; }
+.setup-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .25rem; }
+.setup-group li { display: flex; gap: .6rem; align-items: baseline; padding: .3rem .5rem; border-radius: 6px; }
+.setup-group .kind { min-width: 6.5rem; color: var(--muted); font-size: .8rem; }
+.setup-delete { border-color: var(--danger); }
+.setup-delete li { background: #2a0f15; }
+.setup-create li { background: #0f2a1e; }
+.setup-change li { background: #2a230f; }
+
 /* Datenschutz */
 #privacy-results { padding: .75rem; }
 #privacy-json { max-height: 24rem; }

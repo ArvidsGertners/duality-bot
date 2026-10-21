@@ -30,6 +30,7 @@ const state = {
   announcementData: null,
   editingAnnouncement: null,
   privacyUser: null,
+  setupPreview: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -962,6 +963,80 @@ async function deleteAnnouncement(entry) {
   }
 }
 
+/* Server-Setup */
+
+const SETUP_GROUPS = [
+  ["delete", "Löschen", "bad"],
+  ["create", "Neu", "ok"],
+  ["change", "Ändern", "warn"],
+  ["info", "Hinweise", "neutral"],
+];
+const SETUP_KINDS = {
+  role: "Rolle", category: "Kategorie", channel: "Kanal", permissions: "Rechte", message: "Nachricht", member: "Mitglieder", data: "Daten",
+};
+
+function renderSetup(result, heading = null) {
+  const groups = [];
+  if (heading) {
+    const title = document.createElement("h2");
+    title.textContent = heading;
+    groups.push(title);
+  }
+  for (const [action, label, kind] of SETUP_GROUPS) {
+    const changes = result.changes.filter((change) => change.action === action);
+    if (!changes.length) continue;
+    const card = document.createElement("article");
+    card.className = `card setup-group setup-${action}`;
+    const title = document.createElement("h2");
+    title.append(pill(String(changes.length), kind), label);
+    const list = document.createElement("ul");
+    for (const change of changes) list.append(listItem(span("kind", SETUP_KINDS[change.kind] || change.kind), change.text));
+    card.append(title, list);
+    groups.push(card);
+  }
+  if (!result.changes.length) groups.push(span("muted", "Nichts zu tun: Der Server entspricht der Einrichtung."));
+  $("#setup-groups").replaceChildren(...groups);
+  const { create, change, delete: deletions } = result.counts;
+  $("#setup-summary").textContent = `${create} neu · ${change} ändern · ${deletions} löschen`;
+}
+
+async function loadSetup() {
+  $("#setup-error").textContent = "";
+  $("#setup-summary").textContent = "Vorschau wird berechnet …";
+  $("#setup-apply").disabled = true;
+  try {
+    state.setupPreview = await api("/api/setup/preview");
+    renderSetup(state.setupPreview);
+    $("#setup-apply").disabled = !state.setupPreview.changes.some((change) => change.action !== "info");
+  } catch (error) {
+    $("#setup-summary").textContent = "";
+    $("#setup-error").textContent = error.message;
+  }
+}
+
+async function applySetup() {
+  const { create, change, delete: deletions } = state.setupPreview.counts;
+  const warning = deletions
+    ? `Achtung: ${deletions} ${deletions === 1 ? "Löschung" : "Löschungen"}. Gelöschte Kanäle samt Nachrichten lassen sich nicht wiederherstellen.`
+    : "Es wird nichts gelöscht.";
+  const confirmed = await confirmAction(
+    `Das Setup wird jetzt am echten Server angewendet: ${create} neu, ${change} geändert, ${deletions} gelöscht. ${warning}`,
+    null,
+    deletions ? `Anwenden und ${deletions} löschen` : "Anwenden",
+  );
+  if (!confirmed) return;
+  $("#setup-apply").disabled = true;
+  $("#setup-summary").textContent = "Wird angewendet …";
+  try {
+    const result = await api("/api/setup/apply", { method: "POST", body: { confirm: true, deletions } });
+    renderSetup(result, "Ergebnis");
+    state.setupPreview = null;
+  } catch (error) {
+    $("#setup-error").textContent = error.message;
+    $("#setup-summary").textContent = "";
+  }
+}
+
 /* Datenschutz */
 
 const PRIVACY_LABELS = {
@@ -1250,7 +1325,7 @@ async function loadTickets() {
 const pageLoaders = {
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
   anwesenheit: loadAttendance, rangliste: loadRanking, einstellungen: loadSettings, texte: loadTexts,
-  ankuendigungen: loadAnnouncements,
+  ankuendigungen: loadAnnouncements, setup: loadSetup,
 };
 
 function renderVoice(channels) {
@@ -1559,6 +1634,8 @@ async function init() {
   for (const button of document.querySelectorAll("#page-anwesenheit button.sort")) {
     button.addEventListener("click", () => sortAttendance(button.dataset.sort));
   }
+  $("#setup-refresh").addEventListener("click", loadSetup);
+  $("#setup-apply").addEventListener("click", applySetup);
   $("#privacy-search-form").addEventListener("submit", searchPrivacy);
   $("#privacy-delete-form").addEventListener("submit", deletePrivacy);
   $("#announcement-form").addEventListener("submit", submitAnnouncement);
