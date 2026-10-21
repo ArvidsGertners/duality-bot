@@ -25,8 +25,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] B2 Datenbank-Backups (SQLite-Backup-API, Aufbewahrung, Download für Owner, Konsolenbefehl `backup`, Warnung `backup`) — fertig (6323545)
 - [x] B4 Live-Ansicht der Voice-Kanäle — fertig (1aae0e4)
 - [x] A3 Bewerbungen lesen + „Neue Saison“ — fertig (5d05767)
-- [x] A4 Spieler & Profile + „Rang jetzt abgleichen“ — fertig (Commit „Panel: Spieler und Profile …“)
-- [ ] A5 Tickets — offen
+- [x] A4 Spieler & Profile + „Rang jetzt abgleichen“ — fertig (d8e3a91)
+- [x] A5 Tickets — fertig (Commit „Panel: Tickets …“)
 
 ### Phase 3 – Team
 - [ ] Gemeinsame Termin-Funktion für `/termin` und Panel — offen
@@ -97,6 +97,9 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 - **A4 Spieler:** `/api/players?filter=players|all` (Coach+) aus `list_profiles()` (neu). Rolle in der Anzeige: Staff-Stufe, sonst Spieler/Bewerber/Mitglied, sonst „Nicht mehr auf dem Server“. Standard nur Spieler, Suche im Browser. „Rang abgleichen“ = `POST /api/players/<id>/sync-rank`, Admin+ (steuernd, wie in der Konsole), Audit, nutzt `sync_ranks_now`.
 
+- **A5 Tickets:** `/api/tickets?state=open|closed|all` (Coach+) aus `list_tickets()` (neu), nur meldende Person, Zeiten und Thread-Link, keine Inhalte.
+- Phase 2 im Browser mit Beispieldaten geprüft: Dashboard (Backups, Warnungen), Voice, Bewerbungen, Spieler (Rang-Knopf), Tickets, Backups; als Coach sind Backups, „Neue Saison“ und Rang-Knöpfe ausgeblendet.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -128,10 +131,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 _(noch keine)_
 
 ## Offene Fragen an Arvids
-- Echten Discord-Login testen: auf dem VPS nach dem Update (empfohlen, per SSH-Tunnel) oder lokal nur mit einem separaten Test-Bot/Test-Server, damit keine zweite Instanz des echten Bots läuft.
+- Soll ich für `ALERT_WEBHOOK_URL` einen Webhook in einem Staff-Kanal anlegen (z. B. `#staff-chat` oder `#audit-log`), oder legt Arvids ihn selbst an? Ohne Webhook gehen Warnungen nach `#audit-log`, aber nur, solange der Bot verbunden ist.
 
 ## Bekannte Probleme
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Nächstes Feature: A5 Tickets (offen/geschlossen aus `tickets`, Link zum Thread, keine Inhalte). Danach Browser-Check und Phase-2-Zusammenfassung. Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 2 ist fertig. Auf Arvids' OK für Phase 3 warten; VPS-Update vorschlagen (vorher fragen). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

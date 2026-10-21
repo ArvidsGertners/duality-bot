@@ -592,6 +592,8 @@ class PanelHooks:
     reopen_applications: Callable[[discord.Guild], Awaitable[int | None]]
     # Spieler-Profile (main.Profile)
     list_profiles: Callable[[int], list]
+    # Tickets: (Thread, meldende Person, erstellt, geschlossen); Inhalte bleiben im Thread.
+    list_tickets: Callable[[int], list[tuple[int, int, int, int | None]]]
 
 
 class Panel:
@@ -631,6 +633,7 @@ class Panel:
             web.get("/api/applications", self.api_applications),
             web.post("/api/applications/new-season", self.api_new_season),
             web.get("/api/players", self.api_players),
+            web.get("/api/tickets", self.api_tickets),
             web.post("/api/players/{user_id}/sync-rank", self.api_sync_player_rank),
             web.get("/api/backups", self.api_backups),
             web.post("/api/backups", self.api_create_backup),
@@ -1107,6 +1110,25 @@ class Panel:
             raise web.HTTPNotFound(text=json.dumps({"error": "Diese Person ist nicht auf dem Server."}), content_type="application/json")
         await self.audit_action(staff_member, f"hat den Rang von {member.mention} abgeglichen")
         return web.json_response({"message": await self.hooks.sync_ranks(guild, member)})
+
+    async def api_tickets(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        wanted = request.query.get("state", "open")
+        if wanted not in ("open", "closed", "all"):
+            raise json_error(400, "Unbekannter Filter.")
+        tickets = []
+        for thread_id, reporter_id, created_at, closed_at in self.hooks.list_tickets(guild.id):
+            if (wanted == "open" and closed_at) or (wanted == "closed" and not closed_at):
+                continue
+            tickets.append({
+                "thread_id": str(thread_id),
+                "reporter": self.person(guild, reporter_id),
+                "created_at": created_at,
+                "closed_at": closed_at,
+                "url": f"https://discord.com/channels/{guild.id}/{thread_id}",
+            })
+        return web.json_response({"tickets": tickets})
 
     async def api_new_season(self, request: web.Request) -> web.Response:
         _, member, _ = self.authenticate(request, ADMIN)

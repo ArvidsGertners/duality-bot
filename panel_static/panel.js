@@ -371,7 +371,23 @@ async function syncPlayerRank(player, button) {
   }
 }
 
-const pageLoaders = { backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers };
+async function loadTickets() {
+  const filter = $("#ticket-filter").value;
+  const { tickets } = await api(`/api/tickets?state=${filter}`);
+  const rows = tickets.map((ticket) => tableRow(
+    personCell(ticket.reporter),
+    ticket.closed_at ? pill("Geschlossen", "neutral") : pill("Offen", "warn"),
+    formatTime(ticket.created_at),
+    formatTime(ticket.closed_at),
+    discordLink(ticket.url, "Thread öffnen"),
+  ));
+  $("#ticket-list").replaceChildren(...(rows.length ? rows : [emptyRow(5, "Keine Tickets.")]));
+  $("#ticket-count").textContent = `${rows.length} ${rows.length === 1 ? "Ticket" : "Tickets"}`;
+}
+
+const pageLoaders = {
+  backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets,
+};
 
 function renderVoice(channels) {
   state.voice = channels;
@@ -393,7 +409,7 @@ function renderVoice(channels) {
     const card = document.createElement("article");
     card.className = `card voice-channel${channel.members.length ? "" : " empty-channel"}`;
     const title = document.createElement("h2");
-    title.textContent = `🔊 ${channel.name}`;
+    title.textContent = channel.name;
     card.append(title);
     if (channel.temporary) card.append(pill(`Temporär · gehört ${channel.owner}`, "warn"));
     const list = document.createElement("ul");
@@ -669,6 +685,7 @@ async function init() {
   $("#new-season").addEventListener("click", startNewSeason);
   $("#players-only").addEventListener("change", () => loadPlayers().catch((error) => setBanner(error.message)));
   $("#player-search").addEventListener("input", renderPlayers);
+  $("#ticket-filter").addEventListener("change", () => loadTickets().catch((error) => setBanner(error.message)));
   $("#log-search").addEventListener("input", renderLog);
   for (const box of document.querySelectorAll("input[name=log-level]")) box.addEventListener("change", renderLog);
   window.addEventListener("hashchange", showPage);

@@ -19,6 +19,7 @@
           <li><a href="#voice" data-page="voice" data-level="1">Voice</a></li>
           <li><a href="#bewerbungen" data-page="bewerbungen" data-level="1">Bewerbungen</a></li>
           <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
+          <li><a href="#tickets" data-page="tickets" data-level="1">Tickets</a></li>
           <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
         </ul>
       </nav>
@@ -126,6 +127,28 @@
               <tr><th scope="col">Person</th><th scope="col">Rolle</th><th scope="col">Riot-ID</th><th scope="col">Rang</th><th scope="col">Letzter Abgleich</th><th scope="col">Main-Rolle</th><th scope="col">Spielbar</th><th scope="col"><span class="visually-hidden">Aktion</span></th></tr>
             </thead>
             <tbody id="player-list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="page-tickets" class="page" aria-labelledby="title-tickets" hidden>
+        <h1 id="title-tickets">Tickets</h1>
+        <p class="muted">Die Inhalte stehen nur im privaten Thread in Discord; hier gibt es bewusst nur Status und Link.</p>
+        <div class="toolbar">
+          <label for="ticket-filter">Anzeigen</label>
+          <select id="ticket-filter">
+            <option value="open">Offene</option>
+            <option value="closed">Geschlossene</option>
+            <option value="all">Alle</option>
+          </select>
+          <span class="muted" id="ticket-count" role="status"></span>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead>
+              <tr><th scope="col">Gemeldet von</th><th scope="col">Status</th><th scope="col">Erstellt</th><th scope="col">Geschlossen</th><th scope="col">Thread</th></tr>
+            </thead>
+            <tbody id="ticket-list"></tbody>
           </table>
         </div>
       </section>

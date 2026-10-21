@@ -488,6 +488,15 @@ def save_ticket(thread_id: int, guild_id: int, reporter_id: int) -> None:
         )
 
 
+def list_tickets(guild_id: int) -> list[tuple[int, int, int, int | None]]:
+    """(Thread, meldende Person, erstellt, geschlossen), neueste zuerst."""
+    with open_db() as connection:
+        return connection.execute(
+            "SELECT thread_id, reporter_id, created_at, closed_at FROM tickets WHERE guild_id = ? ORDER BY created_at DESC",
+            (guild_id,),
+        ).fetchall()
+
+
 def get_ticket_reporter(thread_id: int) -> int | None:
     with open_db() as connection:
         row = connection.execute("SELECT reporter_id FROM tickets WHERE thread_id = ?", (thread_id,)).fetchone()
@@ -3699,6 +3708,7 @@ async def main(apply: bool) -> int | None:
                     application_labels=APPLICATION_STATUS_LABELS,
                     reopen_applications=reopen_applications,
                     list_profiles=list_profiles,
+                    list_tickets=list_tickets,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

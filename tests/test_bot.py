@@ -251,6 +251,19 @@ class ProfileQueryTests(unittest.TestCase):
             self.assertIsNone(profiles[101].riot_id)
 
 
+class TicketQueryTests(unittest.TestCase):
+    def test_list_tickets(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(main, "DATA_PATH", Path(directory) / "bot.sqlite3"):
+            main.initialize_storage()
+            with mock.patch.object(main.time, "time", return_value=1000):
+                main.save_ticket(1, 10, 100)
+            with mock.patch.object(main.time, "time", return_value=2000):
+                main.save_ticket(2, 10, 101)
+                main.close_ticket(1)
+            main.save_ticket(3, 11, 102)
+            self.assertEqual(main.list_tickets(10), [(2, 101, 2000, None), (1, 100, 1000, 2000)])
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):

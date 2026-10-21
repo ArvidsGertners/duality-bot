@@ -143,6 +143,7 @@ def make_hooks(client=None) -> panel.PanelHooks:
         application_labels=main.APPLICATION_STATUS_LABELS,
         reopen_applications=mock.AsyncMock(return_value=3),
         list_profiles=lambda guild_id: [],
+        list_tickets=lambda guild_id: [],
     )
 
 
@@ -1008,6 +1009,30 @@ class PlayerPanelTests(unittest.IsolatedAsyncioTestCase):
         for target in ("888888888888888888", "abc"):
             self.assertEqual((await self.sync(ADMIN_ID, target)).status, 404)
         self.hooks.sync_ranks.assert_awaited_once()
+
+
+class TicketPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.hooks.list_tickets = lambda guild_id: [(5002, PLAYER_ID, 2000, None), (5001, 777777777777777777, 1000, 1500)]
+        self.client = TestClient(TestServer(panel.Panel(CONFIG, self.hooks).build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def tickets(self, state: str | None = None):
+        _, cookie = session_cookie(COACH_ID)
+        query = f"?state={state}" if state else ""
+        return await self.client.get(f"/api/tickets{query}", headers={"Cookie": cookie})
+
+    async def test_filters_and_links(self):
+        open_tickets = (await (await self.tickets()).json())["tickets"]
+        self.assertEqual([ticket["thread_id"] for ticket in open_tickets], ["5002"])
+        self.assertEqual(open_tickets[0]["url"], "https://discord.com/channels/1/5002")
+        self.assertEqual(set(open_tickets[0]), {"thread_id", "reporter", "created_at", "closed_at", "url"})
+        closed = (await (await self.tickets("closed")).json())["tickets"]
+        self.assertEqual((closed[0]["thread_id"], closed[0]["closed_at"], closed[0]["reporter"]["on_server"]), ("5001", 1500, False))
+        self.assertEqual(len((await (await self.tickets("all")).json())["tickets"]), 2)
+        self.assertEqual((await self.tickets("kaputt")).status, 400)
 
 
 if __name__ == "__main__":
