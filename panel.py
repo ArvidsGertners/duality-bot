@@ -584,6 +584,12 @@ class PanelHooks:
     # Live-Ansicht: main.py ruft jeden Eintrag mit einem Thema auf (z. B. „voice“).
     listeners: list[Callable[[str], None]]
     temp_voice_owners: Callable[[int], dict[int, int]]
+    # Bewerbungen: nur Status, IDs und Zeiten; die Inhalte bleiben in der Discord-Nachricht.
+    find_text_channel: Callable[[discord.Guild, str], discord.TextChannel | None]
+    list_applications: Callable[[int], list]
+    application_vote_counts: Callable[[int], dict[int, tuple[int, int]]]
+    application_labels: dict[str, str]
+    reopen_applications: Callable[[discord.Guild], Awaitable[int | None]]
 
 
 class Panel:
@@ -620,6 +626,8 @@ class Panel:
             web.get("/api/me", self.api_me),
             web.get("/api/status", self.api_status),
             web.get("/api/voice", self.api_voice),
+            web.get("/api/applications", self.api_applications),
+            web.post("/api/applications/new-season", self.api_new_season),
             web.get("/api/backups", self.api_backups),
             web.post("/api/backups", self.api_create_backup),
             web.get("/api/backups/{name}", self.api_download_backup),
@@ -1014,6 +1022,63 @@ class Panel:
     async def api_voice(self, request: web.Request) -> web.Response:
         self.authenticate(request)
         return web.json_response({"channels": self.voice_snapshot()})
+
+    @staticmethod
+    def person(guild: discord.Guild, user_id: int | None) -> dict | None:
+        """Anzeigename und Avatar aus dem Cache; das Panel speichert dazu nichts."""
+        if user_id is None:
+            return None
+        member = guild.get_member(user_id)
+        if member is None:
+            return {"id": str(user_id), "name": f"Nicht mehr auf dem Server ({user_id})", "avatar": None, "on_server": False}
+        return {"id": str(user_id), "name": member.display_name, "avatar": member.display_avatar.url, "on_server": True}
+
+    async def api_applications(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        wanted = request.query.get("status", "all")
+        if wanted != "all" and wanted not in self.hooks.application_labels:
+            raise json_error(400, "Unbekannter Status.")
+        channel = self.hooks.find_text_channel(guild, "bewerbungen")
+        votes = self.hooks.application_vote_counts(guild.id)
+        applications = []
+        for application in self.hooks.list_applications(guild.id):
+            if wanted != "all" and application.status != wanted:
+                continue
+            yes, no = votes.get(application.message_id, (0, 0))
+            applications.append({
+                "message_id": str(application.message_id),
+                "applicant": self.person(guild, application.applicant_id),
+                "status": application.status,
+                "status_label": self.hooks.application_labels.get(application.status, application.status),
+                "submitted_at": application.submitted_at,
+                "decided_by": self.person(guild, application.decided_by),
+                "decided_at": application.decided_at,
+                "votes": {"yes": yes, "no": no},
+                "url": f"https://discord.com/channels/{guild.id}/{channel.id}/{application.message_id}" if channel else None,
+            })
+        return web.json_response({"applications": applications, "labels": self.hooks.application_labels})
+
+    async def api_new_season(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or body.get("confirm") is not True:
+            raise json_error(400, "Die neue Saison muss bestätigt werden.")
+        await self.audit_action(member, "hat die neue Saison gestartet (Bewerbungen wieder geöffnet)")
+        try:
+            reopened = await self.hooks.reopen_applications(self.guild())
+        except discord.HTTPException:
+            log.exception("Neue Saison aus dem Panel ist fehlgeschlagen")
+            return web.json_response(
+                {"error": "Nicht alle Bewerber-Rollen konnten entfernt werden. Prüfe die Rollen-Reihenfolge und versuche es erneut."},
+                status=502,
+            )
+        if reopened is None:
+            return web.json_response({"error": "Die Rolle „Bewerber“ wurde nicht gefunden."}, status=409)
+        return web.json_response({"reopened": reopened})
 
     def backup_summary(self) -> dict:
         try:

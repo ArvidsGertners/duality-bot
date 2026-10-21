@@ -202,6 +202,8 @@ th { color: var(--muted); font-weight: 600; font-size: .85rem; }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; margin-bottom: 1rem; }
 .empty { color: var(--muted); text-align: center; padding: 1rem; }
+.person { display: inline-flex; align-items: center; gap: .45rem; }
+.person img { border-radius: 50%; flex: none; }
 
 /* Voice */
 .voice-grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }

@@ -348,6 +348,29 @@ def applications_of(guild_id: int, applicant_id: int) -> list[Application]:
         ]
 
 
+def list_applications(guild_id: int) -> list[Application]:
+    with open_db() as connection:
+        return [
+            Application(*row)
+            for row in connection.execute(
+                f"SELECT {APPLICATION_COLUMNS} FROM applications WHERE guild_id = ? ORDER BY submitted_at DESC",
+                (guild_id,),
+            )
+        ]
+
+
+def application_vote_counts(guild_id: int) -> dict[int, tuple[int, int]]:
+    """(👍, 👎) je Bewerbungsnachricht."""
+    with open_db() as connection:
+        rows = connection.execute(
+            "SELECT vote.message_id, SUM(vote.vote = 'yes'), SUM(vote.vote = 'no') FROM application_votes AS vote "
+            "JOIN applications AS application ON application.message_id = vote.message_id "
+            "WHERE application.guild_id = ? GROUP BY vote.message_id",
+            (guild_id,),
+        ).fetchall()
+    return {message_id: (yes, no) for message_id, yes, no in rows}
+
+
 def set_vote(message_id: int, staff_id: int, vote: str | None) -> None:
     with open_db() as connection:
         if vote is None:
@@ -3659,6 +3682,11 @@ async def main(apply: bool) -> int | None:
                     backup_state=BACKUP_STATE,
                     listeners=STATE_LISTENERS,
                     temp_voice_owners=temp_voice_owners,
+                    find_text_channel=find_text_channel,
+                    list_applications=list_applications,
+                    application_vote_counts=application_vote_counts,
+                    application_labels=APPLICATION_STATUS_LABELS,
+                    reopen_applications=reopen_applications,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

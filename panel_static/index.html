@@ -17,6 +17,7 @@
           <li><a href="#dashboard" data-page="dashboard" data-level="1">Dashboard</a></li>
           <li><a href="#konsole" data-page="konsole" data-level="1">Konsole</a></li>
           <li><a href="#voice" data-page="voice" data-level="1">Voice</a></li>
+          <li><a href="#bewerbungen" data-page="bewerbungen" data-level="1">Bewerbungen</a></li>
           <li><a href="#backups" data-page="backups" data-level="3">Backups</a></li>
         </ul>
       </nav>
@@ -81,6 +82,32 @@
           <label><input type="checkbox" id="voice-hide-empty"> Leere Kanäle ausblenden</label>
         </div>
         <div class="voice-grid" id="voice-list"></div>
+      </section>
+
+      <section id="page-bewerbungen" class="page" aria-labelledby="title-bewerbungen" hidden>
+        <h1 id="title-bewerbungen">Bewerbungen</h1>
+        <p class="muted">Entschieden wird weiter in Discord über die Abstimmung unter der Bewerbung. Die Angaben der Bewerber
+          (Name, Kurs, Tracker-Link) stehen nur in der Discord-Nachricht. Abgelehnte und geschlossene Bewerbungen löscht der Bot nach der Löschfrist.</p>
+        <div class="toolbar">
+          <label for="application-filter">Status</label>
+          <select id="application-filter">
+            <option value="all">Alle</option>
+            <option value="pending">Offen</option>
+            <option value="accepted">Angenommen</option>
+            <option value="declined">Abgelehnt</option>
+            <option value="left">Geschlossen (Server verlassen)</option>
+          </select>
+          <span class="muted" id="application-count" role="status"></span>
+          <button type="button" class="danger" id="new-season" data-level="2">Neue Saison …</button>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead>
+              <tr><th scope="col">Bewerber</th><th scope="col">Status</th><th scope="col">Eingang</th><th scope="col">Stimmen</th><th scope="col">Entschieden von</th><th scope="col">Nachricht</th></tr>
+            </thead>
+            <tbody id="application-list"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="page-backups" class="page" aria-labelledby="title-backups" hidden>

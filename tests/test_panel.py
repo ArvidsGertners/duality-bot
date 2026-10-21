@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import discord
 from aiohttp.test_utils import TestClient, TestServer
 
 import main
@@ -135,6 +136,11 @@ def make_hooks(client=None) -> panel.PanelHooks:
         backup_state={"last_error": None, "last_error_at": None},
         listeners=[],
         temp_voice_owners=lambda guild_id: {},
+        find_text_channel=lambda guild, name: SimpleNamespace(id=555555555555555555) if name == "bewerbungen" else None,
+        list_applications=lambda guild_id: [],
+        application_vote_counts=lambda guild_id: {},
+        application_labels=main.APPLICATION_STATUS_LABELS,
+        reopen_applications=mock.AsyncMock(return_value=3),
     )
 
 
@@ -880,6 +886,66 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["channels"][0]["members"][0]["name"], "Neu")
         await client.close()
         self.assertEqual(self.hooks.listeners, [])
+
+
+class ApplicationPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.hooks.list_applications = lambda guild_id: [
+            main.Application(900, 1, PLAYER_ID, "pending", 2000),
+            main.Application(800, 1, 777777777777777777, "declined", 1000, ADMIN_ID, 1500),
+        ]
+        self.hooks.application_vote_counts = lambda guild_id: {900: (2, 1)}
+        self.panel = panel.Panel(CONFIG, self.hooks)
+        self.client = TestClient(TestServer(self.panel.build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def get(self, path: str, user_id: int = COACH_ID):
+        _, cookie = session_cookie(user_id)
+        return await self.client.get(path, headers={"Cookie": cookie})
+
+    async def post_season(self, user_id: int, body):
+        session, cookie = session_cookie(user_id)
+        return await self.client.post(
+            "/api/applications/new-season",
+            json=body,
+            headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]},
+        )
+
+    async def test_list(self):
+        data = await (await self.get("/api/applications")).json()
+        pending, declined = data["applications"]
+        self.assertEqual(pending["votes"], {"yes": 2, "no": 1})
+        self.assertEqual(pending["status_label"], "offen")
+        self.assertEqual(pending["url"], "https://discord.com/channels/1/555555555555555555/900")
+        self.assertEqual(pending["applicant"]["name"], f"Person {PLAYER_ID}")
+        self.assertIsNone(pending["decided_by"])
+        self.assertFalse(declined["applicant"]["on_server"])
+        self.assertIsNone(declined["applicant"]["avatar"])
+        self.assertEqual(declined["decided_by"]["id"], str(ADMIN_ID))
+        self.assertEqual(declined["votes"], {"yes": 0, "no": 0})
+
+    async def test_filter(self):
+        data = await (await self.get("/api/applications?status=declined")).json()
+        self.assertEqual([entry["message_id"] for entry in data["applications"]], ["800"])
+        self.assertEqual((await self.get("/api/applications?status=quatsch")).status, 400)
+
+    async def test_new_season_rights_and_confirmation(self):
+        self.assertEqual((await self.post_season(COACH_ID, {"confirm": True})).status, 403)
+        self.assertEqual((await self.post_season(ADMIN_ID, {})).status, 400)
+        self.assertEqual((await self.post_season(ADMIN_ID, {"confirm": "ja"})).status, 400)
+        self.hooks.reopen_applications.assert_not_awaited()
+        response = await self.post_season(ADMIN_ID, {"confirm": True})
+        self.assertEqual(await response.json(), {"reopened": 3})
+        self.assertIn("neue Saison", self.hooks.audit.await_args.args[1])
+
+    async def test_new_season_failures(self):
+        self.hooks.reopen_applications.side_effect = discord.HTTPException(mock.Mock(status=403, reason="Forbidden"), "fehlt")
+        self.assertEqual((await self.post_season(ADMIN_ID, {"confirm": True})).status, 502)
+        self.hooks.reopen_applications.side_effect = None
+        self.hooks.reopen_applications.return_value = None
+        self.assertEqual((await self.post_season(OWNER_ID, {"confirm": True})).status, 409)
 
 
 if __name__ == "__main__":

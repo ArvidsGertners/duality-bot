@@ -223,6 +223,21 @@ class ListenerTests(unittest.TestCase):
             self.assertEqual(main.temp_voice_owners(1), {10: 100})
 
 
+class ApplicationQueryTests(unittest.TestCase):
+    def test_list_and_vote_counts(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(main, "DATA_PATH", Path(directory) / "bot.sqlite3"):
+            main.initialize_storage()
+            main.save_application(main.Application(1, 10, 100, "pending", 500))
+            main.save_application(main.Application(2, 10, 101, "declined", 900, 7, 950))
+            main.save_application(main.Application(3, 11, 102, "pending", 700))
+            main.set_vote(1, 7, "yes")
+            main.set_vote(1, 8, "no")
+            main.set_vote(1, 9, "yes")
+            main.set_vote(3, 7, "yes")
+            self.assertEqual([application.message_id for application in main.list_applications(10)], [2, 1])
+            self.assertEqual(main.application_vote_counts(10), {1: (2, 1)})
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):

@@ -262,7 +262,68 @@ async function createBackup() {
   }
 }
 
-const pageLoaders = { backups: loadBackups };
+function personCell(person) {
+  if (!person) return "–";
+  const wrapper = span("person", "");
+  if (person.avatar) {
+    const avatar = document.createElement("img");
+    avatar.src = person.avatar;
+    avatar.alt = "";
+    avatar.width = 24;
+    avatar.height = 24;
+    wrapper.append(avatar);
+  }
+  wrapper.append(person.on_server ? person.name : span("muted", person.name));
+  return wrapper;
+}
+
+function discordLink(url, label = "In Discord öffnen") {
+  if (!url) return "–";
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = label;
+  return link;
+}
+
+const APPLICATION_PILLS = { pending: "warn", accepted: "ok", declined: "bad", left: "neutral" };
+
+async function loadApplications() {
+  const status = $("#application-filter").value;
+  const data = await api(`/api/applications?status=${encodeURIComponent(status)}`);
+  const rows = data.applications.map((application) => tableRow(
+    personCell(application.applicant),
+    pill(application.status_label, APPLICATION_PILLS[application.status] || "neutral"),
+    formatTime(application.submitted_at),
+    `👍 ${application.votes.yes} · 👎 ${application.votes.no}`,
+    application.decided_by ? personCell(application.decided_by) : "–",
+    discordLink(application.url),
+  ));
+  $("#application-list").replaceChildren(...(rows.length ? rows : [emptyRow(6, "Keine Bewerbungen mit diesem Status.")]));
+  $("#application-count").textContent = `${rows.length} ${rows.length === 1 ? "Bewerbung" : "Bewerbungen"}`;
+}
+
+async function startNewSeason() {
+  const confirmed = await confirmAction(
+    "Alle mit der Rolle „Bewerber“, deren Bewerbung nicht mehr offen ist, verlieren diese Rolle und können sich über #bewerbung erneut bewerben. Offene Bewerbungen bleiben unverändert.",
+    null,
+    "Neue Saison starten",
+  );
+  if (!confirmed) return;
+  const button = $("#new-season");
+  button.disabled = true;
+  try {
+    const result = await api("/api/applications/new-season", { method: "POST", body: { confirm: true } });
+    $("#application-count").textContent = `Neue Saison gestartet: ${result.reopened} Personen können sich wieder bewerben.`;
+  } catch (error) {
+    $("#application-count").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+const pageLoaders = { backups: loadBackups, bewerbungen: loadApplications };
 
 function renderVoice(channels) {
   state.voice = channels;
@@ -470,10 +531,12 @@ function remember(line) {
   }
 }
 
-function confirmCommand(text, line) {
+function confirmAction(text, detail, okLabel = "Ausführen") {
   const dialog = $("#confirm-dialog");
   $("#confirm-text").textContent = text;
-  $("#confirm-command").textContent = line;
+  $("#confirm-command").textContent = detail || "";
+  $("#confirm-command").hidden = !detail;
+  $("#confirm-ok").textContent = okLabel;
   dialog.returnValue = "";
   return new Promise((resolve) => {
     dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true });
@@ -490,7 +553,7 @@ async function submitCommand(event) {
   const command = state.commands.find((entry) => entry.name === name);
   let confirmed = false;
   if (command && command.confirm) {
-    confirmed = await confirmCommand(command.confirm, line);
+    confirmed = await confirmAction(command.confirm, line);
     if (!confirmed) {
       input.focus();
       return;
@@ -544,8 +607,9 @@ async function init() {
   $("#user-avatar").src = state.me.avatar;
   state.historyIndex = state.history.length;
   // Menüpunkte ohne Berechtigung ausblenden; der Server prüft die Rechte trotzdem bei jeder Anfrage.
-  for (const link of document.querySelectorAll("#nav a")) {
-    link.parentElement.hidden = Number(link.dataset.level) > state.me.level;
+  for (const element of document.querySelectorAll("[data-level]")) {
+    const target = element.closest("#nav") ? element.parentElement : element;
+    target.hidden = Number(element.dataset.level) > state.me.level;
   }
   $("#logout").addEventListener("click", logout);
   $("#command-form").addEventListener("submit", submitCommand);
@@ -553,6 +617,8 @@ async function init() {
   $("#log-pause").addEventListener("click", togglePause);
   $("#backup-create").addEventListener("click", createBackup);
   $("#voice-hide-empty").addEventListener("change", () => renderVoice(state.voice));
+  $("#application-filter").addEventListener("change", () => loadApplications().catch((error) => setBanner(error.message)));
+  $("#new-season").addEventListener("click", startNewSeason);
   $("#log-search").addEventListener("input", renderLog);
   for (const box of document.querySelectorAll("input[name=log-level]")) box.addEventListener("change", renderLog);
   window.addEventListener("hashchange", showPage);
