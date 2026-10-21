@@ -10,6 +10,8 @@ file. --apply creates missing items and updates managed permissions.
 
 import argparse
 import asyncio
+import io
+import json
 import math
 import sqlite3
 import getpass
@@ -24,8 +26,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -72,7 +75,15 @@ APPLICATION_PENDING_PREFIX = "DUALITY_APPLICATION_PENDING|"
 APPLICATION_DECISION_PREFIX = "DUALITY_APPLICATION_"
 EVENT_MARKER = "DUALITY_EVENT_V1"
 DATA_PATH = Path(__file__).with_name("duality_bot_data.sqlite3")
-EVENT_RETENTION_DAYS = 7
+# Termine bleiben 90 Tage gespeichert, damit /profil die Teilnahmequote zeigen kann.
+EVENT_RETENTION_DAYS = 90
+APPLICATION_MIN_VOTES = 2
+HENRIKDEV_API = "https://api.henrikdev.xyz"
+# Fehlercode der API, wenn ein Account existiert, aber keine aktuellen Matches hat.
+HENRIKDEV_NO_RECENT_MATCHES = 24
+RANK_SYNC_DELAY_SECONDS = 3
+TEMP_VOICE_CREATORS = {"➕ Neuer Voice": "🔊", "➕ Neuer Valorant-Voice": "🎯"}
+BACKGROUND_TASKS: set[asyncio.Task] = set()
 # Schwache Referenzen: Ein Lock verschwindet, sobald niemand mehr darauf wartet.
 APPLICATION_LOCKS: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
 APPLICATION_SUBMIT_LOCKS: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -83,12 +94,18 @@ CATEGORIES = [
     {
         "name": "👋 EINGANGSHALLE",
         "roles": None,
-        "channels": [("text", "willkommen"), ("text", "ankündigungen"), ("text", "social-media"), ("text", "regeln")],
+        "channels": [
+            ("text", "willkommen"),
+            ("text", "ankündigungen"),
+            ("text", "social-media"),
+            ("text", "regeln"),
+            ("text", "tickets"),
+        ],
     },
     {
         "name": "💬 LOUNGE",
         "roles": None,
-        "channels": [("text", "allgemein"), ("voice", "Community Voice")],
+        "channels": [("text", "allgemein"), ("voice", "Community Voice"), ("voice", "➕ Neuer Voice")],
     },
     {
         "name": "🎯 VALORANT",
@@ -98,6 +115,7 @@ CATEGORIES = [
             ("voice", "Valorant 1"),
             ("voice", "Valorant 2"),
             ("voice", "Valorant 3"),
+            ("voice", "➕ Neuer Valorant-Voice"),
             ("text", "bewerbung"),
         ],
     },
@@ -114,13 +132,20 @@ CATEGORIES = [
     {
         "name": "🔒 STAFF",
         "roles": STAFF_ROLES,
-        "channels": [("text", "bewerbungen"), ("text", "staff-chat"), ("text", "orga"), ("voice", "Staff Voice")],
+        "channels": [
+            ("text", "bewerbungen"),
+            ("text", "staff-chat"),
+            ("text", "orga"),
+            ("text", "audit-log"),
+            ("voice", "Staff Voice"),
+        ],
     },
 ]
 
 APPLICATION_MARKER = "DUALITY_APPLICATION_V3"
 RULES_MARKER = "DUALITY_RULES_V1"
 WELCOME_MARKER = "DUALITY_WELCOME_V1"
+TICKETS_MARKER = "DUALITY_TICKETS_V1"
 DEFAULT_GUILD_ID = "1562056155558056027"
 # Erhöhen, wenn sich die Rechte in CATEGORIES oder den *_overwrites-Funktionen
 # ändern. Dann setzt das nächste --apply die verwalteten Rechte einmal neu;
@@ -176,6 +201,27 @@ def initialize_storage() -> None:
             "CREATE TABLE IF NOT EXISTS applications ("
             "message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, applicant_id INTEGER NOT NULL, "
             "status TEXT NOT NULL, submitted_at INTEGER NOT NULL, decided_by INTEGER, decided_at INTEGER)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS application_votes ("
+            "message_id INTEGER NOT NULL, staff_id INTEGER NOT NULL, vote TEXT NOT NULL, "
+            "PRIMARY KEY (message_id, staff_id))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS player_profiles ("
+            "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, riot_name TEXT, riot_tag TEXT, region TEXT, "
+            "main_role TEXT, playable_roles TEXT, rank_tier TEXT, rank_synced_at INTEGER, "
+            "updated_at INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS tickets ("
+            "thread_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, reporter_id INTEGER NOT NULL, "
+            "created_at INTEGER NOT NULL, closed_at INTEGER)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS temp_voice_channels ("
+            "channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL, "
+            "created_at INTEGER NOT NULL)"
         )
         rows = connection.execute("SELECT guild_id, kind, managed_key, object_id FROM managed_ids").fetchall()
     MANAGED_IDS.clear()
@@ -276,6 +322,196 @@ def expired_applications(guild_id: int, decided_before: int) -> list[Application
 def delete_application(message_id: int) -> None:
     with open_db() as connection:
         connection.execute("DELETE FROM applications WHERE message_id = ?", (message_id,))
+        connection.execute("DELETE FROM application_votes WHERE message_id = ?", (message_id,))
+
+
+def applications_of(guild_id: int, applicant_id: int) -> list[Application]:
+    with open_db() as connection:
+        return [
+            Application(*row)
+            for row in connection.execute(
+                f"SELECT {APPLICATION_COLUMNS} FROM applications WHERE guild_id = ? AND applicant_id = ?",
+                (guild_id, applicant_id),
+            )
+        ]
+
+
+def set_vote(message_id: int, staff_id: int, vote: str | None) -> None:
+    with open_db() as connection:
+        if vote is None:
+            connection.execute(
+                "DELETE FROM application_votes WHERE message_id = ? AND staff_id = ?", (message_id, staff_id)
+            )
+        else:
+            connection.execute(
+                "INSERT INTO application_votes (message_id, staff_id, vote) VALUES (?, ?, ?) "
+                "ON CONFLICT(message_id, staff_id) DO UPDATE SET vote = excluded.vote",
+                (message_id, staff_id, vote),
+            )
+
+
+def get_votes(message_id: int) -> dict[int, str]:
+    with open_db() as connection:
+        rows = connection.execute(
+            "SELECT staff_id, vote FROM application_votes WHERE message_id = ? ORDER BY rowid", (message_id,)
+        ).fetchall()
+    return dict(rows)
+
+
+PROFILE_FIELDS = ("riot_name", "riot_tag", "region", "main_role", "playable_roles", "rank_tier", "rank_synced_at")
+
+
+class Profile(NamedTuple):
+    guild_id: int
+    user_id: int
+    riot_name: str | None
+    riot_tag: str | None
+    region: str | None
+    main_role: str | None
+    playable_roles: str | None
+    rank_tier: str | None
+    rank_synced_at: int | None
+    updated_at: int
+
+    @property
+    def riot_id(self) -> str | None:
+        return f"{self.riot_name}#{self.riot_tag}" if self.riot_name and self.riot_tag else None
+
+
+def update_profile(guild_id: int, user_id: int, **fields) -> None:
+    unknown = set(fields) - set(PROFILE_FIELDS)
+    if unknown:
+        raise ValueError(f"Unbekannte Profilfelder: {unknown}")
+    now = int(time.time())
+    with open_db() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO player_profiles (guild_id, user_id, updated_at) VALUES (?, ?, ?)",
+            (guild_id, user_id, now),
+        )
+        if fields:
+            assignments = ", ".join(f"{name} = ?" for name in fields)
+            connection.execute(
+                f"UPDATE player_profiles SET {assignments}, updated_at = ? WHERE guild_id = ? AND user_id = ?",
+                (*fields.values(), now, guild_id, user_id),
+            )
+
+
+def get_profile(guild_id: int, user_id: int) -> Profile | None:
+    with open_db() as connection:
+        row = connection.execute(
+            f"SELECT guild_id, user_id, {', '.join(PROFILE_FIELDS)}, updated_at FROM player_profiles "
+            "WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+    return Profile(*row) if row else None
+
+
+def linked_profiles(guild_id: int) -> list[Profile]:
+    with open_db() as connection:
+        return [
+            Profile(*row)
+            for row in connection.execute(
+                f"SELECT guild_id, user_id, {', '.join(PROFILE_FIELDS)}, updated_at FROM player_profiles "
+                "WHERE guild_id = ? AND riot_name IS NOT NULL AND riot_tag IS NOT NULL",
+                (guild_id,),
+            )
+        ]
+
+
+def attendance(guild_id: int, user_id: int, since: int, until: int) -> tuple[int, int]:
+    """(Zusagen, Termine) für vergangene Termine im Zeitraum."""
+    with open_db() as connection:
+        total = connection.execute(
+            "SELECT COUNT(*) FROM scheduled_events WHERE guild_id = ? AND starts_at BETWEEN ? AND ?",
+            (guild_id, since, until),
+        ).fetchone()[0]
+        going = connection.execute(
+            "SELECT COUNT(*) FROM scheduled_events AS event JOIN event_rsvps AS rsvp "
+            "ON rsvp.message_id = event.message_id WHERE event.guild_id = ? AND event.starts_at BETWEEN ? AND ? "
+            "AND rsvp.user_id = ? AND rsvp.choice = 'going'",
+            (guild_id, since, until, user_id),
+        ).fetchone()[0]
+    return going, total
+
+
+def save_ticket(thread_id: int, guild_id: int, reporter_id: int) -> None:
+    with open_db() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO tickets (thread_id, guild_id, reporter_id, created_at) VALUES (?, ?, ?, ?)",
+            (thread_id, guild_id, reporter_id, int(time.time())),
+        )
+
+
+def get_ticket_reporter(thread_id: int) -> int | None:
+    with open_db() as connection:
+        row = connection.execute("SELECT reporter_id FROM tickets WHERE thread_id = ?", (thread_id,)).fetchone()
+    return row[0] if row else None
+
+
+def close_ticket(thread_id: int) -> bool:
+    with open_db() as connection:
+        cursor = connection.execute(
+            "UPDATE tickets SET closed_at = ? WHERE thread_id = ? AND closed_at IS NULL",
+            (int(time.time()), thread_id),
+        )
+    return cursor.rowcount == 1
+
+
+def save_temp_voice(channel_id: int, guild_id: int, owner_id: int) -> None:
+    with open_db() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO temp_voice_channels (channel_id, guild_id, owner_id, created_at) VALUES (?, ?, ?, ?)",
+            (channel_id, guild_id, owner_id, int(time.time())),
+        )
+
+
+def temp_voice_ids(guild_id: int) -> set[int]:
+    with open_db() as connection:
+        return {
+            channel_id
+            for (channel_id,) in connection.execute(
+                "SELECT channel_id FROM temp_voice_channels WHERE guild_id = ?", (guild_id,)
+            )
+        }
+
+
+def delete_temp_voice(channel_id: int) -> None:
+    with open_db() as connection:
+        connection.execute("DELETE FROM temp_voice_channels WHERE channel_id = ?", (channel_id,))
+
+
+def collect_user_data(guild_id: int, user_id: int) -> dict:
+    """Alles, was der Bot in seiner Datenbank über eine Person speichert."""
+    with open_db() as connection:
+        connection.row_factory = sqlite3.Row
+
+        def rows(query: str, parameters: tuple) -> list[dict]:
+            return [dict(row) for row in connection.execute(query, parameters)]
+
+        return {
+            "profil": rows("SELECT * FROM player_profiles WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)),
+            "teamname": rows("SELECT * FROM player_roster_names WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)),
+            "bewerbungen": rows("SELECT * FROM applications WHERE guild_id = ? AND applicant_id = ?", (guild_id, user_id)),
+            "terminantworten": rows(
+                "SELECT rsvp.message_id, rsvp.choice, event.starts_at FROM event_rsvps AS rsvp "
+                "LEFT JOIN scheduled_events AS event ON event.message_id = rsvp.message_id WHERE rsvp.user_id = ?",
+                (user_id,),
+            ),
+            "staff_stimmen": rows("SELECT * FROM application_votes WHERE staff_id = ?", (user_id,)),
+            "tickets": rows("SELECT * FROM tickets WHERE guild_id = ? AND reporter_id = ?", (guild_id, user_id)),
+            "eigene_voice_channels": rows(
+                "SELECT * FROM temp_voice_channels WHERE guild_id = ? AND owner_id = ?", (guild_id, user_id)
+            ),
+        }
+
+
+def delete_user_data(guild_id: int, user_id: int) -> None:
+    # Staff-Stimmen und Tickets bleiben als Nachweis für Entscheidungen und
+    # Meldungen erhalten; Bewerbungen löscht der Aufrufer zusammen mit ihren Nachrichten.
+    with open_db() as connection:
+        connection.execute("DELETE FROM player_profiles WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+        connection.execute("DELETE FROM player_roster_names WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+        connection.execute("DELETE FROM event_rsvps WHERE user_id = ?", (user_id,))
 
 
 def write_rsvp(message_id: int, user_id: int, choice: str) -> None:
@@ -523,6 +759,41 @@ def rules_overwrites(guild: discord.Guild, roles: dict[str, discord.Role]):
     return overwrites
 
 
+def tickets_overwrites(guild: discord.Guild, roles: dict[str, discord.Role]):
+    # Alle sehen #tickets, schreiben aber nur in ihren eigenen privaten Ticket-Threads.
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=False,
+            read_message_history=True,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=True,
+        )
+    }
+    for role_name in STAFF_ROLES:
+        role = roles.get(role_name)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    if guild.me:
+        overwrites[guild.me] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            embed_links=True,
+            create_private_threads=True,
+            send_messages_in_threads=True,
+        )
+    return overwrites
+
+
+SPECIAL_CHANNEL_OVERWRITES = {
+    "bewerbung": application_overwrites,
+    "regeln": rules_overwrites,
+    "tickets": tickets_overwrites,
+}
+
+
 ERROR_TEXT = "Das hat leider nicht geklappt. Bitte versuche es später erneut oder wende dich direkt an den Staff."
 
 
@@ -571,6 +842,127 @@ def is_tracker_profile(value: str) -> bool:
         and (host == "tracker.gg" or host.endswith(".tracker.gg"))
         and parsed.path.startswith("/valorant/profile/riot/")
     )
+
+
+def parse_riot_id(text: str) -> tuple[str, str] | None:
+    name, separator, tag = text.strip().rpartition("#")
+    name, tag = name.strip(), tag.strip()
+    if not separator or not 3 <= len(name) <= 16 or not 3 <= len(tag) <= 5:
+        return None
+    return name, tag
+
+
+def riot_id_from_tracker(url: str) -> tuple[str, str] | None:
+    # tracker.gg/valorant/profile/riot/Name%23Tag/overview
+    path = unquote(urlparse(url.strip()).path)
+    prefix = "/valorant/profile/riot/"
+    if not path.startswith(prefix):
+        return None
+    return parse_riot_id(path.removeprefix(prefix).split("/", 1)[0])
+
+
+def rank_role_name(tier_name: str) -> str | None:
+    """'Diamond 2' → 'Diamond'; 'Unrated' und Unbekanntes → None."""
+    base = tier_name.split(" ", 1)[0].capitalize()
+    return base if base in VALORANT_RANKS else None
+
+
+class RankLookupError(Exception):
+    pass
+
+
+class HenrikDevClient:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.session: aiohttp.ClientSession | None = None
+
+    async def get(self, path: str) -> dict:
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+        for attempt in range(2):
+            async with self.session.get(HENRIKDEV_API + path, headers={"Authorization": self.api_key}) as response:
+                if response.status == 429 and attempt == 0:
+                    try:
+                        wait = float(response.headers.get("Retry-After") or response.headers.get("X-RateLimit-Reset") or 60)
+                    except ValueError:
+                        wait = 60
+                    await asyncio.sleep(min(wait, 120))
+                    continue
+                if response.status == 404:
+                    try:
+                        error_code = (await response.json())["errors"][0]["code"]
+                    except (aiohttp.ContentTypeError, KeyError, IndexError, TypeError, ValueError):
+                        error_code = None
+                    if error_code == HENRIKDEV_NO_RECENT_MATCHES:
+                        raise RankLookupError(
+                            "Für diese Riot-ID gibt es keine aktuellen Matches. Spiel eine Runde "
+                            "(z. B. Deathmatch) und versuche es danach erneut."
+                        )
+                    raise RankLookupError("Diese Riot-ID wurde nicht gefunden.")
+                if response.status != 200:
+                    raise RankLookupError(f"Die HenrikDev-API antwortet gerade mit Status {response.status}.")
+                return await response.json()
+        raise RankLookupError("Die HenrikDev-API ist gerade ausgelastet. Bitte versuche es später erneut.")
+
+    async def current_rank(self, name: str, tag: str, region: str | None = None) -> tuple[str, str]:
+        """Liefert (Rangname wie 'Gold 2', Region)."""
+        riot_name, riot_tag = quote(name, safe=""), quote(tag, safe="")
+        try:
+            if not region:
+                account = await self.get(f"/valorant/v2/account/{riot_name}/{riot_tag}")
+                region = account["data"]["region"]
+            mmr = await self.get(f"/valorant/v3/mmr/{region}/pc/{riot_name}/{riot_tag}")
+            return mmr["data"]["current"]["tier"]["name"], region
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            raise RankLookupError("Die HenrikDev-API ist gerade nicht erreichbar.") from error
+        except (KeyError, TypeError) as error:
+            raise RankLookupError("Die HenrikDev-API hat eine unerwartete Antwort geschickt.") from error
+
+    async def close(self) -> None:
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+
+RANK_CLIENT: HenrikDevClient | None = None
+
+
+async def set_exclusive_role(member: discord.Member, role_names, selected_role: discord.Role | None, reason: str) -> bool:
+    """Setzt höchstens eine Rolle aus einer Gruppe. Gibt zurück, ob sich etwas geändert hat."""
+    group_ids = {role.id for name in role_names if (role := find_role(member.guild, name))}
+    previous_roles = [role for role in member.roles if role.id in group_ids and role != selected_role]
+    add_roles = [selected_role] if selected_role and selected_role not in member.roles else []
+    if not add_roles and not previous_roles:
+        return False
+    await set_member_roles(member, add=add_roles, remove=previous_roles, reason=reason)
+    return True
+
+
+async def sync_member_rank(member: discord.Member, profile: Profile) -> str:
+    """Holt den aktuellen Rang über die Riot-ID und setzt die passende Rangrolle."""
+    if RANK_CLIENT is None:
+        raise RankLookupError("Die automatische Rangabfrage ist nicht eingerichtet (HENRIKDEV_API_KEY fehlt).")
+    tier_name, region = await RANK_CLIENT.current_rank(profile.riot_name, profile.riot_tag, profile.region)
+    update_profile(member.guild.id, member.id, region=region, rank_tier=tier_name, rank_synced_at=int(time.time()))
+    role_name = rank_role_name(tier_name)
+    selected_role = find_role(member.guild, role_name) if role_name else None
+    await set_exclusive_role(member, VALORANT_RANKS, selected_role, "Valorant-Rang automatisch über Riot-ID aktualisiert")
+    return tier_name
+
+
+def run_in_background(coroutine) -> None:
+    task = asyncio.create_task(coroutine)
+    BACKGROUND_TASKS.add(task)
+    task.add_done_callback(BACKGROUND_TASKS.discard)
+
+
+async def sync_rank_quietly(member: discord.Member) -> None:
+    profile = get_profile(member.guild.id, member.id)
+    if profile is None or profile.riot_id is None or RANK_CLIENT is None:
+        return
+    try:
+        await sync_member_rank(member, profile)
+    except (RankLookupError, discord.HTTPException) as error:
+        log.warning("Rang von %s konnte nicht aktualisiert werden: %s", member.id, error)
 
 
 class TrackerLinkModal(discord.ui.Modal, title="Mitspielen – Tracker.gg-Profil"):
@@ -909,6 +1301,17 @@ class ApplicationSelectionView(DualityView):
                 )
                 return
             save_application(Application(staff_message.id, interaction.guild.id, member.id, "pending", submitted_at))
+            riot_id = riot_id_from_tracker(str(self.draft["tracker_url"]))
+            update_profile(
+                interaction.guild.id,
+                member.id,
+                main_role=main_role,
+                playable_roles=", ".join(playable_roles),
+                **({"riot_name": riot_id[0], "riot_tag": riot_id[1], "region": None} if riot_id else {}),
+            )
+            if riot_id:
+                run_in_background(sync_rank_quietly(member))
+            await open_application_thread(staff_message, member, str(self.draft["real_name"]))
 
             try:
                 await applicant_chat.send(
@@ -999,13 +1402,36 @@ def load_application(message: discord.Message) -> Application | None:
     return application
 
 
+VOTE_FIELD = "Staff-Abstimmung"
+
+
+def required_votes(guild: discord.Guild) -> int:
+    # Bei sehr kleinem Staff darf eine Entscheidung nicht dauerhaft blockiert sein.
+    staff_ids = {
+        member.id
+        for name in STAFF_ROLES
+        if (role := find_role(guild, name))
+        for member in role.members
+        if not getattr(member, "bot", False)
+    }
+    return max(1, min(APPLICATION_MIN_VOTES, len(staff_ids)))
+
+
 def render_application(message: discord.Message, application: Application) -> discord.Embed:
     embed = discord.Embed.from_dict(message.embeds[0].to_dict())
     # Aus der Datenbank neu aufbauen, damit ein erneutes Rendern nichts doppelt.
-    fields = [field for field in embed.fields if field.name != "Entscheidung"]
+    fields = [field for field in embed.fields if field.name not in {"Entscheidung", VOTE_FIELD}]
     embed.clear_fields()
     for field in fields:
         embed.add_field(name=field.name, value=field.value, inline=field.inline)
+    votes = get_votes(application.message_id)
+    yes = [f"<@{staff_id}>" for staff_id, vote in votes.items() if vote == "yes"]
+    no = [f"<@{staff_id}>" for staff_id, vote in votes.items() if vote == "no"]
+    if votes or application.status == "pending":
+        vote_text = f"👍 {len(yes)}{' · ' + ', '.join(yes) if yes else ''}\n👎 {len(no)}{' · ' + ', '.join(no) if no else ''}"
+        if application.status == "pending":
+            vote_text += f"\nEntscheidung ab {required_votes(message.guild)} Stimmen möglich"
+        embed.add_field(name=VOTE_FIELD, value=vote_text[:1024], inline=False)
     decided = f"<t:{application.decided_at}:F>" if application.decided_at else ""
     if application.status == "accepted":
         embed.add_field(name="Entscheidung", value=f"Angenommen von <@{application.decided_by}> · {decided}", inline=False)
@@ -1025,8 +1451,74 @@ def render_application(message: discord.Message, application: Application) -> di
 
 
 async def show_application(message: discord.Message, application: Application) -> None:
-    view = ApplicationReviewView() if application.status == "pending" else None
-    await message.edit(embed=render_application(message, application), view=view)
+    view = None
+    if application.status == "pending":
+        votes = list(get_votes(application.message_id).values())
+        view = ApplicationReviewView(yes=votes.count("yes"), no=votes.count("no"))
+    await message.edit(
+        embed=render_application(message, application),
+        view=view,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+async def application_thread(message: discord.Message) -> discord.Thread | None:
+    # Ein Thread an einer Nachricht hat dieselbe ID wie die Nachricht.
+    thread = message.guild.get_thread(message.id)
+    if thread is None:
+        try:
+            thread = await message.guild.fetch_channel(message.id)
+        except discord.HTTPException:
+            return None
+    return thread if isinstance(thread, discord.Thread) else None
+
+
+async def open_application_thread(message: discord.Message, applicant: discord.Member, real_name: str) -> None:
+    try:
+        thread = await message.create_thread(name=f"Bewerbung {real_name}"[:100], auto_archive_duration=10080)
+        await thread.send(
+            f"Diskussion und Notizen zur Bewerbung von {applicant.mention}. Nur Staff sieht diesen Thread. "
+            f"Stimmt unter der Bewerbung mit 👍/👎 ab; entschieden werden kann ab {required_votes(message.guild)} Stimmen.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.HTTPException:
+        log.exception("Staff-Thread für Bewerbung %s konnte nicht erstellt werden", message.id)
+
+
+async def close_application_thread(message: discord.Message, application: Application) -> None:
+    thread = await application_thread(message)
+    if thread is None:
+        return
+    try:
+        await thread.send(
+            f"Status: **{APPLICATION_STATUS_LABELS[application.status]}**. Der Thread wird archiviert.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await thread.edit(archived=True)
+    except discord.HTTPException:
+        log.warning("Staff-Thread %s konnte nicht archiviert werden", thread.id)
+
+
+async def vote_on_application(interaction: discord.Interaction, vote: str) -> None:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member) or not interaction.message:
+        await interaction.response.send_message("Abstimmen geht nur im Server.", ephemeral=True)
+        return
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("Nur Staff kann über Bewerbungen abstimmen.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    lock = APPLICATION_LOCKS.setdefault(interaction.message.id, asyncio.Lock())
+    async with lock:
+        application = load_application(interaction.message)
+        if application is None or application.status != "pending":
+            await interaction.followup.send("Über diese Bewerbung kann nicht mehr abgestimmt werden.", ephemeral=True)
+            return
+        previous = get_votes(application.message_id).get(interaction.user.id)
+        new_vote = None if previous == vote else vote
+        set_vote(application.message_id, interaction.user.id, new_vote)
+        await show_application(interaction.message, application)
+    text = {"yes": "Deine Stimme: 👍", "no": "Deine Stimme: 👎", None: "Deine Stimme wurde zurückgenommen."}[new_vote]
+    await interaction.followup.send(text, ephemeral=True)
 
 
 async def review_application(interaction: discord.Interaction, accepted: bool) -> None:
@@ -1073,7 +1565,9 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
         applicant = await guild.fetch_member(application.applicant_id)
     except discord.NotFound:
         decide_application(message.id, "left", None, int(time.time()))
-        await show_application(message, get_application(message.id))
+        application = get_application(message.id)
+        await show_application(message, application)
+        await close_application_thread(message, application)
         await interaction.followup.send(
             "Die Person ist nicht mehr auf dem Server. Die Bewerbung wurde geschlossen und wird "
             f"nach {APPLICATION_RETENTION_DAYS} Tagen automatisch gelöscht.",
@@ -1083,6 +1577,15 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
     except discord.HTTPException:
         await interaction.followup.send(
             "Die Person konnte gerade nicht geladen werden. Bitte versuche es erneut.", ephemeral=True
+        )
+        return
+
+    vote_count = len(get_votes(message.id))
+    needed = required_votes(guild)
+    if vote_count < needed:
+        await interaction.followup.send(
+            f"Für eine Entscheidung braucht es mindestens {needed} Staff-Stimmen (👍/👎); bisher sind es {vote_count}.",
+            ephemeral=True,
         )
         return
 
@@ -1129,6 +1632,7 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
             ephemeral=True,
         )
         return
+    await close_application_thread(message, application)
 
     response = "Bewerbung angenommen" if accepted else "Bewerbung abgelehnt; die Bewerberrolle sperrt eine erneute Bewerbung bis `/neue-saison`"
     if not dm_sent:
@@ -1139,8 +1643,18 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
 
 
 class ApplicationReviewView(DualityView):
-    def __init__(self):
+    def __init__(self, yes: int = 0, no: int = 0):
         super().__init__(timeout=None)
+        self.vote_yes.label = f"👍 {yes}"
+        self.vote_no.label = f"👎 {no}"
+
+    @discord.ui.button(label="👍 0", style=discord.ButtonStyle.secondary, custom_id="duality:application:vote_yes")
+    async def vote_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await vote_on_application(interaction, "yes")
+
+    @discord.ui.button(label="👎 0", style=discord.ButtonStyle.secondary, custom_id="duality:application:vote_no")
+    async def vote_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await vote_on_application(interaction, "no")
 
     @discord.ui.button(label="Annehmen", style=discord.ButtonStyle.success, custom_id="duality:application:accept")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1166,7 +1680,9 @@ async def close_applications_of_departed_member(member: discord.Member) -> None:
                 continue
             try:
                 message = await staff_channel.fetch_message(application.message_id)
-                await show_application(message, get_application(application.message_id))
+                closed = get_application(application.message_id)
+                await show_application(message, closed)
+                await close_application_thread(message, closed)
             except discord.HTTPException:
                 log.warning("Bewerbungsnachricht %s konnte nicht aktualisiert werden", application.message_id)
 
@@ -1205,6 +1721,249 @@ class SeasonResetConfirmView(DualityView):
         await interaction.edit_original_response(content=text)
 
 
+def staff_members(guild: discord.Guild) -> list[discord.Member]:
+    members = {}
+    for name in STAFF_ROLES:
+        role = find_role(guild, name)
+        if role:
+            members.update({member.id: member for member in role.members if not member.bot})
+    return list(members.values())
+
+
+async def create_ticket(interaction: discord.Interaction, details: str, member: discord.Member | None = None) -> None:
+    """Öffnet einen privaten Thread, den nur die meldende Person und der Staff sehen."""
+    tickets_channel = find_text_channel(interaction.guild, "tickets")
+    if tickets_channel is None:
+        await send_error_response(interaction, "Das Ticket-System ist noch nicht eingerichtet.")
+        return
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    reporter = interaction.user
+    thread = await tickets_channel.create_thread(
+        name=f"Ticket – {reporter.display_name}"[:100],
+        type=discord.ChannelType.private_thread,
+        invitable=False,
+        auto_archive_duration=10080,
+        reason="Ticket über den Duality-Bot",
+    )
+    save_ticket(thread.id, interaction.guild.id, reporter.id)
+    await thread.add_user(reporter)
+    for staff_member in staff_members(interaction.guild):
+        try:
+            await thread.add_user(staff_member)
+        except discord.HTTPException:
+            log.warning("Staff %s konnte nicht zum Ticket %s hinzugefügt werden", staff_member.id, thread.id)
+
+    embed = discord.Embed(
+        title="Vertrauliches Ticket",
+        description=details,
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Von", value=f"{reporter.mention} (`{reporter.id}`)", inline=True)
+    embed.add_field(name="Betroffenes Mitglied", value=member.mention if member else "Nicht angegeben", inline=True)
+    embed.set_footer(text="Nur du und der Staff sehen diesen Thread. Schreibt hier für Rückfragen.")
+    await thread.send(embed=embed, view=TicketCloseView(), allowed_mentions=discord.AllowedMentions.none())
+
+    orga = find_text_channel(interaction.guild, "orga")
+    if orga:
+        try:
+            await orga.send(f"🎫 Neues Ticket von {reporter.mention}: {thread.mention}", allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            log.warning("Ticket-Hinweis in #orga konnte nicht gesendet werden")
+    await interaction.followup.send(
+        f"Dein Ticket ist offen: {thread.mention}. Nur du und der Staff sehen es; dort könnt ihr euch austauschen.",
+        ephemeral=True,
+    )
+
+
+class TicketModal(discord.ui.Modal, title="Ticket an den Staff"):
+    details = discord.ui.TextInput(
+        label="Was ist passiert?",
+        placeholder="Bitte keine unnötigen privaten Daten eintragen.",
+        style=discord.TextStyle.paragraph,
+        min_length=10,
+        max_length=1500,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Tickets gehen nur direkt auf dem Server.", ephemeral=True)
+            return
+        await create_ticket(interaction, str(self.details).strip())
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.error("Fehler beim Ticket", exc_info=error)
+        await send_error_response(interaction)
+
+
+class TicketStartView(DualityView):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Ticket öffnen", emoji="🎫", style=discord.ButtonStyle.primary, custom_id="duality:ticket:open")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketModal())
+
+
+class TicketCloseView(DualityView):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Ticket schließen", style=discord.ButtonStyle.secondary, custom_id="duality:ticket:close")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        thread = interaction.channel
+        if not isinstance(thread, discord.Thread) or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Das geht nur im Ticket selbst.", ephemeral=True)
+            return
+        reporter_id = get_ticket_reporter(thread.id)
+        if interaction.user.id != reporter_id and not is_staff(interaction.user):
+            await interaction.response.send_message("Nur die meldende Person oder Staff kann das Ticket schließen.", ephemeral=True)
+            return
+        if not close_ticket(thread.id):
+            await interaction.response.send_message("Das Ticket ist bereits geschlossen.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"🔒 Ticket geschlossen von {interaction.user.mention}.")
+        await thread.edit(archived=True)
+
+
+async def handle_temp_voice(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+    guild = member.guild
+    creator_ids = {
+        channel.id: prefix
+        for name, prefix in TEMP_VOICE_CREATORS.items()
+        if (channel := stored_channel(guild, "channel", name))
+    }
+    if after.channel and after.channel.id in creator_ids:
+        category = after.channel.category
+        overwrites = dict(category.overwrites) if category else {}
+        overwrites[member] = discord.PermissionOverwrite(manage_channels=True)
+        channel = await guild.create_voice_channel(
+            f"{creator_ids[after.channel.id]} {member.display_name}"[:100],
+            category=category,
+            overwrites=overwrites,
+            reason="Temporärer Voice-Channel",
+        )
+        save_temp_voice(channel.id, guild.id, member.id)
+        try:
+            await member.move_to(channel, reason="Eigener Voice-Channel")
+        except discord.HTTPException:
+            await channel.delete(reason="Ersteller ist nicht mehr im Voice")
+            delete_temp_voice(channel.id)
+    if before.channel and before.channel != after.channel and before.channel.id in temp_voice_ids(guild.id):
+        if not before.channel.members:
+            await before.channel.delete(reason="Temporärer Voice-Channel ist leer")
+            delete_temp_voice(before.channel.id)
+
+
+async def clean_up_temp_voice(guild: discord.Guild) -> None:
+    # Nach einem Neustart sind leere Kanäle übrig, deren Verlassen der Bot nicht mitbekommen hat.
+    for channel_id in temp_voice_ids(guild.id):
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            delete_temp_voice(channel_id)
+        elif not channel.members:
+            try:
+                await channel.delete(reason="Temporärer Voice-Channel ist leer")
+                delete_temp_voice(channel_id)
+            except discord.HTTPException:
+                log.warning("Leerer Voice-Channel %s konnte nicht gelöscht werden", channel_id)
+
+
+async def audit(guild: discord.Guild, text: str, color: discord.Color = discord.Color.dark_grey()) -> None:
+    channel = find_text_channel(guild, "audit-log")
+    if channel is None:
+        return
+    try:
+        await channel.send(
+            embed=discord.Embed(description=text[:4000], color=color, timestamp=discord.utils.utcnow()),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.HTTPException:
+        log.warning("Audit-Log-Eintrag konnte nicht gesendet werden")
+
+
+async def audit_role_changes(before: discord.Member, after: discord.Member) -> None:
+    added = [role for role in after.roles if role not in before.roles]
+    removed = [role for role in before.roles if role not in after.roles]
+    if not added and not removed:
+        return
+    lines = [f"**Rollen geändert:** {after.mention} (`{after.id}`)"]
+    if added:
+        lines.append("➕ " + ", ".join(role.mention for role in added))
+    if removed:
+        lines.append("➖ " + ", ".join(role.mention for role in removed))
+    await audit(after.guild, "\n".join(lines), discord.Color.blurple())
+
+
+async def audit_message_delete(guild: discord.Guild, payload: discord.RawMessageDeleteEvent) -> None:
+    skipped_ids = {
+        channel.id for name in ("audit-log", "bewerbungen") if (channel := find_text_channel(guild, name))
+    }
+    if payload.channel_id in skipped_ids:
+        return
+    message = payload.cached_message
+    if message is not None and message.author.bot:
+        return
+    text = f"**Nachricht gelöscht** in <#{payload.channel_id}>"
+    if message is None:
+        text += "\nAutor und Inhalt unbekannt (Nachricht war nicht im Cache)."
+    else:
+        text += f" · von {message.author.mention} (`{message.author.id}`) · geschrieben <t:{int(message.created_at.timestamp())}:R>"
+        if message.content:
+            text += f"\n>>> {message.content[:1500]}"
+        if message.attachments:
+            text += f"\n{len(message.attachments)} Anhang/Anhänge"
+    await audit(guild, text, discord.Color.red())
+
+
+async def delete_my_applications(guild: discord.Guild, user_id: int) -> int:
+    staff_channel = find_text_channel(guild, "bewerbungen")
+    deleted = 0
+    for application in applications_of(guild.id, user_id):
+        if staff_channel:
+            try:
+                message = await staff_channel.fetch_message(application.message_id)
+                await message.delete()
+            except discord.NotFound:
+                pass
+        delete_application(application.message_id)
+        deleted += 1
+    return deleted
+
+
+class MyDataView(DualityView):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.confirmed = False
+
+    @discord.ui.button(label="Meine Daten löschen …", style=discord.ButtonStyle.danger)
+    async def delete_data(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id or not interaction.guild:
+            await interaction.response.send_message("Das sind nicht deine Daten.", ephemeral=True)
+            return
+        if not self.confirmed:
+            self.confirmed = True
+            button.label = "Ja, endgültig löschen"
+            await interaction.response.edit_message(
+                content="Sicher? Gelöscht werden Profil (Riot-ID, Rollen, Rang-Sync), Teamname, Terminantworten und "
+                "deine Bewerbungen samt Nachricht im Staff-Kanal. Deine Discord-Rollen bleiben bestehen. "
+                "Tickets und Staff-Stimmen bleiben als Nachweis erhalten.",
+                view=self,
+            )
+            return
+        self.stop()
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        deleted_applications = await delete_my_applications(interaction.guild, self.user_id)
+        delete_user_data(interaction.guild.id, self.user_id)
+        log.info("Daten von %s auf Wunsch gelöscht", self.user_id)
+        await interaction.followup.send(
+            f"Erledigt. Deine gespeicherten Daten wurden gelöscht ({deleted_applications} Bewerbung(en)).",
+            ephemeral=True,
+        )
+
+
 async def toggle_notification_role(interaction: discord.Interaction, role_name: str) -> None:
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("Bitte nutze den Button auf dem Server.", ephemeral=True)
@@ -1233,6 +1992,7 @@ class NotificationView(DualityView):
             row=0,
             saved_text="Dein angegebener Valorant-Rang ist jetzt **{}**. Du kannst ihn jederzeit hier ändern.",
             cleared_text="Dein Valorant-Rang wird nicht mehr angezeigt.",
+            managed_by_riot_id=True,
         ))
         self.add_item(ExclusiveRoleSelect(
             role_names=UNIVERSITY_ROLES,
@@ -1269,10 +2029,22 @@ NO_ROLE_VALUE = "__none__"
 class ExclusiveRoleSelect(discord.ui.Select):
     """Dropdown, bei dem höchstens eine Rolle aus einer Gruppe aktiv ist."""
 
-    def __init__(self, *, role_names, placeholder: str, none_label: str, custom_id: str, row: int, saved_text: str, cleared_text: str):
+    def __init__(
+        self,
+        *,
+        role_names,
+        placeholder: str,
+        none_label: str,
+        custom_id: str,
+        row: int,
+        saved_text: str,
+        cleared_text: str,
+        managed_by_riot_id: bool = False,
+    ):
         self.role_names = tuple(role_names)
         self.saved_text = saved_text
         self.cleared_text = cleared_text
+        self.managed_by_riot_id = managed_by_riot_id
         options = [discord.SelectOption(label=name, value=name) for name in self.role_names]
         options.append(discord.SelectOption(label=none_label, value=NO_ROLE_VALUE))
         super().__init__(
@@ -1288,6 +2060,15 @@ class ExclusiveRoleSelect(discord.ui.Select):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Bitte nutze die Auswahl direkt auf dem Server.", ephemeral=True)
             return
+        if self.managed_by_riot_id:
+            profile = get_profile(interaction.guild.id, interaction.user.id)
+            if profile and profile.riot_id:
+                await interaction.response.send_message(
+                    f"Dein Rang wird automatisch über deine Riot-ID **{discord.utils.escape_markdown(profile.riot_id)}** "
+                    "aktualisiert. Mit `/riot-id` ohne Angabe löst du die Verknüpfung.",
+                    ephemeral=True,
+                )
+                return
 
         selected_name = self.values[0]
         selected_role = None
@@ -1299,29 +2080,20 @@ class ExclusiveRoleSelect(discord.ui.Select):
                 )
                 return
 
-        group_ids = {role.id for name in self.role_names if (role := find_role(interaction.guild, name))}
-        previous_roles = [
-            role for role in interaction.user.roles
-            if role.id in group_ids and role != selected_role
-        ]
-        add_roles = [selected_role] if selected_role and selected_role not in interaction.user.roles else []
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if add_roles or previous_roles:
-            try:
-                await set_member_roles(
-                    interaction.user, add=add_roles, remove=previous_roles, reason="Rolle selbst im Dropdown gewählt"
-                )
-            except discord.Forbidden:
-                await interaction.followup.send(
-                    "Der Bot darf diese Rolle gerade nicht vergeben. Bitte prüfe, ob seine Rolle über den Auswahlrollen steht.",
-                    ephemeral=True,
-                )
-                return
-            except discord.HTTPException:
-                await interaction.followup.send(
-                    "Deine Auswahl konnte gerade nicht gespeichert werden. Bitte versuche es später erneut.", ephemeral=True
-                )
-                return
+        try:
+            await set_exclusive_role(interaction.user, self.role_names, selected_role, "Rolle selbst im Dropdown gewählt")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Der Bot darf diese Rolle gerade nicht vergeben. Bitte prüfe, ob seine Rolle über den Auswahlrollen steht.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "Deine Auswahl konnte gerade nicht gespeichert werden. Bitte versuche es später erneut.", ephemeral=True
+            )
+            return
 
         text = self.saved_text.format(selected_name) if selected_role else self.cleared_text
         await interaction.followup.send(text, ephemeral=True)
@@ -1572,7 +2344,8 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
         )
         embed.add_field(
             name="Community",
-            value="Lies `#regeln`, stell dich in `#allgemein` vor und nutze die Buttons in `#willkommen`, um Benachrichtigungen auszuwählen.",
+            value="Lies `#regeln`, stell dich in `#allgemein` vor und nutze die Buttons in `#willkommen`, um Benachrichtigungen auszuwählen. "
+            "Über `➕ Neuer Voice` bekommst du einen eigenen Voice-Channel, der verschwindet, sobald er leer ist.",
             inline=False,
         )
         embed.add_field(
@@ -1582,12 +2355,16 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
         )
         embed.add_field(
             name="Bot-Befehle",
-            value="`/report` meldet ein Problem privat an Staff · `/feedback` sendet eine Idee · `/team` zeigt den aktuellen Kader · `/teamname` setzt optional deinen Namen für den Kader · `/termin` erstellt einen Teamtermin (Staff) · `/neue-saison` öffnet die Bewerbungen wieder (Staff).",
+            value="`/report` öffnet ein privates Ticket mit dem Staff (oder der Button in `#tickets`) · `/feedback` sendet eine Idee · "
+            "`/profil` zeigt Rang, Rollen und Hochschule · `/riot-id` verknüpft deine Riot-ID für den automatischen Rang · "
+            "`/team` zeigt den aktuellen Kader · `/teamname` setzt optional deinen Namen für den Kader · "
+            "`/meine-daten` zeigt, exportiert oder löscht deine gespeicherten Daten · "
+            "`/termin` erstellt einen Teamtermin (Staff) · `/neue-saison` öffnet die Bewerbungen wieder (Staff).",
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @tree.command(name="report", description="Meldet ein Problem vertraulich an den Staff.")
+    @tree.command(name="report", description="Öffnet ein vertrauliches Ticket mit dem Staff.")
     @app_commands.rename(details="beschreibung", member="mitglied")
     @app_commands.describe(details="Was ist passiert? Bitte keine unnötigen privaten Daten eintragen.", member="Betroffenes Mitglied, falls relevant")
     @app_commands.checks.cooldown(1, 60.0, key=per_member_cooldown)
@@ -1596,31 +2373,14 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
         details: str,
         member: discord.Member | None = None,
     ):
-        if not interaction.guild:
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Dieser Befehl funktioniert nur im Server.", ephemeral=True)
             return
         text = details.strip()
         if len(text) < 10 or len(text) > 1500:
             await interaction.response.send_message("Bitte beschreibe das Problem mit 10 bis 1500 Zeichen.", ephemeral=True)
             return
-        staff_channel = find_text_channel(interaction.guild, "orga")
-        if staff_channel is None:
-            await interaction.response.send_message("Der Staff-Eingang ist noch nicht eingerichtet.", ephemeral=True)
-            return
-        embed = discord.Embed(
-            title="Vertraulicher Mitgliederbericht",
-            description=text,
-            color=discord.Color.orange(),
-            timestamp=discord.utils.utcnow(),
-        )
-        embed.add_field(name="Von", value=f"{interaction.user} (`{interaction.user.id}`)", inline=True)
-        embed.add_field(name="Betroffenes Mitglied", value=str(member) if member else "Nicht angegeben", inline=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await staff_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        await interaction.followup.send(
-            "Danke. Dein Bericht wurde vertraulich an Staff gesendet. Staff kann deinen Discord-Namen sehen.",
-            ephemeral=True,
-        )
+        await create_ticket(interaction, text, member)
 
     @tree.command(name="feedback", description="Sendet eine Idee oder Rückmeldung privat an den Staff.")
     @app_commands.rename(suggestion="idee")
@@ -1779,6 +2539,113 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             "Damit verlieren alle mit der Rolle `Bewerber`, deren Bewerbung nicht mehr offen ist, diese Rolle "
             "und können sich über `#bewerbung` erneut bewerben. Offene Bewerbungen bleiben unverändert.",
             view=SeasonResetConfirmView(interaction.user.id),
+            ephemeral=True,
+        )
+
+    @tree.command(name="profil", description="Zeigt Rang, Rollen und Hochschule eines Mitglieds.")
+    @app_commands.rename(member="mitglied")
+    @app_commands.describe(member="Wessen Profil? Leer lassen für dein eigenes.")
+    async def profile_command(interaction: discord.Interaction, member: discord.Member | None = None):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Dieser Befehl funktioniert nur im Server.", ephemeral=True)
+            return
+        target = member or interaction.user
+        profile = get_profile(interaction.guild.id, target.id)
+        # Riot-ID und Teilnahmequote sehen nur die Person selbst und der Staff.
+        private_view = target.id == interaction.user.id or is_staff(interaction.user)
+
+        def role_in(names) -> str:
+            return next((name for name in names if member_has_role(target, name)), "Nicht angegeben")
+
+        rank = role_in(VALORANT_RANKS)
+        if profile and profile.rank_synced_at and profile.riot_id:
+            rank = f"{profile.rank_tier} (automatisch, <t:{profile.rank_synced_at}:R>)"
+        embed = discord.Embed(title=f"Profil von {target.display_name}", color=discord.Color.from_rgb(110, 70, 255))
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.add_field(name="Rang", value=rank, inline=True)
+        embed.add_field(name="Hochschule", value=role_in(UNIVERSITY_ROLES), inline=True)
+        embed.add_field(name="Main-Rolle", value=(profile and profile.main_role) or "Nicht angegeben", inline=True)
+        embed.add_field(name="Spielbare Rollen", value=(profile and profile.playable_roles) or "Nicht angegeben", inline=True)
+        if private_view:
+            embed.add_field(name="Riot-ID", value=(profile and profile.riot_id) or "Nicht verknüpft (`/riot-id`)", inline=True)
+            if any(member_has_role(target, name) for name in TEAM_ROLES):
+                now = int(time.time())
+                since = max(now - EVENT_RETENTION_DAYS * 24 * 60 * 60, int(target.joined_at.timestamp()) if target.joined_at else 0)
+                going, total = attendance(interaction.guild.id, target.id, since, now)
+                quote_text = f"{going} von {total} Terminen zugesagt ({round(100 * going / total)} %)" if total else "Noch keine vergangenen Termine"
+                embed.add_field(name=f"Teilnahme (letzte {EVENT_RETENTION_DAYS} Tage)", value=quote_text, inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @tree.command(name="riot-id", description="Verknüpft deine Riot-ID, damit dein Rang automatisch aktualisiert wird.")
+    @app_commands.rename(riot_id="riot-id")
+    @app_commands.describe(riot_id="Name#Tag, z. B. Duality#EUW. Leer lassen, um die Verknüpfung zu lösen.")
+    @app_commands.checks.cooldown(1, 30.0, key=per_member_cooldown)
+    async def riot_id_command(interaction: discord.Interaction, riot_id: str | None = None):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Dieser Befehl funktioniert nur im Server.", ephemeral=True)
+            return
+        if not riot_id:
+            update_profile(interaction.guild.id, interaction.user.id, riot_name=None, riot_tag=None, region=None, rank_tier=None, rank_synced_at=None)
+            await interaction.response.send_message(
+                "Deine Riot-ID ist nicht mehr verknüpft. Deinen Rang kannst du wieder selbst in `#willkommen` wählen.",
+                ephemeral=True,
+            )
+            return
+        parsed = parse_riot_id(riot_id)
+        if parsed is None:
+            await interaction.response.send_message("Bitte gib deine Riot-ID als `Name#Tag` an, z. B. `Duality#EUW`.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        update_profile(interaction.guild.id, interaction.user.id, riot_name=parsed[0], riot_tag=parsed[1], region=None)
+        try:
+            tier_name = await sync_member_rank(interaction.user, get_profile(interaction.guild.id, interaction.user.id))
+        except RankLookupError as error:
+            update_profile(interaction.guild.id, interaction.user.id, riot_name=None, riot_tag=None, region=None)
+            await interaction.followup.send(f"Die Riot-ID konnte nicht verknüpft werden: {error}", ephemeral=True)
+            return
+        role_name = rank_role_name(tier_name)
+        await interaction.followup.send(
+            f"Verknüpft mit **{discord.utils.escape_markdown(parsed[0])}#{discord.utils.escape_markdown(parsed[1])}**. "
+            f"Aktueller Rang: **{tier_name}**"
+            + ("" if role_name else " (keine Rangrolle, solange du nicht gewertet bist)")
+            + ". Der Bot aktualisiert ihn täglich.",
+            ephemeral=True,
+        )
+
+    @tree.command(name="meine-daten", description="Zeigt, exportiert oder löscht, was der Bot über dich speichert.")
+    @app_commands.checks.cooldown(1, 60.0, key=per_member_cooldown)
+    async def my_data_command(interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Dieser Befehl funktioniert nur im Server.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        data = collect_user_data(interaction.guild.id, interaction.user.id)
+        # Name, Kurs, Tracker-Link und Spielzeiten stehen in der Bewerbungsnachricht.
+        staff_channel = find_text_channel(interaction.guild, "bewerbungen")
+        for entry in data["bewerbungen"]:
+            if staff_channel is None:
+                break
+            try:
+                message = await staff_channel.fetch_message(entry["message_id"])
+                entry["angaben"] = {field.name: field.value for field in message.embeds[0].fields} if message.embeds else {}
+            except discord.HTTPException:
+                entry["angaben"] = "Nachricht nicht mehr vorhanden"
+        export = {
+            "server": interaction.guild.name,
+            "nutzer_id": interaction.user.id,
+            "exportiert_am": discord.utils.utcnow().isoformat(),
+            "daten": data,
+            "hinweis": "Discord-Rollen, Nachrichten und Ticket-Verläufe liegen bei Discord selbst und sind hier nicht enthalten.",
+        }
+        file = discord.File(
+            io.BytesIO(json.dumps(export, ensure_ascii=False, indent=2).encode()),
+            filename="duality-meine-daten.json",
+        )
+        counts = ", ".join(f"{name}: {len(rows)}" for name, rows in data.items())
+        await interaction.followup.send(
+            f"Hier ist alles, was der Bot über dich gespeichert hat ({counts}).",
+            file=file,
+            view=MyDataView(interaction.user.id),
             ephemeral=True,
         )
 
@@ -2023,18 +2890,12 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 remember_id(guild.id, "channel", channel_name, channel.id)
                 if not sync_permissions:
                     print(f"    Kanal vorhanden: {channel_name}")
-                elif apply and channel_name == "bewerbung":
+                elif apply and channel_name in SPECIAL_CHANNEL_OVERWRITES:
                     await channel.edit(
-                        overwrites=application_overwrites(guild, roles),
-                        reason="Bewerbung öffentlich lesbar; Spieler und Bewerber werden ausgeschlossen",
+                        overwrites=SPECIAL_CHANNEL_OVERWRITES[channel_name](guild, roles),
+                        reason="Duality Mannheim Kanal-Zugänge",
                     )
-                    print("    Bewerbungszugriff gesetzt: alle sehen den Kanal; Bewerber und Spieler nicht")
-                elif apply and channel_name == "regeln":
-                    await channel.edit(
-                        overwrites=rules_overwrites(guild, roles),
-                        reason="Regeln-Kanal für Mitglieder lesbar und nur für Staff beschreibbar",
-                    )
-                    print("    Regeln-Kanal auf Lesen beschränkt")
+                    print(f"    Eigene Zugänge gesetzt: {channel_name}")
                 elif apply and not channel.permissions_synced:
                     await channel.edit(sync_permissions=True, reason="Duality Mannheim Kategorie-Zugänge")
                     print(f"    Kanal an Kategorie-Zugänge angepasst: {channel_name}")
@@ -2043,19 +2904,12 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             elif apply:
                 if kind == "voice":
                     channel = await guild.create_voice_channel(channel_name, category=category, reason="Duality Mannheim Setup")
-                elif channel_name == "bewerbung":
+                elif channel_name in SPECIAL_CHANNEL_OVERWRITES:
                     channel = await guild.create_text_channel(
                         channel_name,
                         category=category,
-                        overwrites=application_overwrites(guild, roles),
-                        reason="Duality Mannheim Bewerbung öffentlich lesbar einrichten",
-                    )
-                elif channel_name == "regeln":
-                    channel = await guild.create_text_channel(
-                        channel_name,
-                        category=category,
-                        overwrites=rules_overwrites(guild, roles),
-                        reason="Duality Mannheim Regelkanal",
+                        overwrites=SPECIAL_CHANNEL_OVERWRITES[channel_name](guild, roles),
+                        reason="Duality Mannheim Setup mit eigenen Zugängen",
                     )
                 else:
                     channel = await guild.create_text_channel(channel_name, category=category, reason="Duality Mannheim Setup")
@@ -2087,6 +2941,44 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
         return True
 
     await migrate("applications_to_db_v1", import_legacy_applications)
+
+    async def add_vote_buttons_to_open_applications() -> bool:
+        staff_channel = find_text_channel(guild, "bewerbungen")
+        if staff_channel is None or not apply:
+            return False
+        for application in find_pending_applications(guild.id):
+            try:
+                message = await staff_channel.fetch_message(application.message_id)
+                await show_application(message, application)
+            except discord.HTTPException:
+                log.warning("Offene Bewerbung %s konnte nicht aktualisiert werden", application.message_id)
+        print("  Offene Bewerbungen haben jetzt Abstimm-Buttons")
+        return True
+
+    await migrate("application_vote_buttons_v1", add_vote_buttons_to_open_applications)
+
+    tickets_channel = find_text_channel(guild, "tickets")
+    if apply and tickets_channel:
+        tickets_embed = discord.Embed(
+            title="Tickets an den Staff",
+            description=(
+                "Du hast ein Problem, möchtest etwas melden oder brauchst vertraulich Hilfe? "
+                "Öffne über den Button ein Ticket oder nutze `/report`.\n\n"
+                "Dabei entsteht ein privater Thread, den nur du und der Staff sehen. Dort könnt ihr Rückfragen klären. "
+                "Du oder der Staff könnt das Ticket schließen, sobald alles geklärt ist."
+            ),
+            color=discord.Color.from_rgb(110, 70, 255),
+        )
+        tickets_embed.set_footer(text=TICKETS_MARKER)
+        found_tickets_message = False
+        async for message in tickets_channel.history(limit=50):
+            if message.author == guild.me and message.embeds and message.embeds[0].footer.text == TICKETS_MARKER:
+                await message.edit(embed=tickets_embed, view=TicketStartView())
+                found_tickets_message = True
+                break
+        if not found_tickets_message:
+            await tickets_channel.send(embed=tickets_embed, view=TicketStartView())
+            print("  Ticket-Start in #tickets veröffentlicht")
 
     application_channel = find_text_channel(guild, "bewerbung")
     if apply and application_channel:
@@ -2185,7 +3077,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 "Bewerbungen sind "
                 "ab 16 Jahren möglich; besonders wichtig sind Spielzeiten Mittwoch bis Sonntag ab 19 Uhr. "
                 "Deinen aktuellen Valorant-Rang kannst du optional über das Dropdown unter dieser Nachricht angeben "
-                "und später jederzeit ändern. Der Rang wird nicht in der Bewerbung abgefragt.\n\n"
+                "oder mit `/riot-id` deine Riot-ID verknüpfen; dann aktualisiert der Bot deinen Rang täglich automatisch.\n\n"
                 "Nach dem Absenden prüft der Staff deine Bewerbung. Zugang zum Teambereich gibt es erst nach einer Annahme.\n\n"
                 "**Benachrichtigungen**\n"
                 "Nutze die Buttons unter dieser Nachricht, um freiwillig Pings für Valorant-Updates oder Community-Events zu erhalten."
@@ -2230,9 +3122,19 @@ async def main(apply: bool) -> None:
     print("Modus: Änderungen anwenden und Bot online halten." if apply else "Modus: Vorschau ohne Änderungen.", flush=True)
     # Auch die Vorschau braucht die Datenbank, um erledigte Aufräumschritte zu erkennen.
     initialize_storage()
+    global RANK_CLIENT
+    henrikdev_key = os.getenv("HENRIKDEV_API_KEY", "").strip()
+    if henrikdev_key:
+        RANK_CLIENT = HenrikDevClient(henrikdev_key)
+        print("HenrikDev-API-Key aus HENRIKDEV_API_KEY gelesen; automatische Rangabfrage aktiv.", flush=True)
+    else:
+        print("HENRIKDEV_API_KEY fehlt; die automatische Rangabfrage ist ausgeschaltet.", flush=True)
     intents = discord.Intents.none()
     intents.guilds = True
     intents.members = True
+    # Für Join-to-Create-Voice und gelöschte Nachrichten im Audit-Log; beide nicht privilegiert.
+    intents.voice_states = True
+    intents.guild_messages = True
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)
     register_app_commands(tree)
@@ -2240,6 +3142,31 @@ async def main(apply: bool) -> None:
     client.add_view(ApplicationReviewView())
     client.add_view(NotificationView())
     client.add_view(EventRSVPView())
+    client.add_view(TicketStartView())
+    client.add_view(TicketCloseView())
+
+    @tasks.loop(hours=24)
+    async def sync_ranks():
+        guild = client.get_guild(target_id)
+        if guild is None or RANK_CLIENT is None:
+            return
+        synced = 0
+        for profile in linked_profiles(guild.id):
+            member = guild.get_member(profile.user_id)
+            if member is None:
+                continue
+            try:
+                await sync_member_rank(member, profile)
+                synced += 1
+            except (RankLookupError, discord.HTTPException) as error:
+                log.warning("Rang von %s konnte nicht aktualisiert werden: %s", profile.user_id, error)
+            # Abstand halten, damit der API-Key nicht ins Rate-Limit läuft.
+            await asyncio.sleep(RANK_SYNC_DELAY_SECONDS)
+        log.info("%s Ränge über Riot-ID aktualisiert", synced)
+
+    @sync_ranks.error
+    async def sync_ranks_error(error: Exception):
+        log.error("Fehler beim täglichen Rang-Abgleich", exc_info=error)
 
     @tasks.loop(hours=24)
     async def purge_declined_applications():
@@ -2295,7 +3222,34 @@ async def main(apply: bool) -> None:
     @client.event
     async def on_member_remove(member: discord.Member):
         if apply and member.guild.id == target_id:
+            await audit(member.guild, f"**Server verlassen:** {member.mention} (`{member.id}`, {member})", discord.Color.orange())
             await close_applications_of_departed_member(member)
+
+    @client.event
+    async def on_member_join(member: discord.Member):
+        if apply and member.guild.id == target_id:
+            created = int(member.created_at.timestamp())
+            await audit(
+                member.guild,
+                f"**Beigetreten:** {member.mention} (`{member.id}`, {member}) · Account erstellt <t:{created}:R>",
+                discord.Color.green(),
+            )
+
+    @client.event
+    async def on_member_update(before: discord.Member, after: discord.Member):
+        if apply and after.guild.id == target_id:
+            await audit_role_changes(before, after)
+
+    @client.event
+    async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+        guild = client.get_guild(payload.guild_id) if payload.guild_id else None
+        if apply and guild and guild.id == target_id:
+            await audit_message_delete(guild, payload)
+
+    @client.event
+    async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if apply and member.guild.id == target_id and before.channel != after.channel:
+            await handle_temp_voice(member, before, after)
 
     @client.event
     async def on_ready():
@@ -2321,17 +3275,24 @@ async def main(apply: bool) -> None:
                 await tree.sync(guild=guild_object)
                 commands_synced = True
                 print("  Slash-Befehle für diesen Server veröffentlicht")
+            await clean_up_temp_voice(guild)
             if not purge_declined_applications.is_running():
                 purge_declined_applications.start()
+            if not sync_ranks.is_running():
+                sync_ranks.start()
             if not event_reminders.is_running():
                 event_reminders.start()
             print("Onboarding-Bot läuft. Mit Ctrl+C beenden.")
         else:
             await client.close()
 
-    async with client:
-        print("Verbinde mit Discord ...", flush=True)
-        await client.start(token)
+    try:
+        async with client:
+            print("Verbinde mit Discord ...", flush=True)
+            await client.start(token)
+    finally:
+        if RANK_CLIENT:
+            await RANK_CLIENT.close()
 
 
 if __name__ == "__main__":
