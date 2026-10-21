@@ -431,6 +431,46 @@ class EventChangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.event_rsvp_overview(11), {})
 
 
+class AttendanceTests(unittest.TestCase):
+    def test_summary_rules(self):
+        events = [(1, 100, "A"), (2, 200, "B"), (3, 300, "C"), (4, 400, "D"), (5, 500, "E")]
+        responses = {
+            1: {10: "going", 13: "going"},
+            2: {10: "declined", 11: "going", 13: "going"},
+            3: {11: "maybe", 13: "going"},
+        }
+        summary = main.summarize_attendance(events, responses, {10: 0, 11: 150, 12: 600, 13: 0})
+        self.assertEqual(
+            {key: summary[10][key] for key in ("going", "maybe", "declined", "none", "total", "rate", "flagged")},
+            {"going": 1, "maybe": 0, "declined": 1, "none": 3, "total": 5, "rate": 20, "flagged": True},
+        )
+        # Termin 1 war vor dem Beitritt und zählt nicht.
+        self.assertEqual((summary[11]["total"], summary[11]["going"], summary[11]["rate"]), (4, 1, 25))
+        self.assertEqual([item["message_id"] for item in summary[11]["history"]], [2, 3, 4, 5])
+        self.assertEqual(summary[11]["history"][1]["choice"], "maybe")
+        self.assertEqual((summary[12]["total"], summary[12]["rate"], summary[12]["flagged"]), (0, None, False))
+        # 60 % reicht zwar, aber zwei Termine ohne Reaktion markieren trotzdem.
+        self.assertEqual((summary[13]["rate"], summary[13]["none"], summary[13]["flagged"]), (60, 2, True))
+
+    def test_threshold_boundary(self):
+        summary = main.summarize_attendance([(1, 1, None), (2, 2, None)], {1: {7: "going"}, 2: {7: "declined"}}, {7: 0})
+        self.assertEqual((summary[7]["rate"], summary[7]["flagged"]), (50, False))
+
+    def test_events_in_range_without_cancelled(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(main, "DATA_PATH", Path(directory) / "bot.sqlite3"):
+            main.initialize_storage()
+            main.save_scheduled_event(1, 10, 20, 1000, "Drin")
+            main.save_scheduled_event(2, 10, 20, 1500, "Abgesagt")
+            main.save_scheduled_event(3, 10, 20, 5000, "Zu spät")
+            main.save_scheduled_event(4, 11, 20, 1200, "Anderer Server")
+            main.cancel_scheduled_event(2)
+            main.write_rsvp(1, 7, "going")
+            main.write_rsvp(2, 7, "going")
+            events, responses = main.attendance_events(10, 0, 2000)
+            self.assertEqual(events, [(1, 1000, "Drin")])
+            self.assertEqual(responses, {1: {7: "going"}})
+
+
 class EnvIntTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         with mock.patch.dict("os.environ", {"X_TEST": ""}):

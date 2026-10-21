@@ -486,6 +486,58 @@ def attendance(guild_id: int, user_id: int, since: int, until: int) -> tuple[int
     return going, total
 
 
+ATTENDANCE_THRESHOLD_PERCENT = 50
+# Ab so vielen Terminen ohne Reaktion wird eine Person in der Übersicht markiert.
+ATTENDANCE_MISSING_LIMIT = 2
+
+
+def attendance_events(guild_id: int, since: int, until: int) -> tuple[list[tuple[int, int, str | None]], dict[int, dict[int, str]]]:
+    """Stattgefundene, nicht abgesagte Termine im Zeitraum und die Antworten darauf."""
+    with open_db() as connection:
+        events = connection.execute(
+            "SELECT message_id, starts_at, title FROM scheduled_events WHERE guild_id = ? AND starts_at BETWEEN ? AND ? "
+            "AND cancelled_at IS NULL ORDER BY starts_at",
+            (guild_id, since, until),
+        ).fetchall()
+        rows = connection.execute(
+            "SELECT rsvp.message_id, rsvp.user_id, rsvp.choice FROM event_rsvps AS rsvp "
+            "JOIN scheduled_events AS event ON event.message_id = rsvp.message_id WHERE event.guild_id = ? "
+            "AND event.starts_at BETWEEN ? AND ? AND event.cancelled_at IS NULL",
+            (guild_id, since, until),
+        ).fetchall()
+    responses: dict[int, dict[int, str]] = {}
+    for message_id, user_id, choice in rows:
+        responses.setdefault(message_id, {})[user_id] = choice
+    return events, responses
+
+
+def summarize_attendance(
+    events: Sequence[tuple[int, int, str | None]], responses: dict[int, dict[int, str]], members: dict[int, int]
+) -> dict[int, dict]:
+    """Pro Person (user_id → Beitritt) Zusagen, Vielleicht, Absagen, keine Reaktion und Quote.
+    Termine vor dem Beitritt zählen nicht."""
+    summary = {}
+    for user_id, joined_at in members.items():
+        counts = {"going": 0, "maybe": 0, "declined": 0, "none": 0}
+        history = []
+        for message_id, starts_at, title in events:
+            if starts_at < joined_at:
+                continue
+            choice = responses.get(message_id, {}).get(user_id, "none")
+            counts[choice] += 1
+            history.append({"message_id": message_id, "starts_at": starts_at, "title": title, "choice": choice})
+        total = sum(counts.values())
+        rate = round(100 * counts["going"] / total) if total else None
+        summary[user_id] = {
+            **counts,
+            "total": total,
+            "rate": rate,
+            "flagged": bool(total) and (rate < ATTENDANCE_THRESHOLD_PERCENT or counts["none"] >= ATTENDANCE_MISSING_LIMIT),
+            "history": history,
+        }
+    return summary
+
+
 def save_ticket(thread_id: int, guild_id: int, reporter_id: int) -> None:
     with open_db() as connection:
         connection.execute(
@@ -3944,6 +3996,13 @@ async def main(apply: bool) -> int | None:
                     publish_event=publish_event,
                     edit_event=edit_event,
                     cancel_event=cancel_event,
+                    attendance_events=attendance_events,
+                    summarize_attendance=summarize_attendance,
+                    attendance_rules={
+                        "threshold": ATTENDANCE_THRESHOLD_PERCENT,
+                        "missing_limit": ATTENDANCE_MISSING_LIMIT,
+                        "retention_days": EVENT_RETENTION_DAYS,
+                    },
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

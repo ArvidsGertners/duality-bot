@@ -51,6 +51,7 @@ class FakeMember:
         self.display_avatar = SimpleNamespace(url="https://cdn.discordapp.com/embed/avatars/0.png")
         self.bot = False
         self.roles = []
+        self.joined_at = None
 
     def __str__(self) -> str:
         return self.display_name
@@ -151,6 +152,9 @@ def make_hooks(client=None) -> panel.PanelHooks:
         publish_event=mock.AsyncMock(),
         edit_event=mock.AsyncMock(return_value="Termin geändert."),
         cancel_event=mock.AsyncMock(return_value="Termin abgesagt."),
+        attendance_events=lambda guild_id, since, until: ([], {}),
+        summarize_attendance=main.summarize_attendance,
+        attendance_rules={"threshold": 50, "missing_limit": 2, "retention_days": 90},
     )
 
 
@@ -1120,6 +1124,65 @@ class EventPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.hooks.cancel_event.await_args.kwargs["notify"])
         self.assertIn("„Scrim“ abgesagt", self.hooks.audit.await_args.args[1])
         self.assertEqual((await self.post("/api/events/abc/cancel", {"confirm": True})).status, 400)
+
+
+class AttendancePanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        guild = self.hooks.client.guild
+        player = guild.get_member(PLAYER_ID)
+        player.display_name = "=HYPERLINK(\"x\")"
+        player.joined_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        coach = guild.get_member(COACH_ID)
+        coach.joined_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        role = SimpleNamespace(members=[player, coach])
+        self.hooks.find_role = lambda guild, name: role if name == "Spieler" else None
+        now = int(time.time())
+        self.calls = []
+
+        def events(guild_id, since, until):
+            self.calls.append((since, until))
+            return [(1, now - 86400, "Training"), (2, now - 3600, None)], {1: {PLAYER_ID: "going"}, 2: {COACH_ID: "maybe"}}
+
+        self.hooks.attendance_events = events
+        self.client = TestClient(TestServer(panel.Panel(CONFIG, self.hooks).build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def get(self, path: str):
+        _, cookie = session_cookie(COACH_ID)
+        return await self.client.get(path, headers={"Cookie": cookie})
+
+    async def test_overview(self):
+        data = await (await self.get("/api/attendance?days=14")).json()
+        since, until = self.calls[-1]
+        self.assertEqual(until - since, 14 * 86400)
+        self.assertEqual((data["events"], data["days"], data["rules"]["threshold"]), (2, 14, 50))
+        rows = {row["user"]["id"]: row for row in data["players"]}
+        player, coach = rows[str(PLAYER_ID)], rows[str(COACH_ID)]
+        self.assertEqual((player["going"], player["none"], player["rate"], player["flagged"]), (1, 1, 50, False))
+        self.assertEqual((coach["maybe"], coach["none"], coach["rate"], coach["flagged"]), (1, 1, 0, True))
+        self.assertEqual(player["history"][1]["title"], "Termin")
+        self.assertEqual(player["history"][0]["choice"], "going")
+
+    async def test_period_limits(self):
+        for days in ("0", "91", "abc"):
+            self.assertEqual((await self.get(f"/api/attendance?days={days}")).status, 400)
+
+    async def test_csv(self):
+        response = await self.get("/api/attendance.csv?days=30")
+        self.assertEqual(response.status, 200)
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+        body = (await response.read()).decode()
+        self.assertTrue(body.startswith("\ufeffName;Discord-ID;Zusagen"))
+        self.assertIn("'=HYPERLINK", body)
+        self.assertNotIn(";=HYPERLINK", body)
+        self.assertIn(f";{COACH_ID};0;1;0;1;2;0;ja", body)
+
+    def test_spreadsheet_safe(self):
+        self.assertEqual(panel.spreadsheet_safe("+49 Max"), "'+49 Max")
+        self.assertEqual(panel.spreadsheet_safe("@max"), "'@max")
+        self.assertEqual(panel.spreadsheet_safe("Max"), "Max")
 
 
 if __name__ == "__main__":

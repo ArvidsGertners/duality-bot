@@ -7,9 +7,11 @@ panel.py importiert main.py nicht.
 
 import asyncio
 import base64
+import csv
 import hashlib
 import hmac
 import html
+import io
 import itertools
 import json
 import logging
@@ -365,6 +367,11 @@ def format_duration(seconds: float) -> str:
     return f"{minutes} min"
 
 
+def spreadsheet_safe(value: str) -> str:
+    """Verhindert, dass Tabellenprogramme Namen wie „=HYPERLINK(…)“ als Formel ausführen."""
+    return f"'{value}" if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+
+
 class CommandError(Exception):
     """Fehler mit einer Meldung, die so in der Konsole angezeigt werden darf."""
 
@@ -602,6 +609,10 @@ class PanelHooks:
     publish_event: Callable[[discord.Guild, str, str, int], Awaitable[discord.Message]]
     edit_event: Callable[..., Awaitable[str]]
     cancel_event: Callable[..., Awaitable[str]]
+    # Anwesenheit: Termine + Antworten im Zeitraum, Auswertung je Person, Schwellen und Löschfrist
+    attendance_events: Callable[[int, int, int], tuple[list, dict[int, dict[int, str]]]]
+    summarize_attendance: Callable[[list, dict, dict[int, int]], dict[int, dict]]
+    attendance_rules: dict
 
 
 class Panel:
@@ -643,6 +654,8 @@ class Panel:
             web.get("/api/players", self.api_players),
             web.get("/api/tickets", self.api_tickets),
             web.get("/api/events", self.api_events),
+            web.get("/api/attendance", self.api_attendance),
+            web.get("/api/attendance.csv", self.api_attendance_csv),
             web.post("/api/events", self.api_create_event),
             web.post("/api/events/{message_id}", self.api_edit_event),
             web.post("/api/events/{message_id}/cancel", self.api_cancel_event),
@@ -1174,6 +1187,63 @@ class Panel:
         if wanted == "past":
             events.reverse()
         return web.json_response({"events": events})
+
+    def attendance(self, request: web.Request) -> dict:
+        guild = self.guild()
+        rules = self.hooks.attendance_rules
+        try:
+            days = int(request.query.get("days", "30"))
+        except ValueError:
+            days = 0
+        if not 1 <= days <= rules["retention_days"]:
+            raise json_error(400, f"Der Zeitraum muss zwischen 1 und {rules['retention_days']} Tagen liegen.")
+        until = int(time.time())
+        since = until - days * 24 * 60 * 60
+        player_role = self.hooks.find_role(guild, "Spieler")
+        players = [member for member in (player_role.members if player_role else []) if not member.bot]
+        members = {member.id: int(member.joined_at.timestamp()) if member.joined_at else 0 for member in players}
+        events, responses = self.hooks.attendance_events(guild.id, since, until)
+        summary = self.hooks.summarize_attendance(events, responses, members)
+        rows = []
+        for member in players:
+            entry = summary[member.id]
+            rows.append({
+                "user": self.person(guild, member.id),
+                **{key: entry[key] for key in ("going", "maybe", "declined", "none", "total", "rate", "flagged")},
+                "history": [
+                    {"id": str(item["message_id"]), "title": item["title"] or "Termin", "starts_at": item["starts_at"], "choice": item["choice"]}
+                    for item in entry["history"]
+                ],
+            })
+        rows.sort(key=lambda row: row["user"]["name"].casefold())
+        return {"days": days, "since": since, "until": until, "events": len(events), "rules": rules, "players": rows}
+
+    async def api_attendance(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        return web.json_response(self.attendance(request))
+
+    async def api_attendance_csv(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request)
+        data = self.attendance(request)
+        output = io.StringIO()
+        # Semikolon und BOM, damit Excel die Datei auf deutschen Systemen direkt richtig öffnet.
+        writer = csv.writer(output, delimiter=";")
+        writer.writerow(["Name", "Discord-ID", "Zusagen", "Vielleicht", "Absagen", "Keine Reaktion", "Termine", "Quote %", "Markiert"])
+        for row in data["players"]:
+            writer.writerow([
+                spreadsheet_safe(row["user"]["name"]), row["user"]["id"], row["going"], row["maybe"], row["declined"],
+                row["none"], row["total"], "" if row["rate"] is None else row["rate"], "ja" if row["flagged"] else "nein",
+            ])
+        log.info("Panel: %s (%s) hat die Anwesenheit der letzten %s Tage exportiert", member, member.id, data["days"])
+        filename = f"anwesenheit-{datetime.now(BERLIN):%Y-%m-%d}-{data['days']}-tage.csv"
+        return web.Response(
+            body=("\ufeff" + output.getvalue()).encode(),
+            headers={
+                "Content-Type": "text/csv; charset=utf-8",
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     async def event_form(self, request: web.Request) -> tuple[str, str, int, bool]:
         """Formular prüfen: Zeit kommt als „JJJJ-MM-TTTHH:MM“ in Berliner Zeit."""

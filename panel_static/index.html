@@ -18,6 +18,7 @@
           <li><a href="#konsole" data-page="konsole" data-level="1">Konsole</a></li>
           <li><a href="#voice" data-page="voice" data-level="1">Voice</a></li>
           <li><a href="#termine" data-page="termine" data-level="1">Termine</a></li>
+          <li><a href="#anwesenheit" data-page="anwesenheit" data-level="1">Anwesenheit</a></li>
           <li><a href="#bewerbungen" data-page="bewerbungen" data-level="1">Bewerbungen</a></li>
           <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
           <li><a href="#tickets" data-page="tickets" data-level="1">Tickets</a></li>
@@ -125,6 +126,39 @@
           </div>
         </div>
         <p class="muted small">Termine und Antworten werden nach der Löschfrist (90 Tage) automatisch entfernt.</p>
+      </section>
+
+      <section id="page-anwesenheit" class="page" aria-labelledby="title-anwesenheit" hidden>
+        <h1 id="title-anwesenheit">Anwesenheit</h1>
+        <p class="muted" id="attendance-rules"></p>
+        <div class="toolbar">
+          <label for="attendance-days">Zeitraum</label>
+          <select id="attendance-days">
+            <option value="7">Letzte 7 Tage</option>
+            <option value="14">Letzte 14 Tage</option>
+            <option value="30" selected>Letzte 30 Tage</option>
+            <option value="60">Letzte 60 Tage</option>
+            <option value="90">Letzte 90 Tage</option>
+          </select>
+          <a class="button small" id="attendance-csv" href="/api/attendance.csv?days=30" download>Als CSV exportieren</a>
+          <span class="muted" id="attendance-summary" role="status"></span>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col" aria-sort="ascending"><button type="button" class="sort" data-sort="name">Spieler</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="going">Dabei</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="maybe">Vielleicht</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="declined">Absage</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="none">Keine Reaktion</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="total">Termine</button></th>
+                <th scope="col"><button type="button" class="sort" data-sort="rate">Quote</button></th>
+              </tr>
+            </thead>
+            <tbody id="attendance-list"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="page-bewerbungen" class="page" aria-labelledby="title-bewerbungen" hidden>

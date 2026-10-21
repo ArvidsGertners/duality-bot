@@ -24,6 +24,8 @@ const state = {
   eventsView: "list",
   calendarMonth: null,
   editingEvent: null,
+  attendance: null,
+  attendanceSort: { key: "name", ascending: true },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -567,6 +569,69 @@ function moveCalendar(step) {
   renderCalendar();
 }
 
+/* Anwesenheit */
+
+const CHOICE_LABELS = { going: "✅ Dabei", maybe: "🤔 Vielleicht", declined: "❌ Absage", none: "– keine Reaktion" };
+
+function attendanceName(row) {
+  const wrapper = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.append(personCell(row.user));
+  if (row.flagged) {
+    const reasons = [];
+    if (row.rate !== null && row.rate < state.attendance.rules.threshold) reasons.push(`Quote unter ${state.attendance.rules.threshold} %`);
+    if (row.none >= state.attendance.rules.missing_limit) reasons.push(`${row.none}× keine Reaktion`);
+    summary.append(" ", pill(`auffällig: ${reasons.join(", ")}`, "bad"));
+  }
+  wrapper.append(summary);
+  const list = document.createElement("ul");
+  for (const item of row.history) list.append(listItem(`${eventWhen(item.starts_at)} · ${item.title}: `, CHOICE_LABELS[item.choice]));
+  if (!row.history.length) list.append(listItem(span("muted", "Keine Termine im Zeitraum (oder erst danach beigetreten).")));
+  wrapper.append(list);
+  return wrapper;
+}
+
+function renderAttendance() {
+  const data = state.attendance;
+  const { key, ascending } = state.attendanceSort;
+  const value = (row) => (key === "name" ? row.user.name.toLowerCase() : row[key] ?? -1);
+  const rows = [...data.players].sort((a, b) => {
+    const order = value(a) < value(b) ? -1 : value(a) > value(b) ? 1 : 0;
+    return ascending ? order : -order;
+  });
+  $("#attendance-list").replaceChildren(...(rows.length ? rows.map((row) => {
+    const tableRowElement = tableRow(
+      attendanceName(row), String(row.going), String(row.maybe), String(row.declined), String(row.none), String(row.total),
+      row.rate === null ? "–" : `${row.rate} %`,
+    );
+    if (row.flagged) tableRowElement.classList.add("flagged");
+    for (const cell of [...tableRowElement.children].slice(1)) cell.classList.add("num");
+    return tableRowElement;
+  }) : [emptyRow(7, "Keine Spieler mit der Rolle „Spieler“.")]));
+  for (const header of document.querySelectorAll("#page-anwesenheit th")) {
+    const button = header.querySelector("button.sort");
+    if (button && button.dataset.sort === key) header.setAttribute("aria-sort", ascending ? "ascending" : "descending");
+    else header.removeAttribute("aria-sort");
+  }
+  const flagged = data.players.filter((row) => row.flagged).length;
+  $("#attendance-summary").textContent = `${data.events} Termine · ${data.players.length} Spieler · ${flagged} auffällig`;
+}
+
+async function loadAttendance() {
+  const days = $("#attendance-days").value;
+  $("#attendance-csv").href = `/api/attendance.csv?days=${days}`;
+  state.attendance = await api(`/api/attendance?days=${days}`);
+  const rules = state.attendance.rules;
+  $("#attendance-rules").textContent = `Gezählt werden stattgefundene, nicht abgesagte Termine ab dem Beitritt. Markiert wird bei einer Quote unter ${rules.threshold} % oder ab ${rules.missing_limit} Terminen ohne Reaktion. Termine werden nach ${rules.retention_days} Tagen gelöscht, weiter reicht die Übersicht nicht zurück.`;
+  renderAttendance();
+}
+
+function sortAttendance(key) {
+  const current = state.attendanceSort;
+  state.attendanceSort = { key, ascending: current.key === key ? !current.ascending : key === "name" };
+  if (state.attendance) renderAttendance();
+}
+
 async function loadTickets() {
   const filter = $("#ticket-filter").value;
   const { tickets } = await api(`/api/tickets?state=${filter}`);
@@ -583,6 +648,7 @@ async function loadTickets() {
 
 const pageLoaders = {
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
+  anwesenheit: loadAttendance,
 };
 
 function renderVoice(channels) {
@@ -887,6 +953,10 @@ async function init() {
   $("#player-search").addEventListener("input", renderPlayers);
   $("#ticket-filter").addEventListener("change", () => loadTickets().catch((error) => setBanner(error.message)));
   $("#events-range").addEventListener("change", () => loadEvents().catch((error) => setBanner(error.message)));
+  $("#attendance-days").addEventListener("change", () => loadAttendance().catch((error) => setBanner(error.message)));
+  for (const button of document.querySelectorAll("#page-anwesenheit button.sort")) {
+    button.addEventListener("click", () => sortAttendance(button.dataset.sort));
+  }
   $("#events-view-list").addEventListener("click", () => showEventsView("list"));
   $("#events-view-calendar").addEventListener("click", () => showEventsView("calendar"));
   $("#calendar-prev").addEventListener("click", () => moveCalendar(-1));
