@@ -20,8 +20,9 @@ import sys
 import weakref
 from collections.abc import Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
@@ -169,26 +170,112 @@ def initialize_storage() -> None:
             "guild_id INTEGER NOT NULL, kind TEXT NOT NULL, managed_key TEXT NOT NULL, "
             "object_id INTEGER NOT NULL, PRIMARY KEY (guild_id, kind, managed_key))"
         )
+        # Nur der Status liegt hier; Name, Kurs und Tracker-Link bleiben in der
+        # Discord-Nachricht und verschwinden mit ihr.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS applications ("
+            "message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, applicant_id INTEGER NOT NULL, "
+            "status TEXT NOT NULL, submitted_at INTEGER NOT NULL, decided_by INTEGER, decided_at INTEGER)"
+        )
         rows = connection.execute("SELECT guild_id, kind, managed_key, object_id FROM managed_ids").fetchall()
     MANAGED_IDS.clear()
     MANAGED_IDS.update({(guild_id, kind, key): object_id for guild_id, kind, key, object_id in rows})
 
 
-def migration_applied(migration_key: str) -> bool:
+def migration_applied(guild_id: int, migration_key: str) -> bool:
     with open_db() as connection:
         row = connection.execute(
             "SELECT 1 FROM setup_migrations WHERE migration_key = ?",
-            (migration_key,),
+            (f"{guild_id}:{migration_key}",),
         ).fetchone()
     return row is not None
 
 
-def mark_migration_applied(migration_key: str) -> None:
+def mark_migration_applied(guild_id: int, migration_key: str) -> None:
     with open_db() as connection:
         connection.execute(
             "INSERT OR IGNORE INTO setup_migrations (migration_key, applied_at) VALUES (?, ?)",
-            (migration_key, int(time.time())),
+            (f"{guild_id}:{migration_key}", int(time.time())),
         )
+
+
+def adopt_unscoped_migrations(guild_id: int) -> None:
+    # Ältere Versionen haben erledigte Setup-Schritte ohne Server-ID gespeichert.
+    # Sie gehören zu dem Server, für den der Bot bisher eingerichtet wurde.
+    with open_db() as connection:
+        connection.execute(
+            "UPDATE OR IGNORE setup_migrations SET migration_key = ? || ':' || migration_key "
+            "WHERE migration_key NOT LIKE '%:%'",
+            (str(guild_id),),
+        )
+        connection.execute("DELETE FROM setup_migrations WHERE migration_key NOT LIKE '%:%'")
+
+
+class Application(NamedTuple):
+    message_id: int
+    guild_id: int
+    applicant_id: int
+    status: str
+    submitted_at: int
+    decided_by: int | None = None
+    decided_at: int | None = None
+
+
+APPLICATION_COLUMNS = "message_id, guild_id, applicant_id, status, submitted_at, decided_by, decided_at"
+
+
+def save_application(application: Application) -> None:
+    with open_db() as connection:
+        connection.execute(
+            f"INSERT OR IGNORE INTO applications ({APPLICATION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            application,
+        )
+
+
+def get_application(message_id: int) -> Application | None:
+    with open_db() as connection:
+        row = connection.execute(
+            f"SELECT {APPLICATION_COLUMNS} FROM applications WHERE message_id = ?", (message_id,)
+        ).fetchone()
+    return Application(*row) if row else None
+
+
+def decide_application(message_id: int, status: str, decided_by: int | None, decided_at: int) -> bool:
+    # Nur offene Bewerbungen ändern sich; so kann keine Entscheidung eine andere überschreiben.
+    with open_db() as connection:
+        cursor = connection.execute(
+            "UPDATE applications SET status = ?, decided_by = ?, decided_at = ? "
+            "WHERE message_id = ? AND status = 'pending'",
+            (status, decided_by, decided_at, message_id),
+        )
+    return cursor.rowcount == 1
+
+
+def find_pending_applications(guild_id: int, applicant_id: int | None = None) -> list[Application]:
+    query = f"SELECT {APPLICATION_COLUMNS} FROM applications WHERE guild_id = ? AND status = 'pending'"
+    parameters: tuple[int, ...] = (guild_id,)
+    if applicant_id is not None:
+        query += " AND applicant_id = ?"
+        parameters += (applicant_id,)
+    with open_db() as connection:
+        return [Application(*row) for row in connection.execute(query, parameters)]
+
+
+def expired_applications(guild_id: int, decided_before: int) -> list[Application]:
+    with open_db() as connection:
+        return [
+            Application(*row)
+            for row in connection.execute(
+                f"SELECT {APPLICATION_COLUMNS} FROM applications "
+                "WHERE guild_id = ? AND status IN ('declined', 'left') AND decided_at <= ?",
+                (guild_id, decided_before),
+            )
+        ]
+
+
+def delete_application(message_id: int) -> None:
+    with open_db() as connection:
+        connection.execute("DELETE FROM applications WHERE message_id = ?", (message_id,))
 
 
 def write_rsvp(message_id: int, user_id: int, choice: str) -> None:
@@ -473,11 +560,6 @@ def has_member_choice(member: discord.Member) -> bool:
     return member_has_role(member, "Bewerber") or member_has_role(member, "Spieler")
 
 
-def is_age_confirmed(answer: str) -> bool:
-    words = "".join(character for character in answer.casefold() if character.isalnum() or character.isspace()).split()
-    return bool(words) and (words[0] in {"ja", "yes"} or words == ["ich", "bin", "mindestens", "16"])
-
-
 def is_tracker_profile(value: str) -> bool:
     try:
         parsed = urlparse(value.strip())
@@ -492,13 +574,6 @@ def is_tracker_profile(value: str) -> bool:
 
 
 class TrackerLinkModal(discord.ui.Modal, title="Mitspielen – Tracker.gg-Profil"):
-    age_confirmation = discord.ui.TextInput(
-        label="Bist du mindestens 16 Jahre alt?",
-        placeholder="Bitte bestätige mit: Ja",
-        style=discord.TextStyle.short,
-        max_length=20,
-        required=True,
-    )
     real_name = discord.ui.TextInput(
         label="Wie dürfen wir dich nennen?",
         placeholder="Dein bevorzugter Name oder Nickname",
@@ -526,12 +601,6 @@ class TrackerLinkModal(discord.ui.Modal, title="Mitspielen – Tracker.gg-Profil
             await interaction.response.send_message("Das geht nur direkt auf dem Duality-Server.", ephemeral=True)
             return
         member = interaction.user
-        if not is_age_confirmed(str(self.age_confirmation)):
-            await interaction.response.send_message(
-                "Bitte bestätige, dass du mindestens 16 Jahre alt bist. Bewerbungen sind erst ab 16 möglich.",
-                ephemeral=True,
-            )
-            return
         real_name = str(self.real_name).strip()
         if not real_name:
             await interaction.response.send_message("Bitte gib an, wie wir dich nennen dürfen.", ephemeral=True)
@@ -553,11 +622,8 @@ class TrackerLinkModal(discord.ui.Modal, title="Mitspielen – Tracker.gg-Profil
             "course": str(self.course).strip(),
             "tracker_url": str(self.tracker_url).strip(),
         }
-        await interaction.response.send_message(
-            "Deine Angaben bleiben privat. Wähle im nächsten Schritt deine typische Spielzeit für jeden passenden Abend und deine Main-Rolle. Markiere außerdem alle Rollen, die du im Team spielen kannst, einschließlich deiner Main-Rolle. Die Auswahl läuft nach 10 Minuten ab.",
-            view=ApplicationSelectionView(member.id, draft),
-            ephemeral=True,
-        )
+        view = ApplicationSelectionView(member.id, draft)
+        await interaction.response.send_message(view.step_text(), view=view, ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         log.error("Fehler im Bewerbungsformular", exc_info=error)
@@ -581,11 +647,19 @@ class ApplicationChoiceSelect(discord.ui.Select):
         if not isinstance(view, ApplicationSelectionView):
             await interaction.response.send_message("Diese Bewerbungsauswahl ist abgelaufen.", ephemeral=True)
             return
-        if interaction.user.id != view.member_id or interaction.guild_id != view.draft.get("guild_id"):
+        if not view.owns(interaction):
             await interaction.response.send_message("Diese Bewerbungsangaben gehören einem anderen Mitglied.", ephemeral=True)
             return
-        setattr(view, self.state_key, list(self.values))
+        view.selections[self.state_key] = list(self.values)
         await interaction.response.defer()
+
+
+AGE_CONFIRMED = "16+"
+AGE_TOO_YOUNG = "unter-16"
+# Discord erlaubt 25 Optionen pro Dropdown und 5 Zeilen pro Nachricht. In
+# Schritt 2 braucht die Button-Zeile eine davon, bleiben 4 Dropdowns für Spielzeiten.
+MAX_OPTIONS_PER_SELECT = 25
+MAX_AVAILABILITY_SELECTS = 4
 
 
 class ApplicationSelectionView(DualityView):
@@ -602,29 +676,72 @@ class ApplicationSelectionView(DualityView):
         super().__init__(timeout=600)
         self.member_id = member_id
         self.draft = draft
-        self.availability: list[str] = []
-        self.main_role: list[str] = []
-        self.playable_roles: list[str] = []
+        self.selections: dict[str, list[str]] = {}
+        self.step = 1
+        self.show_profile_step()
+
+    @classmethod
+    def availability_slots(cls) -> list[tuple[str, str, str]]:
+        return [
+            (f"{short_day} · {window}", f"{day}|{window}", f"Typische Spielzeit am {day}")
+            for day, short_day in cls.DAYS
+            for window in cls.TIME_WINDOWS
+        ]
+
+    def owns(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.member_id and interaction.guild_id == self.draft.get("guild_id")
+
+    def step_text(self) -> str:
+        if self.step == 1:
+            return (
+                "**Schritt 1 von 2:** Bestätige dein Alter, wähle deine Main-Rolle und markiere alle Rollen, "
+                "die du im Team spielen kannst, einschließlich deiner Main-Rolle. Deine Angaben bleiben privat. "
+                "Die Auswahl läuft nach 10 Minuten ohne Klick ab."
+            )
+        return (
+            "**Schritt 2 von 2:** Wähle für jeden passenden Abend deine typische Spielzeit aus. "
+            "Du kannst mehrere Abende auswählen."
+        )
+
+    def options(self, state_key: str, entries) -> list[discord.SelectOption]:
+        # Beim Zurückblättern bleibt die bisherige Auswahl sichtbar.
+        chosen = set(self.selections.get(state_key, ()))
+        return [
+            discord.SelectOption(label=label, value=value, description=description, default=value in chosen)
+            for label, value, description in entries
+        ]
+
+    def availability(self) -> list[str]:
+        return [
+            value
+            for key, values in self.selections.items()
+            if key.startswith("availability:")
+            for value in values
+        ]
+
+    def add_button(self, label: str, style: discord.ButtonStyle, row: int, handler) -> None:
+        button = discord.ui.Button(label=label, style=style, row=row)
+        button.callback = handler
+        self.add_item(button)
+
+    def show_profile_step(self) -> None:
+        self.step = 1
+        self.clear_items()
         self.add_item(ApplicationChoiceSelect(
-            state_key="availability",
-            placeholder="Spielzeiten auswählen: Tag und Zeitfenster (Mehrfachauswahl)",
-            options=[
-                discord.SelectOption(
-                    label=f"{short_day} · {window}",
-                    value=f"{day}|{window}",
-                    description=f"Typische Spielzeit am {day}",
-                )
-                for day, short_day in self.DAYS
-                for window in self.TIME_WINDOWS
-            ],
+            state_key="age",
+            placeholder="Bist du mindestens 16 Jahre alt?",
+            options=self.options("age", [
+                ("Ja, ich bin mindestens 16", AGE_CONFIRMED, None),
+                ("Nein, ich bin jünger als 16", AGE_TOO_YOUNG, None),
+            ]),
             minimum=1,
-            maximum=len(self.DAYS) * len(self.TIME_WINDOWS),
+            maximum=1,
             row=0,
         ))
         self.add_item(ApplicationChoiceSelect(
             state_key="main_role",
             placeholder="Deine Main-Rolle auswählen",
-            options=[discord.SelectOption(label=role, value=role) for role in VALORANT_ROLES],
+            options=self.options("main_role", [(role, role, None) for role in VALORANT_ROLES]),
             minimum=1,
             maximum=1,
             row=1,
@@ -632,41 +749,90 @@ class ApplicationSelectionView(DualityView):
         self.add_item(ApplicationChoiceSelect(
             state_key="playable_roles",
             placeholder="Welche Rollen kannst du spielen? (Main-Rolle mit auswählen)",
-            options=[discord.SelectOption(label=role, value=role) for role in VALORANT_ROLES],
+            options=self.options("playable_roles", [(role, role, None) for role in VALORANT_ROLES]),
             minimum=1,
             maximum=len(VALORANT_ROLES),
             row=2,
         ))
+        self.add_button("Weiter zu den Spielzeiten", discord.ButtonStyle.primary, 3, self.go_to_availability)
+
+    def show_availability_step(self) -> None:
+        self.step = 2
+        self.clear_items()
+        slots = self.availability_slots()
+        chunks = [slots[start:start + MAX_OPTIONS_PER_SELECT] for start in range(0, len(slots), MAX_OPTIONS_PER_SELECT)]
+        for index, chunk in enumerate(chunks):
+            placeholder = "Spielzeiten auswählen (Mehrfachauswahl)"
+            if len(chunks) > 1:
+                first_day, last_day = chunk[0][0].split(" · ")[0], chunk[-1][0].split(" · ")[0]
+                placeholder = f"Spielzeiten {first_day}–{last_day} auswählen (Mehrfachauswahl)"
+            self.add_item(ApplicationChoiceSelect(
+                state_key=f"availability:{index}",
+                placeholder=placeholder,
+                options=self.options(f"availability:{index}", chunk),
+                minimum=0,
+                maximum=len(chunk),
+                row=index,
+            ))
+        self.add_button("Zurück", discord.ButtonStyle.secondary, len(chunks), self.go_to_profile)
+        self.add_button("Bewerbung abschicken", discord.ButtonStyle.success, len(chunks), self.submit_application)
 
     async def on_timeout(self):
         self.draft.clear()
 
-    @discord.ui.button(label="Bewerbung abschicken", style=discord.ButtonStyle.success, row=3)
-    async def submit_application(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if (
-            not interaction.guild
-            or not isinstance(interaction.user, discord.Member)
-            or interaction.user.id != self.member_id
-            or interaction.guild.id != self.draft.get("guild_id")
-        ):
-            await interaction.response.send_message("Diese Bewerbung gehört einem anderen Mitglied oder Server.", ephemeral=True)
+    async def reject_foreign(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild and isinstance(interaction.user, discord.Member) and self.owns(interaction):
+            return False
+        await interaction.response.send_message("Diese Bewerbung gehört einem anderen Mitglied oder Server.", ephemeral=True)
+        return True
+
+    async def go_to_availability(self, interaction: discord.Interaction):
+        if await self.reject_foreign(interaction):
+            return
+        age = self.selections.get("age", [])
+        main_role = self.selections.get("main_role", [])
+        if age == [AGE_TOO_YOUNG]:
+            self.draft.clear()
+            self.stop()
+            await interaction.response.edit_message(
+                content="Bewerbungen ins Valorant-Team sind erst ab 16 Jahren möglich. "
+                "In der Community bist du trotzdem herzlich willkommen!",
+                view=None,
+            )
+            return
+        if age != [AGE_CONFIRMED] or not main_role:
+            await interaction.response.send_message(
+                "Bitte beantworte die Altersfrage und wähle deine Main-Rolle aus.", ephemeral=True
+            )
+            return
+        if main_role[0] not in self.selections.get("playable_roles", []):
+            await interaction.response.send_message(
+                "Bitte wähle bei den spielbaren Rollen auch deine Main-Rolle aus.", ephemeral=True
+            )
+            return
+        self.show_availability_step()
+        await interaction.response.edit_message(content=self.step_text(), view=self)
+
+    async def go_to_profile(self, interaction: discord.Interaction):
+        if await self.reject_foreign(interaction):
+            return
+        self.show_profile_step()
+        await interaction.response.edit_message(content=self.step_text(), view=self)
+
+    async def submit_application(self, interaction: discord.Interaction):
+        if await self.reject_foreign(interaction):
             return
 
         member = interaction.user
         if has_member_choice(member):
             await interaction.response.send_message("Du hast bereits eine Zugangsoption gewählt.", ephemeral=True)
             return
-        if not self.availability or not self.main_role:
-            await interaction.response.send_message(
-                "Bitte wähle deine Spielzeiten und Main-Rolle aus.",
-                ephemeral=True,
-            )
+        availability = self.availability()
+        if not availability:
+            await interaction.response.send_message("Bitte wähle mindestens eine Spielzeit aus.", ephemeral=True)
             return
-        if self.main_role[0] not in self.playable_roles:
-            await interaction.response.send_message(
-                "Bitte wähle bei den spielbaren Rollen auch deine Main-Rolle aus.", ephemeral=True
-            )
-            return
+        main_role = self.selections["main_role"][0]
+        playable_roles = self.selections["playable_roles"]
         applicant_role = find_role(interaction.guild, "Bewerber")
         staff_channel = find_text_channel(interaction.guild, "bewerbungen")
         applicant_chat = find_text_channel(interaction.guild, "bewerber-chat")
@@ -715,24 +881,19 @@ class ApplicationSelectionView(DualityView):
             application_embed.add_field(
                 name="Kurs/Ausbildung", value=str(self.draft["course"]) or "Nicht angegeben", inline=True
             )
-            application_embed.add_field(name="Main-Rolle", value=self.main_role[0], inline=True)
+            application_embed.add_field(name="Main-Rolle", value=main_role, inline=True)
             application_embed.add_field(
-                name="Spielbare Rollen (inkl. Main-Rolle)", value=", ".join(self.playable_roles), inline=True
+                name="Spielbare Rollen (inkl. Main-Rolle)", value=", ".join(playable_roles), inline=True
             )
+            slot_order = [value for _, value, _ in self.availability_slots()]
             short_days = dict(self.DAYS)
-            selected_times = [tuple(value.split("|", 1)) for value in self.availability]
-            selected_times.sort(
-                key=lambda item: (
-                    next(index for index, (day, _) in enumerate(self.DAYS) if day == item[0]),
-                    self.TIME_WINDOWS.index(item[1]),
-                )
-            )
+            selected_times = [value.split("|", 1) for value in sorted(availability, key=slot_order.index)]
             availability_text = "\n".join(f"{short_days[day]} · {window}" for day, window in selected_times)
-            application_embed.add_field(name="Spielzeiten (Mi–So)", value=availability_text, inline=False)
+            application_embed.add_field(name="Spielzeiten", value=availability_text[:1024], inline=False)
             application_embed.add_field(name="Tracker.gg", value=str(self.draft["tracker_url"])[:1024], inline=False)
-            application_embed.set_footer(text=f"{APPLICATION_PENDING_PREFIX}{member.id}")
+            application_embed.set_footer(text=f"Status: {APPLICATION_STATUS_LABELS['pending']}")
             try:
-                await staff_channel.send(
+                staff_message = await staff_channel.send(
                     embed=application_embed,
                     view=ApplicationReviewView(),
                     allowed_mentions=discord.AllowedMentions.none(),
@@ -747,6 +908,7 @@ class ApplicationSelectionView(DualityView):
                     ephemeral=True,
                 )
                 return
+            save_application(Application(staff_message.id, interaction.guild.id, member.id, "pending", submitted_at))
 
             try:
                 await applicant_chat.send(
@@ -761,16 +923,17 @@ class ApplicationSelectionView(DualityView):
                 log.exception("Begrüßung im Bewerber-Chat konnte nicht gesendet werden")
 
             await interaction.followup.send(
-                "Danke! Deine Bewerbung wurde an den Staff geschickt. Du hast jetzt die Rolle `Bewerber` und Zugang zu `#bewerber-chat`, wo du Fragen zum Ablauf stellen kannst. `#bewerbung` kannst du danach nicht mehr sehen oder erneut nutzen. Der Staff meldet sich nach der Prüfung bei dir.",
+                "Danke! Deine Bewerbung wurde an den Staff geschickt. Du hast jetzt die Rolle `Bewerber` und Zugang zu `#bewerber-chat`, wo du Fragen zum Ablauf stellen kannst. `#bewerbung` kannst du bis zur nächsten Saison nicht mehr sehen oder erneut nutzen. Der Staff meldet sich nach der Prüfung bei dir.",
                 ephemeral=True,
             )
             self.draft.clear()
             self.stop()
 
 
-# Discord erlaubt höchstens 25 Optionen pro Dropdown.
-if len(ApplicationSelectionView.DAYS) * len(ApplicationSelectionView.TIME_WINDOWS) > 25:
-    raise RuntimeError("Zu viele Kombinationen aus Spieltagen und Zeitfenstern für ein Dropdown (max. 25).")
+if len(ApplicationSelectionView.availability_slots()) > MAX_OPTIONS_PER_SELECT * MAX_AVAILABILITY_SELECTS:
+    raise RuntimeError(
+        f"Höchstens {MAX_OPTIONS_PER_SELECT * MAX_AVAILABILITY_SELECTS} Kombinationen aus Spieltagen und Zeitfenstern möglich."
+    )
 
 
 class OnboardingView(DualityView):
@@ -792,6 +955,80 @@ class OnboardingView(DualityView):
         await interaction.response.send_modal(TrackerLinkModal())
 
 
+APPLICATION_STATUS_LABELS = {
+    "pending": "offen",
+    "accepted": "angenommen",
+    "declined": "abgelehnt",
+    "left": "geschlossen (Server verlassen)",
+}
+LEGACY_DECISIONS = {"ACCEPTED": "accepted", "DECLINED": "declined", "LEFT": "left"}
+
+
+def legacy_application(message: discord.Message) -> Application | None:
+    """Liest Bewerbungen, deren Status ältere Bot-Versionen nur im Footer gespeichert haben."""
+    if not message.embeds or message.guild is None:
+        return None
+    footer = message.embeds[0].footer.text or ""
+    submitted_at = int(message.created_at.timestamp())
+    try:
+        if footer.startswith(APPLICATION_PENDING_PREFIX):
+            applicant_id = int(footer.removeprefix(APPLICATION_PENDING_PREFIX))
+            return Application(message.id, message.guild.id, applicant_id, "pending", submitted_at)
+        if footer.startswith(APPLICATION_DECISION_PREFIX):
+            decision, applicant_id, decided_by, decided_at = footer.removeprefix(APPLICATION_DECISION_PREFIX).split("|")
+            return Application(
+                message.id,
+                message.guild.id,
+                int(applicant_id),
+                LEGACY_DECISIONS[decision],
+                submitted_at,
+                int(decided_by) or None,
+                int(decided_at),
+            )
+    except (KeyError, ValueError):
+        return None
+    return None
+
+
+def load_application(message: discord.Message) -> Application | None:
+    application = get_application(message.id)
+    if application is None:
+        application = legacy_application(message)
+        if application:
+            save_application(application)
+    return application
+
+
+def render_application(message: discord.Message, application: Application) -> discord.Embed:
+    embed = discord.Embed.from_dict(message.embeds[0].to_dict())
+    # Aus der Datenbank neu aufbauen, damit ein erneutes Rendern nichts doppelt.
+    fields = [field for field in embed.fields if field.name != "Entscheidung"]
+    embed.clear_fields()
+    for field in fields:
+        embed.add_field(name=field.name, value=field.value, inline=field.inline)
+    decided = f"<t:{application.decided_at}:F>" if application.decided_at else ""
+    if application.status == "accepted":
+        embed.add_field(name="Entscheidung", value=f"Angenommen von <@{application.decided_by}> · {decided}", inline=False)
+        embed.color = discord.Color.green()
+    elif application.status == "declined":
+        embed.add_field(name="Entscheidung", value=f"Abgelehnt von <@{application.decided_by}> · {decided}", inline=False)
+        embed.color = discord.Color.red()
+    elif application.status == "left":
+        embed.add_field(
+            name="Entscheidung",
+            value=f"Automatisch geschlossen: Die Person hat den Server verlassen · {decided}",
+            inline=False,
+        )
+        embed.color = discord.Color.light_grey()
+    embed.set_footer(text=f"Status: {APPLICATION_STATUS_LABELS[application.status]}")
+    return embed
+
+
+async def show_application(message: discord.Message, application: Application) -> None:
+    view = ApplicationReviewView() if application.status == "pending" else None
+    await message.edit(embed=render_application(message, application), view=view)
+
+
 async def review_application(interaction: discord.Interaction, accepted: bool) -> None:
     if not interaction.guild or not isinstance(interaction.user, discord.Member) or not interaction.message:
         await interaction.response.send_message("Diese Entscheidung ist nur im Server möglich.", ephemeral=True)
@@ -810,29 +1047,20 @@ async def review_application(interaction: discord.Interaction, accepted: bool) -
 
 async def _review_application_locked(interaction: discord.Interaction, accepted: bool) -> None:
     guild = interaction.guild
-    # interaction.message ist der Stand beim Klick. Eine Entscheidung, die
-    # währenddessen am Lock getroffen wurde, steht nur in der frisch geladenen Nachricht.
-    try:
-        message = await interaction.message.fetch()
-    except discord.HTTPException:
-        await interaction.followup.send(
-            "Die Bewerbung konnte gerade nicht geladen werden. Bitte versuche es erneut.", ephemeral=True
-        )
-        return
-
-    if not message.embeds:
+    message = interaction.message
+    application = load_application(message)
+    if application is None:
         await interaction.followup.send("Diese Nachricht ist keine gültige Bewerbung.", ephemeral=True)
         return
-    embed = discord.Embed.from_dict(message.embeds[0].to_dict())
-    footer = embed.footer.text or ""
-    if not footer.startswith(APPLICATION_PENDING_PREFIX):
+    if application.status != "pending":
+        # Falls die Nachricht nach einer Entscheidung nicht aktualisiert werden
+        # konnte, holt ein weiterer Klick das jetzt nach.
+        if message.components:
+            try:
+                await show_application(message, application)
+            except discord.HTTPException:
+                log.exception("Bewerbung %s konnte nicht aktualisiert werden", message.id)
         await interaction.followup.send("Diese Bewerbung wurde bereits bearbeitet.", ephemeral=True)
-        return
-
-    try:
-        applicant_id = int(footer.removeprefix(APPLICATION_PENDING_PREFIX))
-    except ValueError:
-        await interaction.followup.send("Die Bewerber-ID in dieser Nachricht ist ungültig.", ephemeral=True)
         return
 
     player_role = find_role(guild, "Spieler")
@@ -842,9 +1070,10 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
         return
 
     try:
-        applicant = await guild.fetch_member(applicant_id)
+        applicant = await guild.fetch_member(application.applicant_id)
     except discord.NotFound:
-        await close_application_of_departed_member(message, applicant_id)
+        decide_application(message.id, "left", None, int(time.time()))
+        await show_application(message, get_application(message.id))
         await interaction.followup.send(
             "Die Person ist nicht mehr auf dem Server. Die Bewerbung wurde geschlossen und wird "
             f"nach {APPLICATION_RETENTION_DAYS} Tagen automatisch gelöscht.",
@@ -876,35 +1105,30 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
         )
         return
 
-    decided_at = int(time.time())
+    status = "accepted" if accepted else "declined"
+    decide_application(message.id, status, interaction.user.id, int(time.time()))
+    application = get_application(message.id)
     if accepted:
-        decision = "ACCEPTED"
-        decision_text = f"Angenommen von {interaction.user.mention} · <t:{decided_at}:F>"
         dm_text = "Deine Bewerbung bei Duality Mannheim wurde angenommen. Du hast jetzt die Rolle `Spieler` und Zugang zum Teambereich. Willkommen im Team!"
     else:
-        decision = "DECLINED"
-        decision_text = f"Abgelehnt von {interaction.user.mention} · <t:{decided_at}:F>"
         dm_text = "Danke für deine Bewerbung bei Duality Mannheim. Der Staff kann dir aktuell keinen Teamplatz anbieten. Deine Rolle `Bewerber` bleibt bis zur nächsten Saison bestehen. Vor jeder neuen Saison öffnen wir die Bewerbungen wieder, dann kannst du dich erneut bewerben. Wenn du Rückfragen hast, wende dich bitte direkt an den Staff."
-
-    embed.add_field(name="Entscheidung", value=decision_text, inline=False)
-    embed.color = discord.Color.green() if accepted else discord.Color.red()
-    embed.set_footer(text=f"{APPLICATION_DECISION_PREFIX}{decision}|{applicant_id}|{interaction.user.id}|{decided_at}")
-    try:
-        await message.edit(embed=embed, view=None)
-    except discord.HTTPException:
-        log.exception("Bewerbung %s konnte nicht als entschieden markiert werden", message.id)
-        await interaction.followup.send(
-            "Die Rollen wurden geändert, aber die Bewerbungsnachricht konnte nicht aktualisiert werden "
-            "und es wurde noch keine DM verschickt. Bitte klicke gleich noch einmal auf dieselbe Entscheidung.",
-            ephemeral=True,
-        )
-        return
 
     dm_sent = True
     try:
         await applicant.send(dm_text)
     except discord.HTTPException:
         dm_sent = False
+
+    try:
+        await show_application(message, application)
+    except discord.HTTPException:
+        log.exception("Bewerbung %s konnte nicht als entschieden markiert werden", message.id)
+        await interaction.followup.send(
+            "Die Entscheidung ist gespeichert, aber die Bewerbungsnachricht konnte nicht aktualisiert werden. "
+            "Klicke gleich noch einmal auf einen der Buttons, dann wird sie nachgezogen.",
+            ephemeral=True,
+        )
+        return
 
     response = "Bewerbung angenommen" if accepted else "Bewerbung abgelehnt; die Bewerberrolle sperrt eine erneute Bewerbung bis `/neue-saison`"
     if not dm_sent:
@@ -927,54 +1151,31 @@ class ApplicationReviewView(DualityView):
         await review_application(interaction, accepted=False)
 
 
-async def close_application_of_departed_member(message: discord.Message, applicant_id: int) -> None:
-    closed_at = int(time.time())
-    embed = discord.Embed.from_dict(message.embeds[0].to_dict())
-    embed.add_field(
-        name="Entscheidung",
-        value=f"Automatisch geschlossen: Die Person hat den Server verlassen · <t:{closed_at}:F>",
-        inline=False,
-    )
-    embed.color = discord.Color.light_grey()
-    embed.set_footer(text=f"{APPLICATION_DECISION_PREFIX}LEFT|{applicant_id}|0|{closed_at}")
-    await message.edit(embed=embed, view=None)
-
-
-async def pending_applications(staff_channel: discord.TextChannel):
-    """Liefert (Nachricht, Bewerber-ID) für alle noch offenen Bewerbungen."""
-    async for message in staff_channel.history(limit=None):
-        if message.author != staff_channel.guild.me or not message.embeds:
-            continue
-        footer = message.embeds[0].footer.text or ""
-        if not footer.startswith(APPLICATION_PENDING_PREFIX):
-            continue
-        try:
-            yield message, int(footer.removeprefix(APPLICATION_PENDING_PREFIX))
-        except ValueError:
-            continue
-
-
 async def close_applications_of_departed_member(member: discord.Member) -> None:
-    staff_channel = find_text_channel(member.guild, "bewerbungen")
-    if staff_channel is None:
+    pending = find_pending_applications(member.guild.id, member.id)
+    if not pending:
         return
-    async for message, applicant_id in pending_applications(staff_channel):
-        if applicant_id != member.id:
-            continue
-        lock = APPLICATION_LOCKS.setdefault(message.id, asyncio.Lock())
+    staff_channel = find_text_channel(member.guild, "bewerbungen")
+    for application in pending:
+        lock = APPLICATION_LOCKS.setdefault(application.message_id, asyncio.Lock())
         async with lock:
-            fresh = await message.fetch()
-            if (fresh.embeds[0].footer.text or "").startswith(APPLICATION_PENDING_PREFIX):
-                await close_application_of_departed_member(fresh, member.id)
-                log.info("Bewerbung von %s geschlossen: Server verlassen", member.id)
+            if not decide_application(application.message_id, "left", None, int(time.time())):
+                continue
+            log.info("Bewerbung von %s geschlossen: Server verlassen", member.id)
+            if staff_channel is None:
+                continue
+            try:
+                message = await staff_channel.fetch_message(application.message_id)
+                await show_application(message, get_application(application.message_id))
+            except discord.HTTPException:
+                log.warning("Bewerbungsnachricht %s konnte nicht aktualisiert werden", application.message_id)
 
 
 async def reopen_applications(guild: discord.Guild) -> int | None:
     applicant_role = find_role(guild, "Bewerber")
-    staff_channel = find_text_channel(guild, "bewerbungen")
-    if applicant_role is None or staff_channel is None:
+    if applicant_role is None:
         return None
-    pending_ids = {applicant_id async for _, applicant_id in pending_applications(staff_channel)}
+    pending_ids = {application.applicant_id for application in find_pending_applications(guild.id)}
     reopened = 0
     for member in list(applicant_role.members):
         if member.id in pending_ids:
@@ -998,7 +1199,7 @@ class SeasonResetConfirmView(DualityView):
         await interaction.response.edit_message(content="Bewerbungen werden wieder geöffnet …", view=None)
         reopened = await reopen_applications(interaction.guild)
         if reopened is None:
-            text = "Die Rolle `Bewerber` oder `#bewerbungen` wurde nicht gefunden."
+            text = "Die Rolle `Bewerber` wurde nicht gefunden."
         else:
             text = f"Neue Saison gestartet: {reopened} Personen können sich wieder bewerben. Offene Bewerbungen bleiben unverändert."
         await interaction.edit_original_response(content=text)
@@ -1299,6 +1500,54 @@ async def register_existing_scheduled_events(guild: discord.Guild) -> int:
     return imported
 
 
+BERLIN = ZoneInfo("Europe/Berlin")
+EVENT_TIME_FORMAT = "%d.%m.%Y %H:%M"
+EVENT_SUGGESTED_TIMES = ("18:00", "19:00", "19:30", "20:00", "21:00")
+EVENT_DEFAULT_TIME = "19:30"
+EVENT_SUGGESTION_DAYS = 14
+WEEKDAY_SHORT = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
+
+
+def parse_event_time(text: str) -> datetime:
+    return datetime.strptime(text.strip(), EVENT_TIME_FORMAT).replace(tzinfo=BERLIN)
+
+
+def describe_event_time(moment: datetime, now: datetime) -> str:
+    relative = {0: " (heute)", 1: " (morgen)"}.get((moment.date() - now.date()).days, "")
+    return f"{WEEKDAY_SHORT[moment.weekday()]}, {moment.strftime(EVENT_TIME_FORMAT)} Uhr{relative}"
+
+
+def matches_event_query(name: str, tokens: list[str]) -> bool:
+    # Jedes Suchwort muss am Anfang von Wochentag, Datum, Uhrzeit oder „heute/morgen“
+    # stehen; so passt „20“ zu 20:00, aber nicht zur Jahreszahl 2026.
+    words = name.casefold().replace(",", " ").replace("(", " ").replace(")", " ").split()
+    return all(any(word.startswith(token) for word in words) for token in tokens)
+
+
+def event_time_suggestions(current: str, now: datetime) -> list[tuple[str, str]]:
+    """Ohne Eingabe die nächsten Abende um 19:30; mit Eingabe alle passenden Zeiten."""
+    now = now.astimezone(BERLIN)
+    tokens = current.casefold().split()
+    suggestions = []
+    try:
+        typed = parse_event_time(current)
+    except ValueError:
+        typed = None
+    if typed and typed > now:
+        suggestions.append((describe_event_time(typed, now), typed.strftime(EVENT_TIME_FORMAT)))
+    for offset in range(EVENT_SUGGESTION_DAYS + 1):
+        day = now.date() + timedelta(days=offset)
+        for clock in EVENT_SUGGESTED_TIMES:
+            if not tokens and clock != EVENT_DEFAULT_TIME:
+                continue
+            moment = parse_event_time(f"{day:%d.%m.%Y} {clock}")
+            name = describe_event_time(moment, now)
+            if moment > now and matches_event_query(name, tokens):
+                suggestions.append((name, moment.strftime(EVENT_TIME_FORMAT)))
+    # Discord zeigt höchstens 25 Vorschläge.
+    return list(dict.fromkeys(suggestions))[:25]
+
+
 def register_app_commands(tree: app_commands.CommandTree) -> None:
     @tree.error
     async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1455,7 +1704,7 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
     @app_commands.rename(title="titel", when="wann", details="infos")
     @app_commands.describe(
         title="Name des Termins",
-        when="Datum und Uhrzeit im Format TT.MM.JJJJ HH:MM, deutsche Zeit",
+        when="Vorschlag wählen oder TT.MM.JJJJ HH:MM tippen, z. B. „fr 20“ oder „morgen“",
         details="Optionale Infos zum Termin",
     )
     async def event_command(
@@ -1478,9 +1727,12 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
             await interaction.response.send_message("Bitte nutze `/termin` in `#spieltermine`.", ephemeral=True)
             return
         try:
-            event_time = datetime.strptime(when.strip(), "%d.%m.%Y %H:%M").replace(tzinfo=ZoneInfo("Europe/Berlin"))
+            event_time = parse_event_time(when)
         except ValueError:
-            await interaction.response.send_message("Nutze das Format `TT.MM.JJJJ HH:MM`, zum Beispiel `25.10.2026 19:30`.", ephemeral=True)
+            await interaction.response.send_message(
+                "Wähle einen Vorschlag aus oder nutze das Format `TT.MM.JJJJ HH:MM`, zum Beispiel `25.10.2026 19:30`.",
+                ephemeral=True,
+            )
             return
         event_timestamp = int(event_time.timestamp())
         if event_timestamp <= int(time.time()):
@@ -1508,6 +1760,13 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
         save_scheduled_event(event_message.id, interaction.guild.id, event_channel.id, event_timestamp)
         await interaction.followup.send("Der Termin mit RSVP-Buttons wurde in `#spieltermine` veröffentlicht.", ephemeral=True)
 
+    @event_command.autocomplete("when")
+    async def event_time_autocomplete(interaction: discord.Interaction, current: str):
+        return [
+            app_commands.Choice(name=name, value=value)
+            for name, value in event_time_suggestions(current, datetime.now(BERLIN))
+        ]
+
     @tree.command(name="neue-saison", description="Öffnet die Bewerbungen für die neue Saison wieder (Staff).")
     async def new_season_command(interaction: discord.Interaction):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -1526,15 +1785,17 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
 
 async def setup_guild(guild: discord.Guild, apply: bool) -> None:
     print(f"Server: {guild.name} ({guild.id})")
+    if apply:
+        adopt_unscoped_migrations(guild.id)
 
     async def migrate(migration_key: str, migration) -> None:
         # Aufräumschritte laufen nur, bis sie als erledigt gespeichert sind.
         # So werden später bewusst angelegte Kanäle oder Rollen mit altem
         # Namen nicht bei jedem Neustart wieder gelöscht oder umgebaut.
-        if migration_applied(migration_key):
+        if migration_applied(guild.id, migration_key):
             return
         if await migration() and apply:
-            mark_migration_applied(migration_key)
+            mark_migration_applied(guild.id, migration_key)
 
     async def rename_old_categories() -> bool:
         category_renames = {
@@ -1687,7 +1948,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
     await migrate("remove_legion_radiants_voice_v1", remove_unwanted_voice_channels)
 
     permissions_key = f"permissions_v{PERMISSIONS_VERSION}"
-    sync_permissions = not migration_applied(permissions_key)
+    sync_permissions = not migration_applied(guild.id, permissions_key)
     category_lookup = {category.name: category for category in guild.categories}
     for config in CATEGORIES:
         name = config["name"]
@@ -1716,7 +1977,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             print(f"  Kategorie vorhanden: {name}; Zugänge würden aktualisiert")
 
         existing = {channel.name: channel for channel in category.channels}
-        if name == "💬 LOUNGE" and not migration_applied("lounge_general_v1"):
+        if name == "💬 LOUNGE" and not migration_applied(guild.id, "lounge_general_v1"):
             old_general = existing.get("general")
             if old_general and "allgemein" not in existing:
                 if apply:
@@ -1734,9 +1995,9 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 else:
                     print("    Doppelter Kanal general würde entfernt")
             if apply:
-                mark_migration_applied("lounge_general_v1")
+                mark_migration_applied(guild.id, "lounge_general_v1")
 
-        if name == "📝 BEWERBER" and not migration_applied("applicant_chat_rename_v1"):
+        if name == "📝 BEWERBER" and not migration_applied(guild.id, "applicant_chat_rename_v1"):
             old_applicant_chat = existing.get("looking-for-team")
             if old_applicant_chat and "bewerber-chat" not in existing:
                 if apply:
@@ -1752,7 +2013,7 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             elif old_applicant_chat:
                 print("    Alter Kanal looking-for-team bleibt bestehen, da bewerber-chat bereits existiert")
             if apply:
-                mark_migration_applied("applicant_chat_rename_v1")
+                mark_migration_applied(guild.id, "applicant_chat_rename_v1")
 
         for kind, channel_name in config["channels"]:
             # Gespeicherte ID zuerst: Ein umbenannter oder verschobener Kanal wird
@@ -1804,8 +2065,28 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 print(f"    {kind.capitalize()}-Kanal würde erstellt: {channel_name}")
 
     if apply and sync_permissions:
-        mark_migration_applied(permissions_key)
+        mark_migration_applied(guild.id, permissions_key)
         print(f"  Rechte-Version {PERMISSIONS_VERSION} gespeichert; Neustarts lassen manuelle Rechte unverändert")
+
+    async def import_legacy_applications() -> bool:
+        staff_channel = find_text_channel(guild, "bewerbungen")
+        if staff_channel is None:
+            return False
+        if not apply:
+            print("  Bestehende Bewerbungen würden in die Datenbank übernommen")
+            return False
+        imported = 0
+        async for message in staff_channel.history(limit=None):
+            if message.author != guild.me or get_application(message.id):
+                continue
+            application = legacy_application(message)
+            if application:
+                save_application(application)
+                imported += 1
+        print(f"  {imported} bestehende Bewerbungen in die Datenbank übernommen")
+        return True
+
+    await migrate("applications_to_db_v1", import_legacy_applications)
 
     application_channel = find_text_channel(guild, "bewerbung")
     if apply and application_channel:
@@ -1974,20 +2255,14 @@ async def main(apply: bool) -> None:
         if staff_channel is None:
             return
         cutoff = now - APPLICATION_RETENTION_DAYS * 24 * 60 * 60
-        purged_prefixes = (f"{APPLICATION_DECISION_PREFIX}DECLINED|", f"{APPLICATION_DECISION_PREFIX}LEFT|")
-        async for message in staff_channel.history(limit=None):
-            if message.author != guild.me or not message.embeds:
-                continue
-            footer = message.embeds[0].footer.text or ""
-            if not footer.startswith(purged_prefixes):
-                continue
+        for application in expired_applications(guild.id, cutoff):
             try:
-                decided_at = int(footer.split("|")[3])
-            except (IndexError, ValueError):
-                continue
-            if decided_at <= cutoff:
+                message = await staff_channel.fetch_message(application.message_id)
                 await message.delete()
-                log.info("Bewerbung nach %s Tagen gelöscht", APPLICATION_RETENTION_DAYS)
+            except discord.NotFound:
+                pass
+            delete_application(application.message_id)
+            log.info("Bewerbung nach %s Tagen gelöscht", APPLICATION_RETENTION_DAYS)
 
     @purge_declined_applications.error
     async def purge_declined_applications_error(error: Exception):
