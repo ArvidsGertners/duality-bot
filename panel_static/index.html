@@ -33,7 +33,32 @@
 
       <section id="page-dashboard" class="page" aria-labelledby="title-dashboard">
         <h1 id="title-dashboard">Dashboard</h1>
-        <p class="muted">Willkommen im Panel. Weitere Bereiche folgen.</p>
+        <div class="grid">
+          <article class="card" aria-labelledby="card-bot">
+            <h2 id="card-bot">Bot</h2>
+            <dl class="stat-list" id="dash-bot"></dl>
+          </article>
+          <article class="card" aria-labelledby="card-guild">
+            <h2 id="card-guild">Server</h2>
+            <dl class="stat-list" id="dash-guild"></dl>
+          </article>
+          <article class="card" aria-labelledby="card-api">
+            <h2 id="card-api">HenrikDev-API</h2>
+            <dl class="stat-list" id="dash-api"></dl>
+          </article>
+        </div>
+        <article class="card spaced" aria-labelledby="card-tasks">
+          <h2 id="card-tasks">Hintergrund-Tasks</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th scope="col">Task</th><th scope="col">Status</th><th scope="col">Letzter Lauf</th><th scope="col">Nächster Lauf</th><th scope="col">Letzter Fehler</th></tr>
+              </thead>
+              <tbody id="dash-tasks"></tbody>
+            </table>
+          </div>
+        </article>
+        <p class="muted small" id="dash-updated">Warte auf Daten vom Bot …</p>
       </section>
 
       <section id="page-konsole" class="page" aria-labelledby="title-konsole" hidden>

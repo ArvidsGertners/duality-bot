@@ -13,7 +13,9 @@ import html
 import itertools
 import json
 import logging
+import math
 import os
+import platform
 import re
 import secrets
 import sys
@@ -22,8 +24,11 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode, urlparse
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -47,6 +52,7 @@ COACH, ADMIN, OWNER = 1, 2, 3
 LEVEL_NAMES = {COACH: "Coach", ADMIN: "Admin", OWNER: "Owner"}
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 PANEL_COLOR = discord.Color.from_rgb(110, 70, 255)
+BERLIN = ZoneInfo("Europe/Berlin")
 LOG_BUFFER_SIZE = 1000
 LOG_MESSAGE_LIMIT = 4000
 WS_QUEUE_SIZE = 2000
@@ -340,6 +346,23 @@ def find_channel(guild: discord.Guild, text: str):
     return discord.utils.find(lambda channel: channel.name.casefold() == name, guild.text_channels)
 
 
+def format_time(timestamp: float | None) -> str:
+    if not timestamp:
+        return "–"
+    return datetime.fromtimestamp(timestamp, BERLIN).strftime("%d.%m.%Y %H:%M")
+
+
+def format_duration(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    days, minutes = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(minutes, 60)
+    if days:
+        return f"{days} d {hours} h"
+    if hours:
+        return f"{hours} h {minutes} min"
+    return f"{minutes} min"
+
+
 class CommandError(Exception):
     """Fehler mit einer Meldung, die so in der Konsole angezeigt werden darf."""
 
@@ -371,6 +394,43 @@ async def command_help(context: CommandContext, arguments: str) -> str:
         for command in COMMANDS.values()
         if context.level >= command.level
     )
+
+
+async def command_status(context: CommandContext, arguments: str) -> str:
+    status = context.panel.status()
+    bot, guild, api = status["bot"], status["guild"], status["henrikdev"]
+    latency = f"{bot['latency_ms']} ms" if bot["latency_ms"] is not None else "–"
+    lines = [
+        f"Bot: {'verbunden' if bot['connected'] else 'getrennt'} als {bot['user'] or '–'} · Latenz {latency} · "
+        f"läuft seit {format_duration(status['time'] - bot['started_at'])}",
+        f"Version: Python {bot['python']} · discord.py {bot['discord_py']} · Commit {bot['commit']}",
+    ]
+    if guild:
+        lines.append(
+            f"Server: {guild['name']} · {guild['members']} Mitglieder · {guild['players']} Spieler · "
+            f"{guild['applicants']} Bewerber · {guild['staff']} Staff"
+        )
+    if not api["enabled"]:
+        lines.append("HenrikDev: aus (HENRIKDEV_API_KEY fehlt)")
+    else:
+        error = f"{api['last_error']} ({format_time(api['last_error_at'])})" if api["last_error"] else "keiner"
+        limit = f" · Rate-Limit bis {format_time(api['rate_limited_until'])}" if api["rate_limited"] else ""
+        lines.append(f"HenrikDev: aktiv · letzter Fehler: {error}{limit}")
+    stopped = [task["label"] for task in status["tasks"] if not task["running"]]
+    if stopped:
+        lines.append("Gestoppte Tasks: " + ", ".join(stopped))
+    return "\n".join(lines)
+
+
+async def command_tasks(context: CommandContext, arguments: str) -> str:
+    lines = []
+    for task in context.panel.status()["tasks"]:
+        error = f"{task['last_error']} ({format_time(task['last_error_at'])})" if task["last_error"] else "–"
+        lines.append(
+            f"{task['label']}: {'läuft' if task['running'] else 'GESTOPPT'} · letzter Lauf {format_time(task['last_run'])} · "
+            f"nächster {format_time(task['next_run'])} · letzter Fehler: {error}"
+        )
+    return "\n".join(lines) or "Keine Hintergrund-Tasks registriert."
 
 
 async def command_sync_ranks(context: CommandContext, arguments: str) -> str:
@@ -424,6 +484,8 @@ COMMANDS = {
     command.name: command
     for command in (
         ConsoleCommand("help", "help", "listet die Befehle, die du nutzen darfst", COACH, command_help, controlling=False),
+        ConsoleCommand("status", "status", "Kurzstatus wie im Dashboard", COACH, command_status, controlling=False),
+        ConsoleCommand("tasks", "tasks", "Status aller Hintergrund-Tasks", COACH, command_tasks, controlling=False),
         ConsoleCommand(
             "sync-ranks", "sync-ranks [@user|user_id]", "Rang-Abgleich sofort, für alle oder eine Person",
             ADMIN, command_sync_ranks,
@@ -481,6 +543,15 @@ class PanelHooks:
     purge: Callable[[discord.Guild], Awaitable[tuple[int, int]]]
     cleanup_voice: Callable[[discord.Guild], Awaitable[int]]
     restart: Callable[[], Awaitable[None]]
+    # Dashboard
+    started_at: float
+    gateway: dict
+    # Name → (Anzeigename, tasks.Loop)
+    loops: dict[str, tuple[str, Any]]
+    loop_status: dict[str, dict]
+    rank_client: Callable[[], Any]
+    find_role: Callable[[discord.Guild, str], discord.Role | None]
+    staff_members: Callable[[discord.Guild], list[discord.Member]]
 
 
 class Panel:
@@ -495,6 +566,7 @@ class Panel:
         self.log_handler = ConsoleLogHandler(self.console)
         self.connections: set[Connection] = set()
         self.tasks: set[asyncio.Task] = set()
+        self.commit = "unbekannt"
         ws_origin = config.origin.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
         self.csp = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -512,6 +584,7 @@ class Panel:
             web.get("/auth/callback", self.callback),
             web.post("/auth/logout", self.logout),
             web.get("/api/me", self.api_me),
+            web.get("/api/status", self.api_status),
             web.get("/ws", self.websocket),
         ])
         app.router.add_static("/static/", STATIC_DIR)
@@ -522,6 +595,7 @@ class Panel:
         return app
 
     async def open(self, app: web.Application | None = None) -> None:
+        self.commit = await read_git_commit()
         self.console.loop = asyncio.get_running_loop()
         self.console.listeners.append(self.broadcast_log)
         for name in CAPTURED_LOGGERS:
@@ -625,12 +699,73 @@ class Panel:
         return staff[1] if staff else 0
 
     async def watch_connections(self) -> None:
-        # Rollenentzug, Abmelden und Ablauf der Session wirken auch auf offene Konsolen.
+        # Rollenentzug, Abmelden und Ablauf der Session wirken auch auf offene Konsolen;
+        # alle anderen bekommen bei der Gelegenheit den aktuellen Status fürs Dashboard.
         while True:
             await asyncio.sleep(WS_CHECK_SECONDS)
+            if not self.connections:
+                continue
+            status = self.status()
             for connection in list(self.connections):
                 if self.connection_level(connection) == 0:
                     await connection.ws.close(code=WS_CLOSE_NO_ACCESS, message=b"Kein Zugriff mehr")
+                else:
+                    connection.send({"type": "status", "status": status})
+
+    def status(self) -> dict:
+        hooks = self.hooks
+        client = hooks.client
+        guild = self.guild()
+        now = time.time()
+        latency = client.latency
+        tasks = []
+        for name, (label, loop) in hooks.loops.items():
+            info = hooks.loop_status.get(name, {})
+            next_run = loop.next_iteration if loop.is_running() else None
+            tasks.append({
+                "name": name,
+                "label": label,
+                "running": loop.is_running(),
+                "last_run": info.get("last_run"),
+                "next_run": int(next_run.timestamp()) if next_run else None,
+                "last_error": info.get("last_error"),
+                "last_error_at": info.get("last_error_at"),
+            })
+
+        def role_count(name: str) -> int:
+            role = hooks.find_role(guild, name)
+            return len(role.members) if role else 0
+
+        rank_client = hooks.rank_client()
+        return {
+            "time": int(now),
+            "bot": {
+                "connected": bool(hooks.gateway.get("connected")) and client.is_ready(),
+                "connection_changed_at": hooks.gateway.get("changed_at"),
+                "latency_ms": round(latency * 1000) if math.isfinite(latency) else None,
+                "user": str(client.user) if client.user else None,
+                "started_at": int(hooks.started_at),
+                "python": platform.python_version(),
+                "discord_py": discord.__version__,
+                "commit": self.commit,
+            },
+            "guild": {
+                "name": guild.name,
+                "members": guild.member_count,
+                "players": role_count("Spieler"),
+                "applicants": role_count("Bewerber"),
+                "staff": len(hooks.staff_members(guild)),
+            } if guild else None,
+            "tasks": tasks,
+            "henrikdev": {
+                "enabled": rank_client is not None,
+                "last_error": rank_client.last_error if rank_client else None,
+                "last_error_at": rank_client.last_error_at if rank_client else None,
+                "failures_in_row": rank_client.failures_in_row if rank_client else 0,
+                "rate_limited": bool(rank_client and rank_client.rate_limited_until > now),
+                "rate_limited_until": int(rank_client.rate_limited_until) if rank_client and rank_client.rate_limited_until > now else None,
+            },
+        }
 
     def broadcast_log(self, entry: dict) -> None:
         for connection in list(self.connections):
@@ -761,6 +896,10 @@ class Panel:
             "csrf": session["csrf"],
         })
 
+    async def api_status(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        return web.json_response(self.status())
+
     def command_list(self, level: int) -> list[dict]:
         return [
             {"name": command.name, "usage": command.usage, "description": command.description, "confirm": command.confirm}
@@ -783,7 +922,12 @@ class Panel:
         self.connections.add(connection)
         writer = asyncio.create_task(connection.write())
         try:
-            connection.send({"type": "hello", "logs": self.console.snapshot(), "commands": self.command_list(level)})
+            connection.send({
+                "type": "hello",
+                "logs": self.console.snapshot(),
+                "commands": self.command_list(level),
+                "status": self.status(),
+            })
             async for message in ws:
                 if message.type == aiohttp.WSMsgType.TEXT:
                     self.handle_message(connection, message.data)
@@ -851,6 +995,21 @@ class Panel:
         except Exception:
             log.exception("Panel-Befehl %s ist fehlgeschlagen", name)
             reply(False, "Der Befehl ist fehlgeschlagen. Details stehen im Log.")
+
+
+async def read_git_commit() -> str:
+    """Aktueller Commit, einmal beim Start gelesen (feste Argumente, keine Shell)."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--short", "HEAD",
+            cwd=Path(__file__).parent,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        output, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+    except (OSError, asyncio.TimeoutError):
+        return "unbekannt"
+    return output.decode().strip() or "unbekannt"
 
 
 async def start_panel(hooks: PanelHooks) -> web.AppRunner | None:

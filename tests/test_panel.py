@@ -6,7 +6,9 @@ import logging
 import os
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -67,6 +69,7 @@ class FakeGuild:
     def __init__(self, members):
         self.id = 1
         self.name = "Duality Test"
+        self.member_count = 4
         self.me = FakeMember(1, "Duality-Bot")
         self.members = {member.id: member for member in members}
         self.text_channels = [FakeChannel(111111111111111111, "allgemein"), FakeChannel(222222222222222222, "Orga", can_send=False)]
@@ -82,6 +85,8 @@ class FakeClient:
     def __init__(self, guild):
         self.guild = guild
         self.ready = True
+        self.latency = 0.042
+        self.user = "Duality-Bot#0001"
 
     def get_guild(self, guild_id: int):
         return self.guild
@@ -92,6 +97,15 @@ class FakeClient:
 
 OWNER_ID, ADMIN_ID, COACH_ID, PLAYER_ID = 100000000000000010, 100000000000000020, 100000000000000030, 100000000000000040
 LEVELS = {OWNER_ID: panel.OWNER, ADMIN_ID: panel.ADMIN, COACH_ID: panel.COACH}
+
+
+class FakeLoop:
+    def __init__(self, running: bool = True):
+        self.running = running
+        self.next_iteration = datetime(2026, 10, 22, 11, 0, tzinfo=timezone.utc)
+
+    def is_running(self) -> bool:
+        return self.running
 
 
 def make_hooks(client=None) -> panel.PanelHooks:
@@ -107,6 +121,13 @@ def make_hooks(client=None) -> panel.PanelHooks:
         purge=mock.AsyncMock(return_value=(2, 3)),
         cleanup_voice=mock.AsyncMock(return_value=4),
         restart=mock.AsyncMock(),
+        started_at=time.time() - 3 * 60 * 60,
+        gateway={"connected": True, "changed_at": 0},
+        loops={"sync_ranks": ("Rang-Abgleich", FakeLoop()), "event_reminders": ("Termin-Erinnerungen", FakeLoop(running=False))},
+        loop_status={"event_reminders": {"last_run": 1792580000, "last_error": "RuntimeError: kaputt", "last_error_at": 1792580000}},
+        rank_client=lambda: None,
+        find_role=lambda guild, name: SimpleNamespace(members=[1, 2]) if name == "Spieler" else None,
+        staff_members=lambda guild: [guild.get_member(OWNER_ID), guild.get_member(COACH_ID)],
     )
 
 
@@ -471,7 +492,8 @@ class ConsoleWebSocketTests(unittest.IsolatedAsyncioTestCase):
     async def test_hello_lists_only_allowed_commands_and_old_logs(self):
         logging.getLogger("duality").info("Vor dem Verbinden")
         _, _, hello = await self.connect(COACH_ID)
-        self.assertEqual([command["name"] for command in hello["commands"]], ["help"])
+        self.assertEqual([command["name"] for command in hello["commands"]], ["help", "status", "tasks"])
+        self.assertEqual(hello["status"]["guild"]["name"], "Duality Test")
         self.assertIn("Vor dem Verbinden", [entry["message"] for entry in hello["logs"]])
         _, _, hello = await self.connect(OWNER_ID)
         self.assertIn("restart", [command["name"] for command in hello["commands"]])
@@ -595,6 +617,121 @@ class ConsoleWebSocketTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.assertNotIsInstance(sys.stdout, panel.ConsoleStdout)
         self.assertNotIn(self.panel.log_handler, logging.getLogger("duality").handlers)
+
+
+class DashboardTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        self.panel = panel.Panel(CONFIG, self.hooks)
+
+    def test_status(self):
+        status = self.panel.status()
+        self.assertEqual(status["bot"]["latency_ms"], 42)
+        self.assertTrue(status["bot"]["connected"])
+        self.assertEqual(status["guild"], {"name": "Duality Test", "members": 4, "players": 2, "applicants": 0, "staff": 2})
+        reminders = status["tasks"][1]
+        self.assertEqual((reminders["running"], reminders["next_run"], reminders["last_error"]), (False, None, "RuntimeError: kaputt"))
+        self.assertEqual(status["tasks"][0]["next_run"], int(datetime(2026, 10, 22, 11, 0, tzinfo=timezone.utc).timestamp()))
+        self.assertFalse(status["henrikdev"]["enabled"])
+
+    def test_status_while_disconnected(self):
+        self.hooks.client.latency = float("nan")
+        self.hooks.client.guild = None
+        self.hooks.gateway["connected"] = False
+        status = self.panel.status()
+        self.assertIsNone(status["bot"]["latency_ms"])
+        self.assertFalse(status["bot"]["connected"])
+        self.assertIsNone(status["guild"])
+
+    def test_henrikdev_rate_limit(self):
+        api = SimpleNamespace(last_error="Status 429", last_error_at=100, failures_in_row=3, rate_limited_until=time.time() + 60)
+        self.hooks.rank_client = lambda: api
+        status = self.panel.status()["henrikdev"]
+        self.assertTrue(status["enabled"] and status["rate_limited"])
+        self.assertEqual(status["failures_in_row"], 3)
+
+    async def test_status_and_tasks_commands(self):
+        guild = self.hooks.client.guild
+        context = panel.CommandContext(self.panel, guild, guild.get_member(COACH_ID), panel.COACH)
+        text = await panel.command_status(context, "")
+        self.assertIn("verbunden als Duality-Bot#0001 · Latenz 42 ms · läuft seit 3 h 0 min", text)
+        self.assertIn("2 Spieler", text)
+        self.assertIn("Gestoppte Tasks: Termin-Erinnerungen", text)
+        text = await panel.command_tasks(context, "")
+        self.assertIn("Termin-Erinnerungen: GESTOPPT", text)
+        self.assertIn("RuntimeError: kaputt", text)
+        self.assertEqual(panel.COMMANDS["status"].level, panel.COACH)
+        self.assertFalse(panel.COMMANDS["tasks"].controlling)
+
+    def test_format_helpers(self):
+        self.assertEqual(panel.format_duration(59), "0 min")
+        self.assertEqual(panel.format_duration(2 * 86400 + 5 * 3600), "2 d 5 h")
+        self.assertEqual(panel.format_time(None), "–")
+        self.assertEqual(panel.format_time(datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc).timestamp()), "01.07.2026 12:00")
+
+    async def test_git_commit(self):
+        commit = await panel.read_git_commit()
+        self.assertRegex(commit, r"^([0-9a-f]{7,}|unbekannt)$")
+
+
+class FakeResponse:
+    def __init__(self, status: int, payload=None, headers=None):
+        self.status = status
+        self.payload = payload
+        self.headers = headers or {}
+
+    async def json(self):
+        return self.payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class FakeSession:
+    closed = False
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+
+    def get(self, url, headers=None):
+        return self.responses.pop(0)
+
+
+class BotStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tracked_loop_records_runs_and_errors(self):
+        @main.tracked("test_loop")
+        async def failing():
+            raise ValueError("kaputt")
+
+        with self.assertRaises(ValueError):
+            await failing()
+        status = main.LOOP_STATUS["test_loop"]
+        self.assertIsNotNone(status["last_run"])
+        self.assertEqual(status["last_error"], "ValueError: kaputt")
+
+    async def test_henrikdev_failures_and_rate_limit(self):
+        client = main.HenrikDevClient("schluessel")
+        client.session = FakeSession(FakeResponse(500))
+        with self.assertRaises(main.RankLookupError):
+            await client.get("/x")
+        self.assertEqual((client.failures_in_row, client.last_error), (1, "Status 500"))
+        client.session = FakeSession(FakeResponse(429, headers={"Retry-After": "0"}), FakeResponse(200, {"ok": True}))
+        self.assertEqual(await client.get("/x"), {"ok": True})
+        self.assertEqual(client.failures_in_row, 0)
+        self.assertGreater(client.rate_limited_until, 0)
+        client.session = FakeSession(FakeResponse(404, {"errors": [{"code": 1}]}))
+        with self.assertRaises(main.RankLookupError):
+            await client.get("/x")
+        self.assertEqual(client.failures_in_row, 0)
+
+    def test_gateway_state(self):
+        main.set_gateway_connected(True)
+        self.assertTrue(main.GATEWAY_STATE["connected"])
+        main.set_gateway_connected(False)
+        self.assertFalse(main.GATEWAY_STATE["connected"])
 
 
 if __name__ == "__main__":

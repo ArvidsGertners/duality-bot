@@ -13,12 +13,12 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] Discord-OAuth2-Login (Scope `identify`, `state`-Prüfung) — fertig (dto.)
 - [x] Signierte Session-Cookies (HMAC-SHA256, 12 h, HttpOnly/Secure/SameSite=Lax) — fertig (dto.)
 - [x] Rechte-Stufen Coach/Admin/Owner, live bei jeder Anfrage — fertig (dto.)
-- [x] CSRF-Schutz (Token + Origin) für POST (4a8fd5a) und WebSocket (Konsolen-Commit)
-- [x] Rate-Limit Login 10/5 min pro IP (4a8fd5a), Konsolenbefehle 20/min pro Person (Konsolen-Commit)
-- [x] Log-Handler mit Ringpuffer (1000) + `print`-Ausgaben im Panel — fertig (Commit „Panel: Live-Konsole …“)
-- [x] WebSocket-Konsole `/ws` mit Whitelist-Befehlen help, sync-ranks, reminders, purge, cleanup-voice, say, restart — fertig (dto.); `status`/`tasks` kommen mit dem Dashboard, `backup` mit B2
-- [ ] Dashboard (A1) — offen
-- [x] Tests ohne Discord-Verbindung: Session, CSRF, Rate-Limit, Konfiguration, Rechte, HTTP-Endpunkte, Parser, Log-Puffer, WebSocket-Befehle (47 Tests)
+- [x] CSRF-Schutz (Token + Origin) für POST (4a8fd5a) und WebSocket (058f13a)
+- [x] Rate-Limit Login 10/5 min pro IP (4a8fd5a), Konsolenbefehle 20/min pro Person (058f13a)
+- [x] Log-Handler mit Ringpuffer (1000) + `print`-Ausgaben im Panel — fertig (058f13a)
+- [x] WebSocket-Konsole `/ws` mit Whitelist-Befehlen help, sync-ranks, reminders, purge, cleanup-voice, say, restart — fertig (058f13a); `backup` kommt mit B2
+- [x] Dashboard (A1) + Befehle `status`/`tasks` + `/api/status` — fertig (Commit „Panel: Dashboard …“); „Letztes Backup“ und „Letzte Warnungen“ kommen mit B1/B2
+- [x] Tests ohne Discord-Verbindung: Session, CSRF, Rate-Limit, Konfiguration, Rechte, HTTP-Endpunkte, Parser, Log-Puffer, WebSocket-Befehle, Dashboard-Status, Task-Tracking, HenrikDev-Status (57 Tests)
 
 ### Phase 2 – Betrieb
 - [ ] B1 Fehler-Benachrichtigung (Webhook, Entprellung, „wieder in Ordnung“) — offen
@@ -73,6 +73,11 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Rechte der Befehle: Coach nur `help` (+ später `status`/`tasks`), Admin alle steuernden, Owner zusätzlich `restart`. `say` und `restart` brauchen Bestätigung, der Server lehnt sie ohne `confirm` ab.
 - Steuernde Befehle: vor dem Ausführen Log-Eintrag + Audit-Eintrag „🖥️ Panel-Befehl von @Person: <Befehlszeile>“.
 - `restart`: `client.close()`, Panel und HenrikDev-Client werden sauber beendet, Prozess endet mit Exit-Code 75 (`RESTART_EXIT_CODE`), damit systemd bei `Restart=always` und `Restart=on-failure` neu startet.
+- Dashboard: Daten kommen beim Verbinden im `hello` und danach alle 5 s als `status` über denselben WebSocket (ein gemeinsamer Takt mit der Zugriffsprüfung). Uptime tickt im Browser.
+- Task-Status über Dekorator `tracked(name)` in `main.py` (`LOOP_STATUS`: letzter Lauf, letzter Fehler); nächster Lauf aus `Loop.next_iteration`. Gateway-Zustand in `GATEWAY_STATE` über on_connect/on_disconnect/on_resumed/on_ready. Beides wird auch B1 nutzen.
+- HenrikDev-Status direkt im `HenrikDevClient`: `failures_in_row`, `last_error(_at)`, `rate_limited_until`. 404 („Riot-ID nicht gefunden“) zählt nicht als API-Störung.
+- Git-Commit wird beim Panel-Start einmal per `git rev-parse --short HEAD` gelesen (`create_subprocess_exec`, feste Argumente, keine Shell); ohne Git „unbekannt“.
+- Echter Bot-Token liegt lokal in `.env` (gitignored, Rechte 600). Er wird nur vom Schwärzungstest gelesen. Den Bot starte ich damit nicht mit `--apply`, weil das eine zweite Instanz neben dem VPS wäre und das Setup auf dem echten Server ausführen würde.
 - Offene Konsolen werden alle 5 s geprüft; bei Rollenentzug, Abmelden oder Session-Ablauf schließt der Server mit Code 4403, das Frontend lädt dann neu. Sonst verbindet es sich mit Backoff (1–15 s) neu und lädt den Puffer neu.
 
 ## Neue Env-Variablen
@@ -91,9 +96,10 @@ _(noch keine)_
 
 ## Offene Fragen an Arvids
 - Wie ist `Restart=` in der systemd-Unit `duality-bot` gesetzt? Der Neustart aus dem Panel braucht `Restart=always` oder `Restart=on-failure` (Exit-Code 75).
+- Echten Discord-Login testen: auf dem VPS nach dem Update (empfohlen, per SSH-Tunnel) oder lokal nur mit einem separaten Test-Bot/Test-Server, damit keine zweite Instanz des echten Bots läuft.
 
 ## Bekannte Probleme
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 1: Dashboard (A1) mit Task-Status (letzter/nächster Lauf, letzter Fehler), Gateway-Status, HenrikDev-Status, Live-Update per WebSocket; Befehle `status` und `tasks`.
+Phase 1 ist fertig. Auf Arvids' OK für Phase 2 warten. Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).

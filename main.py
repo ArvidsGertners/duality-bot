@@ -10,6 +10,7 @@ file. --apply creates missing items and updates managed permissions.
 
 import argparse
 import asyncio
+import functools
 import io
 import json
 import math
@@ -89,6 +90,10 @@ APPLICATION_LOCKS: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.Weak
 APPLICATION_SUBMIT_LOCKS: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
 RSVP_LOCKS: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
 MANAGED_IDS: dict[tuple[int, str, str], int] = {}
+STARTED_AT = time.time()
+# Für Panel und Alarme: Verbindungszustand und wann jeder Hintergrund-Task zuletzt lief oder scheiterte.
+GATEWAY_STATE = {"connected": False, "changed_at": int(STARTED_AT)}
+LOOP_STATUS: dict[str, dict] = {}
 
 CATEGORIES = [
     {
@@ -886,6 +891,16 @@ class HenrikDevClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.session: aiohttp.ClientSession | None = None
+        # Zustand fürs Panel; „nicht gefunden“ zählt nicht als Störung der API.
+        self.failures_in_row = 0
+        self.last_error: str | None = None
+        self.last_error_at: int | None = None
+        self.rate_limited_until = 0.0
+
+    def record_failure(self, text: str) -> None:
+        self.failures_in_row += 1
+        self.last_error = text
+        self.last_error_at = int(time.time())
 
     async def get(self, path: str) -> dict:
         if self.session is None or self.session.closed:
@@ -897,9 +912,11 @@ class HenrikDevClient:
                         wait = float(response.headers.get("Retry-After") or response.headers.get("X-RateLimit-Reset") or 60)
                     except ValueError:
                         wait = 60
+                    self.rate_limited_until = time.time() + min(wait, 120)
                     await asyncio.sleep(min(wait, 120))
                     continue
                 if response.status == 404:
+                    self.failures_in_row = 0
                     try:
                         error_code = (await response.json())["errors"][0]["code"]
                     except (aiohttp.ContentTypeError, KeyError, IndexError, TypeError, ValueError):
@@ -911,7 +928,9 @@ class HenrikDevClient:
                         )
                     raise RankLookupError("Diese Riot-ID wurde nicht gefunden.")
                 if response.status != 200:
+                    self.record_failure(f"Status {response.status}")
                     raise RankLookupError(f"Die HenrikDev-API antwortet gerade mit Status {response.status}.")
+                self.failures_in_row = 0
                 return await response.json()
         raise RankLookupError("Die HenrikDev-API ist gerade ausgelastet. Bitte versuche es später erneut.")
 
@@ -925,8 +944,10 @@ class HenrikDevClient:
             mmr = await self.get(f"/valorant/v3/mmr/{region}/pc/{riot_name}/{riot_tag}")
             return mmr["data"]["current"]["tier"]["name"], region
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            self.record_failure("nicht erreichbar")
             raise RankLookupError("Die HenrikDev-API ist gerade nicht erreichbar.") from error
         except (KeyError, TypeError) as error:
+            self.record_failure("unerwartete Antwort")
             raise RankLookupError("Die HenrikDev-API hat eine unerwartete Antwort geschickt.") from error
 
     async def close(self) -> None:
@@ -998,6 +1019,29 @@ async def sync_ranks_now(guild: discord.Guild, member: discord.Member | None = N
     except (RankLookupError, discord.HTTPException) as error:
         return f"Der Rang von {member.display_name} konnte nicht abgeglichen werden: {error}"
     return f"Rang von {member.display_name}: {tier_name}"
+
+
+def tracked(name: str):
+    """Hält für einen tasks.loop fest, wann er zuletzt lief und woran er zuletzt gescheitert ist."""
+    def decorator(function):
+        status = LOOP_STATUS.setdefault(name, {"last_run": None, "last_error": None, "last_error_at": None})
+
+        @functools.wraps(function)
+        async def wrapper():
+            status["last_run"] = int(time.time())
+            try:
+                await function()
+            except Exception as error:
+                status["last_error"] = f"{type(error).__name__}: {error}"
+                status["last_error_at"] = int(time.time())
+                raise
+        return wrapper
+    return decorator
+
+
+def set_gateway_connected(connected: bool) -> None:
+    if GATEWAY_STATE["connected"] != connected:
+        GATEWAY_STATE.update(connected=connected, changed_at=int(time.time()))
 
 
 def run_in_background(coroutine) -> None:
@@ -3180,6 +3224,7 @@ async def main(apply: bool) -> int | None:
     client.add_view(TicketCloseView())
 
     @tasks.loop(hours=24)
+    @tracked("sync_ranks")
     async def sync_ranks():
         guild = client.get_guild(target_id)
         if guild is None or RANK_CLIENT is None:
@@ -3191,6 +3236,7 @@ async def main(apply: bool) -> int | None:
         log.error("Fehler beim täglichen Rang-Abgleich", exc_info=error)
 
     @tasks.loop(hours=24)
+    @tracked("purge_declined_applications")
     async def purge_declined_applications():
         await purge_expired_data(client.get_guild(target_id))
 
@@ -3199,6 +3245,7 @@ async def main(apply: bool) -> int | None:
         log.error("Fehler bei der Bewerbungs-Löschfrist", exc_info=error)
 
     @tasks.loop(minutes=1)
+    @tracked("event_reminders")
     async def event_reminders():
         await send_due_event_reminders(client)
 
@@ -3212,14 +3259,17 @@ async def main(apply: bool) -> int | None:
 
     @client.event
     async def on_connect():
+        set_gateway_connected(True)
         print("Gateway-Verbindung hergestellt; Discord authentifiziert den Bot ...", flush=True)
 
     @client.event
     async def on_disconnect():
+        set_gateway_connected(False)
         print("Gateway-Verbindung getrennt; discord.py versucht ggf. erneut zu verbinden.", flush=True)
 
     @client.event
     async def on_resumed():
+        set_gateway_connected(True)
         print("Discord-Sitzung erfolgreich fortgesetzt.", flush=True)
 
     @client.event
@@ -3257,6 +3307,7 @@ async def main(apply: bool) -> int | None:
     @client.event
     async def on_ready():
         nonlocal setup_complete, commands_synced, existing_events_registered
+        set_gateway_connected(True)
         print(f"Mit Discord verbunden als {client.user}.", flush=True)
         guild = client.get_guild(target_id)
         if guild is None:
@@ -3313,6 +3364,17 @@ async def main(apply: bool) -> int | None:
                     purge=purge_expired_data,
                     cleanup_voice=clean_up_temp_voice,
                     restart=request_restart,
+                    started_at=STARTED_AT,
+                    gateway=GATEWAY_STATE,
+                    loops={
+                        "sync_ranks": ("Rang-Abgleich", sync_ranks),
+                        "purge_declined_applications": ("Löschfristen", purge_declined_applications),
+                        "event_reminders": ("Termin-Erinnerungen", event_reminders),
+                    },
+                    loop_status=LOOP_STATUS,
+                    rank_client=lambda: RANK_CLIENT,
+                    find_role=find_role,
+                    staff_members=staff_members,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

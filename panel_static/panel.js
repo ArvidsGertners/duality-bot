@@ -17,6 +17,7 @@ const state = {
   historyIndex: 0,
   nextRequestId: 1,
   pending: new Map(),
+  status: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -76,6 +77,95 @@ async function logout() {
   } finally {
     window.location.href = "/";
   }
+}
+
+/* Dashboard */
+
+const dateTime = new Intl.DateTimeFormat("de-DE", {
+  timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+});
+
+function formatTime(seconds) {
+  return seconds ? `${dateTime.format(new Date(seconds * 1000))} Uhr` : "–";
+}
+
+function formatDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  if (days) return `${days} d ${hours} h`;
+  if (hours) return `${hours} h ${minutes % 60} min`;
+  return `${minutes} min`;
+}
+
+function pill(text, kind) {
+  return span(`pill ${kind}`, text);
+}
+
+function fillList(list, rows) {
+  const items = [];
+  for (const [label, value] of rows) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    detail.append(value ?? "–");
+    items.push(term, detail);
+  }
+  list.replaceChildren(...items);
+}
+
+function renderUptime() {
+  const element = $("#dash-uptime");
+  if (element && state.status) element.textContent = formatDuration(Date.now() / 1000 - state.status.bot.started_at);
+}
+
+function renderDashboard(status) {
+  state.status = status;
+  const { bot, guild, henrikdev: api } = status;
+  const uptime = span("", "");
+  uptime.id = "dash-uptime";
+  fillList($("#dash-bot"), [
+    ["Status", bot.connected ? pill("Verbunden", "ok") : pill("Getrennt", "bad")],
+    ["Latenz", bot.latency_ms !== null ? `${bot.latency_ms} ms` : "–"],
+    ["Läuft seit", uptime],
+    ["Angemeldet als", bot.user],
+    ["Python", bot.python],
+    ["discord.py", bot.discord_py],
+    ["Commit", span("mono", bot.commit)],
+  ]);
+  renderUptime();
+  fillList($("#dash-guild"), guild ? [
+    ["Name", guild.name],
+    ["Mitglieder", String(guild.members)],
+    ["Spieler", String(guild.players)],
+    ["Bewerber", String(guild.applicants)],
+    ["Staff", String(guild.staff)],
+  ] : [["Status", "Server nicht verfügbar"]]);
+  let apiState = pill("Aus", "warn");
+  if (api.enabled) apiState = api.rate_limited ? pill("Rate-Limit", "warn") : pill("Aktiv", api.failures_in_row ? "warn" : "ok");
+  fillList($("#dash-api"), [
+    ["Status", apiState],
+    ["Rate-Limit bis", api.rate_limited ? formatTime(api.rate_limited_until) : "–"],
+    ["Fehler in Folge", String(api.failures_in_row)],
+    ["Letzter Fehler", api.last_error ? `${api.last_error} (${formatTime(api.last_error_at)})` : "–"],
+  ]);
+  $("#dash-tasks").replaceChildren(...status.tasks.map((task) => {
+    const row = document.createElement("tr");
+    const cells = [
+      task.label,
+      task.running ? pill("Läuft", "ok") : pill("Gestoppt", "bad"),
+      formatTime(task.last_run),
+      formatTime(task.next_run),
+      task.last_error ? `${task.last_error} (${formatTime(task.last_error_at)})` : "–",
+    ];
+    for (const value of cells) {
+      const cell = document.createElement("td");
+      cell.append(value);
+      row.append(cell);
+    }
+    return row;
+  }));
+  $("#dash-updated").textContent = `Zuletzt aktualisiert: ${clock.format(new Date(status.time * 1000))} Uhr (alle 5 Sekunden)`;
 }
 
 /* Konsole: Log-Anzeige */
@@ -198,6 +288,9 @@ function handleMessage(message) {
       return option;
     }));
     renderLog();
+    renderDashboard(message.status);
+  } else if (message.type === "status") {
+    renderDashboard(message.status);
   } else if (message.type === "log") {
     if (message.entry.id <= state.lastLogId) return;
     state.lastLogId = message.entry.id;
@@ -315,6 +408,7 @@ async function init() {
   for (const box of document.querySelectorAll("input[name=log-level]")) box.addEventListener("change", renderLog);
   window.addEventListener("hashchange", showPage);
   showPage();
+  setInterval(renderUptime, 1000);
   connect();
 }
 

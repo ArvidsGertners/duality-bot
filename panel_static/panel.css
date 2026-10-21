@@ -173,6 +173,8 @@ main:focus { outline: none; }
 }
 
 /* Dashboard */
+.spaced { margin-top: 1rem; }
+.small { font-size: .85rem; }
 .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .stat-list { display: grid; grid-template-columns: auto 1fr; gap: .35rem 1rem; margin: 0; }
 .stat-list dt { color: var(--muted); }
