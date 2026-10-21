@@ -119,6 +119,28 @@ function renderUptime() {
   if (element && state.status) element.textContent = formatDuration(Date.now() / 1000 - state.status.bot.started_at);
 }
 
+function listItem(...parts) {
+  const item = document.createElement("li");
+  item.append(...parts);
+  return item;
+}
+
+function renderAlerts(alerts) {
+  $("#dash-alert-channel").textContent = `Warnungen gehen an: ${alerts.channel}`;
+  $("#dash-alerts-active").replaceChildren(...(alerts.active.length
+    ? alerts.active.map((problem) => listItem(
+      pill("Aktiv", "bad"), problem.text, span("muted small", `seit ${formatTime(problem.since)}`),
+    ))
+    : [listItem(pill("OK", "ok"), "Keine aktiven Probleme")]));
+  $("#dash-alerts-recent").replaceChildren(...(alerts.recent.length
+    ? alerts.recent.map((message) => listItem(
+      message.kind === "alert" ? pill("Warnung", "bad") : pill("Behoben", "ok"),
+      message.text,
+      span("muted small", `${formatTime(message.time)} · ${message.delivered}`),
+    ))
+    : [listItem(span("muted", "Noch keine Meldungen seit dem Start."))]));
+}
+
 function renderDashboard(status) {
   state.status = status;
   const { bot, guild, henrikdev: api } = status;
@@ -165,6 +187,7 @@ function renderDashboard(status) {
     }
     return row;
   }));
+  renderAlerts(status.alerts);
   $("#dash-updated").textContent = `Zuletzt aktualisiert: ${clock.format(new Date(status.time * 1000))} Uhr (alle 5 Sekunden)`;
 }
 

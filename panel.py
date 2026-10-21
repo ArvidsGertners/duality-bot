@@ -420,6 +420,10 @@ async def command_status(context: CommandContext, arguments: str) -> str:
     stopped = [task["label"] for task in status["tasks"] if not task["running"]]
     if stopped:
         lines.append("Gestoppte Tasks: " + ", ".join(stopped))
+    problems = status["alerts"]["active"]
+    lines.append(
+        "Aktive Warnungen: " + "; ".join(problem["text"] for problem in problems) if problems else "Aktive Warnungen: keine"
+    )
     return "\n".join(lines)
 
 
@@ -553,6 +557,8 @@ class PanelHooks:
     rank_client: Callable[[], Any]
     find_role: Callable[[discord.Guild, str], discord.Role | None]
     staff_members: Callable[[discord.Guild], list[discord.Member]]
+    # main.Alerts: aktive Probleme und die letzten Meldungen
+    alerts: Any
 
 
 class Panel:
@@ -765,6 +771,22 @@ class Panel:
                 "failures_in_row": rank_client.failures_in_row if rank_client else 0,
                 "rate_limited": bool(rank_client and rank_client.rate_limited_until > now),
                 "rate_limited_until": int(rank_client.rate_limited_until) if rank_client and rank_client.rate_limited_until > now else None,
+            },
+            "alerts": {
+                "channel": "Webhook" if hooks.alerts.webhook_url else "#audit-log",
+                "active": [
+                    {"text": problem["text"], "since": int(problem["since"]), "notified": problem["notified"]}
+                    for problem in hooks.alerts.active.values()
+                ],
+                "recent": [
+                    {
+                        "kind": message["kind"],
+                        "text": message["text"],
+                        "time": int(message["time"]),
+                        "delivered": message.get("delivered", "–"),
+                    }
+                    for message in reversed(hooks.alerts.history)
+                ][:10],
             },
         }
 

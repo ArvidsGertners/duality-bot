@@ -191,6 +191,10 @@ main:focus { outline: none; }
 .pill.warn { color: var(--warn); }
 .pill.bad { color: var(--danger); }
 
+.alert-list { list-style: none; margin: 0 0 .75rem; padding: 0; display: grid; gap: .35rem; }
+.alert-list li { display: flex; flex-wrap: wrap; gap: .25rem .6rem; align-items: baseline; }
+h3 { font-size: .95rem; margin: .5rem 0 .4rem; }
+
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; font-size: .85rem; }

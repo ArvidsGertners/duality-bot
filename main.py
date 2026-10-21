@@ -21,6 +21,7 @@ import os
 import time
 import sys
 import weakref
+from collections import deque
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -1042,6 +1043,155 @@ def tracked(name: str):
 def set_gateway_connected(connected: bool) -> None:
     if GATEWAY_STATE["connected"] != connected:
         GATEWAY_STATE.update(connected=connected, changed_at=int(time.time()))
+
+
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = None
+    if value is None or not minimum <= value <= maximum:
+        print(f"{name} muss eine ganze Zahl von {minimum} bis {maximum} sein; es gilt {default}.", flush=True)
+        return default
+    return value
+
+
+ALERT_REPEAT_SECONDS = 30 * 60
+ALERT_DISCONNECT_MINUTES = 5
+ALERT_HENRIKDEV_FAILURES = 3
+# Ein laufender Task gilt als hängend, wenn sein nächster Lauf so lange überfällig ist.
+LOOP_STALL_SECONDS = 5 * 60
+ALERT_HISTORY_SIZE = 20
+WEBHOOK_PREFIXES = tuple(
+    f"https://{host}/api/webhooks/" for host in ("discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com")
+)
+
+
+class Alerts:
+    """Warnungen an den Staff, per Webhook (klappt auch ohne Gateway) oder in #audit-log.
+
+    Jede Warnung hat einen Schlüssel. Gemeldet wird, wenn ein Problem auftritt, und
+    entwarnt, wenn es verschwindet; derselbe Schlüssel höchstens alle 30 Minuten.
+    """
+
+    def __init__(self, webhook_url: str | None = None, repeat_seconds: float = ALERT_REPEAT_SECONDS):
+        self.webhook_url = webhook_url
+        self.repeat_seconds = repeat_seconds
+        self.active: dict[str, dict] = {}
+        self.last_alert_at: dict[str, float] = {}
+        self.history: deque[dict] = deque(maxlen=ALERT_HISTORY_SIZE)
+        self.pending: deque[dict] = deque(maxlen=ALERT_HISTORY_SIZE)
+        self.session: aiohttp.ClientSession | None = None
+
+    def evaluate(self, key: str, problem: str | None, now: float) -> dict | None:
+        """Meldung, die jetzt raus muss, oder None. Ein Problem, das innerhalb der Sperrfrist
+        wiederkommt, wird erst nach Ablauf der Frist gemeldet; eine Entwarnung gibt es nur
+        für Warnungen, die auch verschickt wurden."""
+        current = self.active.get(key)
+        if problem:
+            if current is None:
+                current = self.active[key] = {"text": problem, "since": now, "notified": False}
+            current["text"] = problem
+            if current["notified"] or now - self.last_alert_at.get(key, -math.inf) < self.repeat_seconds:
+                return None
+            current.update(notified=True, alert_text=problem)
+            self.last_alert_at[key] = now
+            return {"kind": "alert", "key": key, "text": problem, "time": now}
+        if current is None:
+            return None
+        del self.active[key]
+        if not current["notified"]:
+            return None
+        return {"kind": "resolved", "key": key, "text": current["alert_text"], "time": now}
+
+    async def check(self, problems: dict[str, str | None], guild: discord.Guild | None, connected: bool) -> None:
+        # Liegengebliebene Warnungen zuerst, damit keine Entwarnung vor ihrer Warnung ankommt.
+        while connected and guild and self.pending:
+            message = self.pending.popleft()
+            await self.post_audit(guild, message)
+            message["delivered"] = "#audit-log (nachgereicht)"
+        now = time.time()
+        for key, problem in problems.items():
+            message = self.evaluate(key, problem, now)
+            if message is None:
+                continue
+            if message["kind"] == "alert":
+                log.warning("Warnung: %s", message["text"])
+            else:
+                log.info("Wieder in Ordnung: %s", message["text"])
+            self.history.append(message)
+            await self.deliver(message, guild, connected)
+
+    @staticmethod
+    def render(message: dict) -> str:
+        text = discord.utils.escape_markdown(message["text"])
+        if message["kind"] == "alert":
+            return f"🚨 **Duality-Bot – Warnung:** {text}"
+        return f"✅ **Duality-Bot – wieder in Ordnung:** {text}"
+
+    async def deliver(self, message: dict, guild: discord.Guild | None, connected: bool) -> None:
+        if self.webhook_url and await self.post_webhook(self.render(message)):
+            message["delivered"] = "Webhook"
+        elif connected and guild:
+            await self.post_audit(guild, message)
+            message["delivered"] = "#audit-log"
+        else:
+            message["delivered"] = "ausstehend"
+            self.pending.append(message)
+
+    async def post_audit(self, guild: discord.Guild, message: dict) -> None:
+        color = discord.Color.red() if message["kind"] == "alert" else discord.Color.green()
+        await audit(guild, self.render(message), color)
+
+    async def post_webhook(self, text: str) -> bool:
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        try:
+            async with self.session.post(
+                self.webhook_url,
+                json={"content": text[:2000], "username": "Duality-Bot", "allowed_mentions": {"parse": []}},
+            ) as response:
+                if response.status < 300:
+                    return True
+                log.warning("Alarm-Webhook antwortet mit Status %s", response.status)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            # Nur der Fehlertyp: Die Meldung enthielte die Webhook-URL samt Token.
+            log.warning("Alarm-Webhook nicht erreichbar (%s)", type(error).__name__)
+        return False
+
+    async def close(self) -> None:
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+
+def collect_problems(loops: dict, now: float, disconnect_minutes: int = ALERT_DISCONNECT_MINUTES) -> dict[str, str | None]:
+    """Aktuelle Probleme je Schlüssel; None heißt „in Ordnung“."""
+    problems: dict[str, str | None] = {}
+    for name, (label, loop) in loops.items():
+        status = LOOP_STATUS.get(name, {})
+        next_run = loop.next_iteration if loop.is_running() else None
+        problem = None
+        if status.get("last_run") and not loop.is_running():
+            problem = f"Hintergrund-Task „{label}“ ist gestoppt"
+            if status.get("last_error"):
+                problem += f" (letzter Fehler: {status['last_error']})"
+        elif next_run and now - next_run.timestamp() > LOOP_STALL_SECONDS:
+            problem = f"Hintergrund-Task „{label}“ hängt, der geplante Lauf ist überfällig"
+        problems[f"task:{name}"] = problem
+    offline_seconds = now - GATEWAY_STATE["changed_at"]
+    problems["gateway"] = None
+    if not GATEWAY_STATE["connected"] and offline_seconds >= disconnect_minutes * 60:
+        problems["gateway"] = f"Der Bot ist seit {int(offline_seconds // 60)} Minuten nicht mit Discord verbunden"
+    problems["henrikdev"] = None
+    if RANK_CLIENT and RANK_CLIENT.failures_in_row >= ALERT_HENRIKDEV_FAILURES:
+        problems["henrikdev"] = (
+            f"Die HenrikDev-API ist {RANK_CLIENT.failures_in_row}× in Folge fehlgeschlagen "
+            f"(zuletzt: {RANK_CLIENT.last_error})"
+        )
+    return problems
 
 
 def run_in_background(coroutine) -> None:
@@ -3207,6 +3357,18 @@ async def main(apply: bool) -> int | None:
         print("HenrikDev-API-Key aus HENRIKDEV_API_KEY gelesen; automatische Rangabfrage aktiv.", flush=True)
     else:
         print("HENRIKDEV_API_KEY fehlt; die automatische Rangabfrage ist ausgeschaltet.", flush=True)
+    webhook_url = os.getenv("ALERT_WEBHOOK_URL", "").strip()
+    if webhook_url and not webhook_url.startswith(WEBHOOK_PREFIXES):
+        print("ALERT_WEBHOOK_URL ist keine Discord-Webhook-Adresse und wird ignoriert.", flush=True)
+        webhook_url = ""
+    if apply:
+        print(
+            "Warnungen gehen an den Webhook aus ALERT_WEBHOOK_URL." if webhook_url
+            else "ALERT_WEBHOOK_URL fehlt; Warnungen gehen nach #audit-log, sobald der Bot verbunden ist.",
+            flush=True,
+        )
+    alerts = Alerts(webhook_url or None)
+    disconnect_minutes = env_int("ALERT_DISCONNECT_MINUTES", ALERT_DISCONNECT_MINUTES, 1, 24 * 60)
     intents = discord.Intents.none()
     intents.guilds = True
     intents.members = True
@@ -3252,6 +3414,26 @@ async def main(apply: bool) -> int | None:
     @event_reminders.error
     async def event_reminders_error(error: Exception):
         log.error("Fehler bei den Termin-Erinnerungen", exc_info=error)
+
+    @tasks.loop(minutes=1)
+    @tracked("check_alerts")
+    async def check_alerts():
+        # Darf nie stehen bleiben, sonst meldet niemand mehr Probleme.
+        try:
+            await alerts.check(
+                collect_problems(loops, time.time(), disconnect_minutes),
+                client.get_guild(target_id),
+                GATEWAY_STATE["connected"] and client.is_ready(),
+            )
+        except Exception:
+            log.exception("Fehler bei der Prüfung auf Warnungen")
+
+    loops = {
+        "sync_ranks": ("Rang-Abgleich", sync_ranks),
+        "purge_declined_applications": ("Löschfristen", purge_declined_applications),
+        "event_reminders": ("Termin-Erinnerungen", event_reminders),
+        "check_alerts": ("Warnungen prüfen", check_alerts),
+    }
 
     setup_complete = False
     commands_synced = False
@@ -3366,22 +3548,24 @@ async def main(apply: bool) -> int | None:
                     restart=request_restart,
                     started_at=STARTED_AT,
                     gateway=GATEWAY_STATE,
-                    loops={
-                        "sync_ranks": ("Rang-Abgleich", sync_ranks),
-                        "purge_declined_applications": ("Löschfristen", purge_declined_applications),
-                        "event_reminders": ("Termin-Erinnerungen", event_reminders),
-                    },
+                    loops=loops,
                     loop_status=LOOP_STATUS,
                     rank_client=lambda: RANK_CLIENT,
                     find_role=find_role,
                     staff_members=staff_members,
+                    alerts=alerts,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)
+        if apply:
+            # Läuft schon vor dem Login, damit auch ein Bot ohne Verbindung gemeldet wird.
+            check_alerts.start()
         async with client:
             print("Verbinde mit Discord ...", flush=True)
             await client.start(token)
     finally:
+        check_alerts.cancel()
+        await alerts.close()
         if panel_runner:
             await panel_runner.cleanup()
         if RANK_CLIENT:

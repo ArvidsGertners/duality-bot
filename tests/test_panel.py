@@ -128,6 +128,7 @@ def make_hooks(client=None) -> panel.PanelHooks:
         rank_client=lambda: None,
         find_role=lambda guild, name: SimpleNamespace(members=[1, 2]) if name == "Spieler" else None,
         staff_members=lambda guild: [guild.get_member(OWNER_ID), guild.get_member(COACH_ID)],
+        alerts=main.Alerts(),
     )
 
 
@@ -637,6 +638,14 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((reminders["running"], reminders["next_run"], reminders["last_error"]), (False, None, "RuntimeError: kaputt"))
         self.assertEqual(status["tasks"][0]["next_run"], int(datetime(2026, 10, 22, 11, 0, tzinfo=timezone.utc).timestamp()))
         self.assertFalse(status["henrikdev"]["enabled"])
+        self.assertEqual(status["alerts"], {"channel": "#audit-log", "active": [], "recent": []})
+
+    def test_status_lists_alerts(self):
+        self.hooks.alerts.evaluate("gateway", "Bot offline", now=1000)
+        self.hooks.alerts.history.append({"kind": "alert", "text": "Bot offline", "time": 1000, "delivered": "Webhook"})
+        alerts = self.panel.status()["alerts"]
+        self.assertEqual(alerts["active"], [{"text": "Bot offline", "since": 1000, "notified": True}])
+        self.assertEqual(alerts["recent"][0]["delivered"], "Webhook")
 
     def test_status_while_disconnected(self):
         self.hooks.client.latency = float("nan")

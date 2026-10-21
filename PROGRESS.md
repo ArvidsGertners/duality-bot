@@ -18,10 +18,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] Log-Handler mit Ringpuffer (1000) + `print`-Ausgaben im Panel — fertig (058f13a)
 - [x] WebSocket-Konsole `/ws` mit Whitelist-Befehlen help, sync-ranks, reminders, purge, cleanup-voice, say, restart — fertig (058f13a); `backup` kommt mit B2
 - [x] Dashboard (A1) + Befehle `status`/`tasks` + `/api/status` — fertig (6c7a2f7); „Letztes Backup“ und „Letzte Warnungen“ kommen mit B1/B2
-- [x] Tests ohne Discord-Verbindung: Session, CSRF, Rate-Limit, Konfiguration, Rechte, HTTP-Endpunkte, Parser, Log-Puffer, WebSocket-Befehle, Dashboard-Status, Task-Tracking, HenrikDev-Status (57 Tests)
+- [x] Tests ohne Discord-Verbindung: Session, CSRF, Rate-Limit, Konfiguration, Rechte, HTTP-Endpunkte, Parser, Log-Puffer, WebSocket-Befehle, Dashboard-Status, Task-Tracking, HenrikDev-Status; ab Phase 2 Bot-Tests in `tests/test_bot.py`
 
 ### Phase 2 – Betrieb
-- [ ] B1 Fehler-Benachrichtigung (Webhook, Entprellung, „wieder in Ordnung“) — offen
+- [x] B1 Fehler-Benachrichtigung (Webhook, Entprellung, „wieder in Ordnung“, Dashboard-Karte) — fertig (Commit „Warnungen bei Fehlern …“); Backup-Warnung kommt mit B2
 - [ ] B2 Datenbank-Backups (SQLite-Backup-API, Aufbewahrung, Download für Owner, Konsolenbefehl `backup`) — offen
 - [ ] B4 Live-Ansicht der Voice-Kanäle — offen
 - [ ] A3 Bewerbungen lesen + „Neue Saison“ — offen
@@ -81,13 +81,21 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - Echter Bot-Token liegt lokal in `.env` (gitignored, Rechte 600). Er wird nur vom Schwärzungstest gelesen. Den Bot starte ich damit nicht mit `--apply`, weil das eine zweite Instanz neben dem VPS wäre und das Setup auf dem echten Server ausführen würde.
 - Offene Konsolen werden alle 5 s geprüft; bei Rollenentzug, Abmelden oder Session-Ablauf schließt der Server mit Code 4403, das Frontend lädt dann neu. Sonst verbindet es sich mit Backoff (1–15 s) neu und lädt den Puffer neu.
 
+- **B1 Warnungen:** `Alerts` in `main.py`, läuft ohne Panel. Schlüssel je Problem (`task:<name>`, `gateway`, `henrikdev`, später `backup`). Gemeldet wird beim Auftreten und beim Verschwinden („wieder in Ordnung“), **keine** Wiederholung alle 30 min für dauerhafte Probleme (wäre bei täglichen Tasks Spam); kommt ein Problem innerhalb von 30 min nach der letzten Warnung wieder, wird es erst nach Ablauf gemeldet, und eine Entwarnung gibt es nur für verschickte Warnungen.
+- Task „hängt“ = läuft, aber `next_iteration` > 5 min überfällig; „gestoppt“ = lief schon mal und läuft nicht mehr. HenrikDev ab 3 Fehlern in Folge. Gateway ab `ALERT_DISCONNECT_MINUTES` (5) getrennt.
+- Versand: Webhook aus `ALERT_WEBHOOK_URL` (nur `https://discord.com/api/webhooks/…` u. ä., sonst ignoriert), `allowed_mentions: parse []`, Fehler ohne URL geloggt. Ohne Webhook oder wenn er scheitert: `#audit-log` über `audit()`, bei fehlender Verbindung in einer Warteschlange, die beim nächsten Verbinden **vor** neuen Meldungen nachgereicht wird.
+- Prüf-Loop `check_alerts` (1 min) startet mit `--apply` schon vor dem Login, damit auch ein Bot, der nie verbindet, gemeldet wird; fängt eigene Fehler ab. Dashboard zeigt aktive Probleme und die letzten 10 Meldungen mit Zustellweg.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
 - **Port 8080 belegt** (YouTrack-Docker) → Panel auf `PANEL_PORT=8090`, `PANEL_BASE_URL=http://localhost:8090`, Zugriff per `ssh -L 8090:127.0.0.1:8090 root@217.154.173.183`.
 - nginx läuft auf 80/443 (für späteren HTTPS-Proxy), ufw ist aus, YouTrack auf 8080 öffentlich (nicht von mir angefasst).
-- Panel-Einträge in `/etc/duality-bot.env` gesetzt (Sicherung `/etc/duality-bot.env.bak-20261021-114849`), `PANEL_SECRET_KEY` auf dem Server erzeugt. Es fehlen noch `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET`.
-- Code auf 6c7a2f7 deployt, Bot läuft. `update-vps.sh` scheiterte beim ersten Lauf aus `/root` an `uv` (Leserechte) → behoben, das Skript wechselt jetzt in `$APP_DIR`.
+- Panel-Einträge in `/etc/duality-bot.env` gesetzt (Sicherung `/etc/duality-bot.env.bak-20261021-114849`), `PANEL_SECRET_KEY` auf dem Server erzeugt, `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET` per stdin übertragen.
+- Code auf ee3a763 deployt, Bot läuft, Panel lauscht auf 127.0.0.1:8090, `/healthz` → 200.
+- **Öffentlich:** https://duality.217-154-173-183.sslip.io (vorläufig, bis es eine eigene Domain gibt). nginx-Seite `/etc/nginx/sites-available/duality.217-154-173-183.sslip.io`: Port 80 → 301 HTTPS, 443 → `127.0.0.1:8090` mit WebSocket-Headern, `X-Forwarded-For $remote_addr`, Zugriffslog ohne `/auth/callback`. Zertifikat per `certbot certonly --nginx` (läuft bis 19.01.2027, certbot.timer erneuert). `PANEL_BASE_URL=https://duality.217-154-173-183.sslip.io` (Sicherung `/etc/duality-bot.env.bak-20261021-121043`). Redirect-URI im Developer Portal: `https://duality.217-154-173-183.sslip.io/auth/callback`.
+- Wechsel auf eigene Domain später: A-Record → 217.154.173.183, nginx-Seite kopieren/umbenennen, `certbot certonly --nginx -d <domain>`, `PANEL_BASE_URL` ändern, Redirect-URI ergänzen, Bot neu starten.
+- Arvids hat Root-Passwort und Client-Secret im Chat gepostet → Empfehlung: Root-Passwort ändern, Secret später neu erzeugen und nur über `.env` geben. `update-vps.sh` scheiterte beim ersten Lauf aus `/root` an `uv` (Leserechte) → behoben, das Skript wechselt jetzt in `$APP_DIR`.
 - Alte root-eigene Kopie `/home/duality-bot/main.py` liegt ungenutzt herum (nicht angefasst).
 
 ## Neue Env-Variablen
@@ -100,6 +108,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 | `PANEL_SECRET_KEY` | – | ≥ 32 Zeichen, signiert Session-Cookies |
 | `DISCORD_CLIENT_ID` | – | OAuth2-Client-ID der Discord-Application |
 | `DISCORD_CLIENT_SECRET` | – | OAuth2-Client-Secret |
+| `ALERT_WEBHOOK_URL` | – | Discord-Webhook für Warnungen; ohne: `#audit-log` |
+| `ALERT_DISCONNECT_MINUTES` | `5` | Ab so vielen Minuten ohne Gateway gibt es eine Warnung |
 
 ## Neue Tabellen
 _(noch keine)_
@@ -111,4 +121,4 @@ _(noch keine)_
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 1 ist fertig. VPS: `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET` aus Arvids' lokaler `.env` in `/etc/duality-bot.env` übertragen (ohne Ausgabe), Redirect-URI `http://localhost:8090/auth/callback` muss im Developer Portal stehen, dann Neustart und Test per Tunnel. Danach auf Arvids' OK für Phase 2 warten. Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Nächstes Feature: B2 Backups (SQLite-Backup-API, `BACKUP_DIR`, `BACKUP_RETENTION_DAYS`, Rechte 600, Warnung `backup`, Panel-Liste + Download für Owner, Konsolenbefehl `backup`, Dashboard „Letztes Backup“). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
