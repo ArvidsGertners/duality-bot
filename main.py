@@ -16,6 +16,7 @@ import logging
 import os
 import time
 import sys
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -37,10 +38,26 @@ VALORANT_RANKS = [
     "Iron", "Bronze", "Silver", "Gold", "Platinum", "Diamond",
     "Ascendant", "Immortal", "Radiant",
 ]
+UNIVERSITY_ROLES = [
+    "DHBW Mannheim",
+    "DHBW Andere",
+    "Universität Mannheim",
+    "Hochschule Mannheim",
+    "Universität Heidelberg",
+    "KIT Karlsruhe",
+    "Hochschule Karlsruhe",
+    "Hochschule Darmstadt",
+    "TU Darmstadt",
+    "Goethe-Universität Frankfurt",
+    "Universität Stuttgart",
+    "Universität Freiburg",
+    "Andere Uni",
+    "Keine Uni",
+]
 VALORANT_ROLES = ("Duelist", "Initiator", "Controller", "Sentinel")
 ROLE_NAMES = [
     "Owner", "Admin", "Coach", "Spieler", "Bewerber",
-    "Ping Valorant", "Ping Events", *VALORANT_RANKS,
+    "Ping Valorant", "Ping Events", *VALORANT_RANKS, *UNIVERSITY_ROLES,
 ]
 STAFF_ROLES = ("Owner", "Admin", "Coach")
 TEAM_ROLES = (*STAFF_ROLES, "Spieler")
@@ -95,6 +112,10 @@ APPLICATION_MARKER = "DUALITY_APPLICATION_V3"
 RULES_MARKER = "DUALITY_RULES_V1"
 WELCOME_MARKER = "DUALITY_WELCOME_V1"
 DEFAULT_GUILD_ID = "1562056155558056027"
+# Erhöhen, wenn sich die Rechte in CATEGORIES oder den *_overwrites-Funktionen
+# ändern. Dann setzt das nächste --apply die verwalteten Rechte einmal neu;
+# sonst bleiben manuelle Anpassungen der Admins bei Neustarts erhalten.
+PERMISSIONS_VERSION = 1
 
 
 def initialize_storage() -> None:
@@ -118,6 +139,27 @@ def initialize_storage() -> None:
             "CREATE TABLE IF NOT EXISTS player_roster_names ("
             "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, public_name TEXT NOT NULL, "
             "updated_at INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS setup_migrations ("
+            "migration_key TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)"
+        )
+
+
+def migration_applied(migration_key: str) -> bool:
+    with sqlite3.connect(DATA_PATH) as connection:
+        row = connection.execute(
+            "SELECT 1 FROM setup_migrations WHERE migration_key = ?",
+            (migration_key,),
+        ).fetchone()
+    return row is not None
+
+
+def mark_migration_applied(migration_key: str) -> None:
+    with sqlite3.connect(DATA_PATH) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO setup_migrations (migration_key, applied_at) VALUES (?, ?)",
+            (migration_key, int(time.time())),
         )
 
 
@@ -305,6 +347,39 @@ def rules_overwrites(guild: discord.Guild, roles: dict[str, discord.Role]):
     return overwrites
 
 
+ERROR_TEXT = "Das hat leider nicht geklappt. Bitte versuche es später erneut oder wende dich direkt an den Staff."
+
+
+async def send_error_response(interaction: discord.Interaction) -> None:
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(ERROR_TEXT, ephemeral=True)
+        else:
+            await interaction.response.send_message(ERROR_TEXT, ephemeral=True)
+    except discord.HTTPException:
+        logging.exception("Fehlermeldung konnte nicht gesendet werden")
+
+
+class DualityView(discord.ui.View):
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        logging.error("Fehler in %s (%s)", type(self).__name__, item, exc_info=error)
+        await send_error_response(interaction)
+
+
+async def set_member_roles(
+    member: discord.Member,
+    *,
+    add: Sequence[discord.Role] = (),
+    remove: Sequence[discord.Role] = (),
+    reason: str,
+) -> None:
+    # Ein einziger API-Aufruf, damit kein halber Rollenwechsel übrig bleibt.
+    remove_ids = {role.id for role in remove}
+    new_roles = [role for role in member.roles if not role.is_default() and role.id not in remove_ids]
+    new_roles.extend(role for role in add if role not in new_roles)
+    await member.edit(roles=new_roles, reason=reason)
+
+
 def has_member_choice(member: discord.Member, roles: dict[str, discord.Role]) -> bool:
     choice_names = {"Bewerber", "Spieler"}
     return any(role.name in choice_names for role in member.roles)
@@ -389,6 +464,10 @@ class TrackerLinkModal(discord.ui.Modal, title="Mitspielen – Tracker.gg-Profil
             ephemeral=True,
         )
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logging.error("Fehler im Bewerbungsformular", exc_info=error)
+        await send_error_response(interaction)
+
 
 class ApplicationChoiceSelect(discord.ui.Select):
     def __init__(self, *, state_key: str, placeholder: str, options, minimum: int, maximum: int, row: int):
@@ -414,7 +493,7 @@ class ApplicationChoiceSelect(discord.ui.Select):
         await interaction.response.defer()
 
 
-class ApplicationSelectionView(discord.ui.View):
+class ApplicationSelectionView(DualityView):
     DAYS = (
         ("Mittwoch", "Mi"),
         ("Donnerstag", "Do"),
@@ -595,7 +674,7 @@ class ApplicationSelectionView(discord.ui.View):
             self.stop()
 
 
-class OnboardingView(discord.ui.View):
+class OnboardingView(DualityView):
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -616,82 +695,118 @@ class OnboardingView(discord.ui.View):
 
 
 async def review_application(interaction: discord.Interaction, accepted: bool) -> None:
-    if not interaction.message:
-        await interaction.response.send_message("Diese Entscheidung ist nur über eine Bewerbungsnachricht möglich.", ephemeral=True)
+    if not interaction.guild or not isinstance(interaction.user, discord.Member) or not interaction.message:
+        await interaction.response.send_message("Diese Entscheidung ist nur im Server möglich.", ephemeral=True)
         return
+    staff_role_names = {role.name for role in interaction.user.roles}
+    if not staff_role_names.intersection(STAFF_ROLES):
+        await interaction.response.send_message("Nur Coach/Admin kann Bewerbungen entscheiden.", ephemeral=True)
+        return
+
+    # Vor dem Lock bestätigen: Wer am Lock wartet, würde sonst Discords
+    # 3-Sekunden-Frist für die erste Antwort überschreiten.
+    await interaction.response.defer(ephemeral=True, thinking=True)
     lock = APPLICATION_LOCKS.setdefault(interaction.message.id, asyncio.Lock())
     async with lock:
         await _review_application_locked(interaction, accepted)
 
 
 async def _review_application_locked(interaction: discord.Interaction, accepted: bool) -> None:
-    if not interaction.guild or not isinstance(interaction.user, discord.Member) or not interaction.message:
-        await interaction.response.send_message("Diese Entscheidung ist nur im Server möglich.", ephemeral=True)
+    guild = interaction.guild
+    # interaction.message ist der Stand beim Klick. Eine Entscheidung, die
+    # währenddessen am Lock getroffen wurde, steht nur in der frisch geladenen Nachricht.
+    try:
+        message = await interaction.message.fetch()
+    except discord.HTTPException:
+        await interaction.followup.send(
+            "Die Bewerbung konnte gerade nicht geladen werden. Bitte versuche es erneut.", ephemeral=True
+        )
         return
 
-    staff_role_names = {role.name for role in interaction.user.roles}
-    if not staff_role_names.intersection(STAFF_ROLES):
-        await interaction.response.send_message("Nur Coach/Admin kann Bewerbungen entscheiden.", ephemeral=True)
+    if not message.embeds:
+        await interaction.followup.send("Diese Nachricht ist keine gültige Bewerbung.", ephemeral=True)
         return
-
-    if not interaction.message.embeds:
-        await interaction.response.send_message("Diese Nachricht ist keine gültige Bewerbung.", ephemeral=True)
-        return
-    embed = discord.Embed.from_dict(interaction.message.embeds[0].to_dict())
+    embed = discord.Embed.from_dict(message.embeds[0].to_dict())
     footer = embed.footer.text or ""
     if not footer.startswith(APPLICATION_PENDING_PREFIX):
-        await interaction.response.send_message("Diese Bewerbung wurde bereits bearbeitet.", ephemeral=True)
+        await interaction.followup.send("Diese Bewerbung wurde bereits bearbeitet.", ephemeral=True)
         return
 
     try:
         applicant_id = int(footer.removeprefix(APPLICATION_PENDING_PREFIX))
     except ValueError:
-        await interaction.response.send_message("Die Bewerber-ID in dieser Nachricht ist ungültig.", ephemeral=True)
+        await interaction.followup.send("Die Bewerber-ID in dieser Nachricht ist ungültig.", ephemeral=True)
         return
 
-    roles = {role.name: role for role in interaction.guild.roles}
+    roles = {role.name: role for role in guild.roles}
     player_role = roles.get("Spieler")
     applicant_role = roles.get("Bewerber")
     if not player_role or not applicant_role:
-        await interaction.response.send_message("Die benötigten Rollen fehlen. Bitte Staff prüfen lassen.", ephemeral=True)
+        await interaction.followup.send("Die benötigten Rollen fehlen. Bitte Staff prüfen lassen.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    applicant = interaction.guild.get_member(applicant_id)
-    if applicant is None:
-        try:
-            applicant = await interaction.guild.fetch_member(applicant_id)
-        except discord.NotFound:
-            await interaction.followup.send(
-                "Die Person ist nicht mehr auf dem Server. Die Bewerbung wurde nicht automatisch entschieden.",
-                ephemeral=True,
-            )
-            return
+    try:
+        applicant = await guild.fetch_member(applicant_id)
+    except discord.NotFound:
+        await interaction.followup.send(
+            "Die Person ist nicht mehr auf dem Server. Die Bewerbung wurde nicht automatisch entschieden.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException:
+        await interaction.followup.send(
+            "Die Person konnte gerade nicht geladen werden. Bitte versuche es erneut.", ephemeral=True
+        )
+        return
 
+    try:
+        if accepted:
+            await set_member_roles(
+                applicant,
+                add=[player_role],
+                remove=[applicant_role],
+                reason=f"Bewerbung angenommen von {interaction.user}",
+            )
+        elif applicant_role not in applicant.roles:
+            await applicant.add_roles(applicant_role, reason="Bewerberstatus nach Ablehnung beibehalten")
+    except discord.HTTPException:
+        logging.exception("Rollen für Bewerbung %s konnten nicht gesetzt werden", message.id)
+        await interaction.followup.send(
+            "Die Rollen konnten nicht geändert werden; die Bewerbung bleibt offen. "
+            "Prüfe, ob die Bot-Rolle über `Spieler` und `Bewerber` steht.",
+            ephemeral=True,
+        )
+        return
+
+    decided_at = int(time.time())
     if accepted:
-        await applicant.add_roles(player_role, reason=f"Bewerbung angenommen von {interaction.user}")
-        await applicant.remove_roles(applicant_role, reason="Bewerbung angenommen")
         decision = "ACCEPTED"
-        decision_text = f"Angenommen von {interaction.user.mention} · <t:{int(time.time())}:F>"
+        decision_text = f"Angenommen von {interaction.user.mention} · <t:{decided_at}:F>"
         dm_text = "Deine Bewerbung bei Duality Mannheim wurde angenommen. Du hast jetzt die Rolle `Spieler` und Zugang zum Teambereich. Willkommen im Team!"
     else:
-        if applicant_role not in applicant.roles:
-            await applicant.add_roles(applicant_role, reason="Bewerberstatus nach Ablehnung beibehalten")
         decision = "DECLINED"
-        decision_text = f"Abgelehnt von {interaction.user.mention} · <t:{int(time.time())}:F>"
+        decision_text = f"Abgelehnt von {interaction.user.mention} · <t:{decided_at}:F>"
         dm_text = "Danke für deine Bewerbung bei Duality Mannheim. Der Staff kann dir aktuell keinen Teamplatz anbieten. Deine Rolle `Bewerber` bleibt bestehen, daher kannst du über `#bewerbung` keine weitere Bewerbung einreichen. Wenn du Rückfragen hast, wende dich bitte direkt an den Staff."
+
+    embed.add_field(name="Entscheidung", value=decision_text, inline=False)
+    embed.color = discord.Color.green() if accepted else discord.Color.red()
+    embed.set_footer(text=f"{APPLICATION_DECISION_PREFIX}{decision}|{applicant_id}|{interaction.user.id}|{decided_at}")
+    try:
+        await message.edit(embed=embed, view=None)
+    except discord.HTTPException:
+        logging.exception("Bewerbung %s konnte nicht als entschieden markiert werden", message.id)
+        await interaction.followup.send(
+            "Die Rollen wurden geändert, aber die Bewerbungsnachricht konnte nicht aktualisiert werden "
+            "und es wurde noch keine DM verschickt. Bitte klicke gleich noch einmal auf dieselbe Entscheidung.",
+            ephemeral=True,
+        )
+        return
 
     dm_sent = True
     try:
         await applicant.send(dm_text)
-    except (discord.Forbidden, discord.HTTPException):
+    except discord.HTTPException:
         dm_sent = False
-
-    decided_at = int(time.time())
-    embed.add_field(name="Entscheidung", value=decision_text, inline=False)
-    embed.color = discord.Color.green() if accepted else discord.Color.red()
-    embed.set_footer(text=f"{APPLICATION_DECISION_PREFIX}{decision}|{applicant_id}|{interaction.user.id}|{decided_at}")
-    await interaction.message.edit(embed=embed, view=None)
 
     response = "Bewerbung angenommen" if accepted else "Bewerbung abgelehnt; Bewerberrolle bleibt bestehen und sperrt eine erneute Bewerbung"
     if not dm_sent:
@@ -701,7 +816,7 @@ async def _review_application_locked(interaction: discord.Interaction, accepted:
     await interaction.followup.send(response + ".", ephemeral=True)
 
 
-class ApplicationReviewView(discord.ui.View):
+class ApplicationReviewView(DualityView):
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -731,7 +846,7 @@ async def toggle_notification_role(interaction: discord.Interaction, role_name: 
     await interaction.response.send_message(f"`{role_name}` ist jetzt {state}.", ephemeral=True)
 
 
-class NotificationView(discord.ui.View):
+class NotificationView(DualityView):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(ValorantRankSelect())
@@ -844,7 +959,7 @@ async def update_event_rsvps(interaction: discord.Interaction, choice: str) -> N
     await interaction.followup.send(f"Deine Antwort wurde auf „{labels[choice]}“ gesetzt.", ephemeral=True)
 
 
-class EventRSVPView(discord.ui.View):
+class EventRSVPView(DualityView):
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -972,6 +1087,12 @@ async def register_existing_scheduled_events(guild: discord.Guild) -> int:
 
 
 def register_app_commands(tree: app_commands.CommandTree) -> None:
+    @tree.error
+    async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        command_name = interaction.command.name if interaction.command else "unbekannt"
+        logging.error("Fehler bei /%s", command_name, exc_info=error)
+        await send_error_response(interaction)
+
     @tree.command(name="help", description="Zeigt die wichtigsten Server- und Bot-Aktionen.")
     async def help_command(interaction: discord.Interaction):
         embed = discord.Embed(
@@ -1164,22 +1285,36 @@ def register_app_commands(tree: app_commands.CommandTree) -> None:
 
 async def setup_guild(guild: discord.Guild, apply: bool) -> None:
     print(f"Server: {guild.name} ({guild.id})")
-    category_renames = {
-        "📌 START HIER": "👋 EINGANGSHALLE",
-        "💬 COMMUNITY": "💬 LOUNGE",
-        "🔎 TEAM-SUCHE": "📝 BEWERBER",
-    }
-    existing_category_names = {category.name for category in guild.categories}
-    for old_name, new_name in category_renames.items():
-        old_category = discord.utils.get(guild.categories, name=old_name)
-        if old_category and new_name not in existing_category_names:
-            if apply:
-                await old_category.edit(name=new_name, reason="Duality Mannheim Kanalstruktur aktualisiert")
-                existing_category_names.discard(old_name)
-                existing_category_names.add(new_name)
-                print(f"  Kategorie umbenannt: {old_name} → {new_name}")
-            else:
-                print(f"  Kategorie würde umbenannt: {old_name} → {new_name}")
+
+    async def migrate(migration_key: str, migration) -> None:
+        # Aufräumschritte laufen nur, bis sie als erledigt gespeichert sind.
+        # So werden später bewusst angelegte Kanäle oder Rollen mit altem
+        # Namen nicht bei jedem Neustart wieder gelöscht oder umgebaut.
+        if migration_applied(migration_key):
+            return
+        if await migration() and apply:
+            mark_migration_applied(migration_key)
+
+    async def rename_old_categories() -> bool:
+        category_renames = {
+            "📌 START HIER": "👋 EINGANGSHALLE",
+            "💬 COMMUNITY": "💬 LOUNGE",
+            "🔎 TEAM-SUCHE": "📝 BEWERBER",
+        }
+        existing_category_names = {category.name for category in guild.categories}
+        for old_name, new_name in category_renames.items():
+            old_category = discord.utils.get(guild.categories, name=old_name)
+            if old_category and new_name not in existing_category_names:
+                if apply:
+                    await old_category.edit(name=new_name, reason="Duality Mannheim Kanalstruktur aktualisiert")
+                    existing_category_names.discard(old_name)
+                    existing_category_names.add(new_name)
+                    print(f"  Kategorie umbenannt: {old_name} → {new_name}")
+                else:
+                    print(f"  Kategorie würde umbenannt: {old_name} → {new_name}")
+        return True
+
+    await migrate("category_renames_v1", rename_old_categories)
 
     roles = {role.name: role for role in guild.roles}
     for name in ROLE_NAMES:
@@ -1192,10 +1327,14 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
         else:
             print(f"  Rolle würde erstellt: {name}")
 
-    legacy_lft_role = roles.get("LFT")
-    applicant_role = roles.get("Bewerber")
-    player_role = roles.get("Spieler")
-    if legacy_lft_role and applicant_role:
+    async def migrate_lft_role() -> bool:
+        legacy_lft_role = roles.get("LFT")
+        applicant_role = roles.get("Bewerber")
+        player_role = roles.get("Spieler")
+        if not legacy_lft_role:
+            return True
+        if not applicant_role:
+            return False
         old_lft_members = list(legacy_lft_role.members)
         if apply:
             for member in old_lft_members:
@@ -1205,82 +1344,109 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             print(f"  Alte LFT-Zuweisungen auf Bewerber umgestellt oder entfernt: {len(old_lft_members)}")
         elif old_lft_members:
             print(f"  Alte LFT-Zuweisungen würden auf Bewerber umgestellt oder entfernt: {len(old_lft_members)}")
+        return True
 
-    category_lookup = {category.name: category for category in guild.categories}
-    old_announcements = next(
-        (
-            channel
-            for channel in guild.text_channels
-            if "".join(character for character in channel.name.casefold() if character.isalnum()) == "announcements"
-        ),
-        None,
-    )
-    if old_announcements:
-        if apply:
-            try:
-                await old_announcements.delete(
-                    reason="Duality Mannheim verwendet #ankündigungen statt #announcements"
-                )
-                print("  Überflüssigen Kanal entfernt: #announcements")
-            except discord.HTTPException as error:
-                if error.code != 50074:
-                    raise
-                required_as = []
-                if guild.rules_channel and guild.rules_channel.id == old_announcements.id:
-                    required_as.append("Regeln-/Guidelines-Kanal")
-                if guild.public_updates_channel and guild.public_updates_channel.id == old_announcements.id:
-                    required_as.append("Community-Updates-Kanal")
-                purpose = " und ".join(required_as) if required_as else "Pflichtkanal des Community-Servers"
-                print(
-                    f"  #announcements bleibt bestehen: Discord verwendet ihn noch als {purpose}. "
-                    "Ändere die Zuordnung unter Servereinstellungen → Community → Übersicht und starte --apply erneut."
-                )
-        else:
+    await migrate("lft_to_bewerber_v1", migrate_lft_role)
+
+    async def remove_old_announcements() -> bool:
+        old_announcements = next(
+            (
+                channel
+                for channel in guild.text_channels
+                if "".join(character for character in channel.name.casefold() if character.isalnum()) == "announcements"
+            ),
+            None,
+        )
+        if not old_announcements:
+            return True
+        if not apply:
             print("  Kanal würde entfernt: #announcements")
-
-    old_valorant_announcements = discord.utils.get(guild.text_channels, name="valo-announcements")
-    if old_valorant_announcements:
-        if apply:
-            await old_valorant_announcements.delete(
-                reason="Duality Mannheim nutzt den zentralen Ankündigungskanal"
+            return False
+        try:
+            await old_announcements.delete(
+                reason="Duality Mannheim verwendet #ankündigungen statt #announcements"
             )
-            print("  Überflüssigen Kanal entfernt: #valo-announcements")
-        else:
-            print("  Kanal würde entfernt: #valo-announcements")
+        except discord.HTTPException as error:
+            if error.code != 50074:
+                raise
+            required_as = []
+            if guild.rules_channel and guild.rules_channel.id == old_announcements.id:
+                required_as.append("Regeln-/Guidelines-Kanal")
+            if guild.public_updates_channel and guild.public_updates_channel.id == old_announcements.id:
+                required_as.append("Community-Updates-Kanal")
+            purpose = " und ".join(required_as) if required_as else "Pflichtkanal des Community-Servers"
+            print(
+                f"  #announcements bleibt bestehen: Discord verwendet ihn noch als {purpose}. "
+                "Ändere die Zuordnung unter Servereinstellungen → Community → Übersicht und starte --apply erneut."
+            )
+            return False
+        print("  Überflüssigen Kanal entfernt: #announcements")
+        return True
 
-    old_tryout_category = category_lookup.get("🧪 TRYOUTS")
-    if old_tryout_category:
-        if apply:
-            for old_channel in list(old_tryout_category.channels):
-                await old_channel.delete(reason="Duality Mannheim entfernt Tryout-Kanäle")
-                print(f"  Alten Kanal entfernt: {old_channel.name}")
-            await old_tryout_category.delete(reason="Duality Mannheim entfernt Tryout-Kategorie")
-            print("  Alte Kategorie entfernt: 🧪 TRYOUTS")
-        else:
-            print("  Alte Tryout-Kategorie und alle darin liegenden Kanäle würden entfernt")
+    await migrate("remove_announcements_v1", remove_old_announcements)
 
-    old_training_category = category_lookup.get("🏆 TRAINING & SCRIMS")
-    if old_training_category:
-        if apply:
-            for old_channel in list(old_training_category.channels):
-                await old_channel.delete(reason="Duality Mannheim entfernt Training- und Scrim-Bereich")
-                print(f"  Alten Training-/Scrim-Kanal entfernt: {old_channel.name}")
-            await old_training_category.delete(reason="Duality Mannheim entfernt Training- und Scrim-Bereich")
-            print("  Alte Kategorie entfernt: 🏆 TRAINING & SCRIMS")
-        else:
-            print("  Training-/Scrim-Kategorie und alle darin enthaltenen Kanäle würden entfernt")
+    async def remove_old_valorant_announcements() -> bool:
+        old_valorant_announcements = discord.utils.get(guild.text_channels, name="valo-announcements")
+        if old_valorant_announcements:
+            if apply:
+                await old_valorant_announcements.delete(
+                    reason="Duality Mannheim nutzt den zentralen Ankündigungskanal"
+                )
+                print("  Überflüssigen Kanal entfernt: #valo-announcements")
+            else:
+                print("  Kanal würde entfernt: #valo-announcements")
+        return True
 
-    unwanted_voice_names = {"legion", "legions", "legionvc", "legionsvc", "radiants", "radiantsvc"}
-    for old_voice_channel in list(guild.voice_channels):
-        normalized_name = "".join(character for character in old_voice_channel.name.casefold() if character.isalnum())
-        if normalized_name not in unwanted_voice_names:
-            continue
-        if apply:
-            await old_voice_channel.delete(reason="Duality Mannheim entfernt nicht mehr gewünschte Legion-/Radiants-Voice-Channels")
-            print(f"  Unerwünschten Voice-Channel entfernt: {old_voice_channel.name}")
-        else:
-            print(f"  Voice-Channel würde entfernt: {old_voice_channel.name}")
+    await migrate("remove_valo_announcements_v1", remove_old_valorant_announcements)
 
+    async def remove_old_tryout_category() -> bool:
+        old_tryout_category = discord.utils.get(guild.categories, name="🧪 TRYOUTS")
+        if old_tryout_category:
+            if apply:
+                for old_channel in list(old_tryout_category.channels):
+                    await old_channel.delete(reason="Duality Mannheim entfernt Tryout-Kanäle")
+                    print(f"  Alten Kanal entfernt: {old_channel.name}")
+                await old_tryout_category.delete(reason="Duality Mannheim entfernt Tryout-Kategorie")
+                print("  Alte Kategorie entfernt: 🧪 TRYOUTS")
+            else:
+                print("  Alte Tryout-Kategorie und alle darin liegenden Kanäle würden entfernt")
+        return True
+
+    await migrate("remove_tryouts_v1", remove_old_tryout_category)
+
+    async def remove_old_training_category() -> bool:
+        old_training_category = discord.utils.get(guild.categories, name="🏆 TRAINING & SCRIMS")
+        if old_training_category:
+            if apply:
+                for old_channel in list(old_training_category.channels):
+                    await old_channel.delete(reason="Duality Mannheim entfernt Training- und Scrim-Bereich")
+                    print(f"  Alten Training-/Scrim-Kanal entfernt: {old_channel.name}")
+                await old_training_category.delete(reason="Duality Mannheim entfernt Training- und Scrim-Bereich")
+                print("  Alte Kategorie entfernt: 🏆 TRAINING & SCRIMS")
+            else:
+                print("  Training-/Scrim-Kategorie und alle darin enthaltenen Kanäle würden entfernt")
+        return True
+
+    await migrate("remove_training_scrims_v1", remove_old_training_category)
+
+    async def remove_unwanted_voice_channels() -> bool:
+        unwanted_voice_names = {"legion", "legions", "legionvc", "legionsvc", "radiants", "radiantsvc"}
+        for old_voice_channel in list(guild.voice_channels):
+            normalized_name = "".join(character for character in old_voice_channel.name.casefold() if character.isalnum())
+            if normalized_name not in unwanted_voice_names:
+                continue
+            if apply:
+                await old_voice_channel.delete(reason="Duality Mannheim entfernt nicht mehr gewünschte Legion-/Radiants-Voice-Channels")
+                print(f"  Unerwünschten Voice-Channel entfernt: {old_voice_channel.name}")
+            else:
+                print(f"  Voice-Channel würde entfernt: {old_voice_channel.name}")
+        return True
+
+    await migrate("remove_legion_radiants_voice_v1", remove_unwanted_voice_channels)
+
+    permissions_key = f"permissions_v{PERMISSIONS_VERSION}"
+    sync_permissions = not migration_applied(permissions_key)
+    category_lookup = {category.name: category for category in guild.categories}
     for config in CATEGORIES:
         name = config["name"]
         category = category_lookup.get(name)
@@ -1296,6 +1462,8 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             )
             category_lookup[name] = category
             print(f"  Kategorie erstellt: {name}")
+        elif not sync_permissions:
+            print(f"  Kategorie vorhanden: {name}")
         elif apply:
             await category.edit(overwrites=expected_overwrites, reason="Duality Mannheim Rollen-Zugänge")
             print(f"  Kategorie-Berechtigungen gesetzt: {name}")
@@ -1303,9 +1471,9 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
             print(f"  Kategorie vorhanden: {name}; Zugänge würden aktualisiert")
 
         existing = {channel.name: channel for channel in category.channels}
-        if name == "💬 LOUNGE" and "general" in existing:
-            old_general = existing["general"]
-            if "allgemein" not in existing:
+        if name == "💬 LOUNGE" and not migration_applied("lounge_general_v1"):
+            old_general = existing.get("general")
+            if old_general and "allgemein" not in existing:
                 if apply:
                     await old_general.edit(name="allgemein", reason="Duality Mannheim: allgemeiner Chat auf Deutsch")
                     existing.pop("general")
@@ -1313,16 +1481,19 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                     print("    Kanal umbenannt: general → allgemein")
                 else:
                     print("    Kanal würde umbenannt: general → allgemein")
-            elif apply:
-                await old_general.delete(reason="Duality Mannheim entfernt doppelten #general-Kanal")
-                existing.pop("general")
-                print("    Doppelter Kanal entfernt: general")
-            else:
-                print("    Doppelter Kanal general würde entfernt")
+            elif old_general:
+                if apply:
+                    await old_general.delete(reason="Duality Mannheim entfernt doppelten #general-Kanal")
+                    existing.pop("general")
+                    print("    Doppelter Kanal entfernt: general")
+                else:
+                    print("    Doppelter Kanal general würde entfernt")
+            if apply:
+                mark_migration_applied("lounge_general_v1")
 
-        if name == "📝 BEWERBER" and "looking-for-team" in existing:
-            old_applicant_chat = existing["looking-for-team"]
-            if "bewerber-chat" not in existing:
+        if name == "📝 BEWERBER" and not migration_applied("applicant_chat_rename_v1"):
+            old_applicant_chat = existing.get("looking-for-team")
+            if old_applicant_chat and "bewerber-chat" not in existing:
                 if apply:
                     await old_applicant_chat.edit(
                         name="bewerber-chat",
@@ -1333,13 +1504,17 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                     print("    Kanal umbenannt: looking-for-team → bewerber-chat")
                 else:
                     print("    Kanal würde umbenannt: looking-for-team → bewerber-chat")
-            else:
+            elif old_applicant_chat:
                 print("    Alter Kanal looking-for-team bleibt bestehen, da bewerber-chat bereits existiert")
+            if apply:
+                mark_migration_applied("applicant_chat_rename_v1")
 
         for kind, channel_name in config["channels"]:
             channel = existing.get(channel_name)
             if channel:
-                if apply and channel_name == "bewerbung":
+                if not sync_permissions:
+                    print(f"    Kanal vorhanden: {channel_name}")
+                elif apply and channel_name == "bewerbung":
                     await channel.edit(
                         overwrites=application_overwrites(guild, roles),
                         reason="Bewerbung öffentlich lesbar; Spieler und Bewerber werden ausgeschlossen",
@@ -1378,6 +1553,10 @@ async def setup_guild(guild: discord.Guild, apply: bool) -> None:
                 print(f"    {kind.capitalize()}-Kanal erstellt: {channel_name}")
             else:
                 print(f"    {kind.capitalize()}-Kanal würde erstellt: {channel_name}")
+
+    if apply and sync_permissions:
+        mark_migration_applied(permissions_key)
+        print(f"  Rechte-Version {PERMISSIONS_VERSION} gespeichert; Neustarts lassen manuelle Rechte unverändert")
 
     application_channel = discord.utils.get(guild.text_channels, name="bewerbung")
     if apply and application_channel:
@@ -1518,8 +1697,8 @@ async def main(apply: bool) -> None:
 
     print(f"Zielserver-ID: {target_id}", flush=True)
     print("Modus: Änderungen anwenden und Bot online halten." if apply else "Modus: Vorschau ohne Änderungen.", flush=True)
-    if apply:
-        initialize_storage()
+    # Auch die Vorschau braucht die Datenbank, um erledigte Aufräumschritte zu erkennen.
+    initialize_storage()
     intents = discord.Intents.none()
     intents.guilds = True
     intents.members = True
