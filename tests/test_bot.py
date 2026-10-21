@@ -5,6 +5,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import discord
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
@@ -345,6 +347,88 @@ class EventFunctionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.get_scheduled_event(777)[:6], (777, 10, 20, 1792600000, "Training", "Infos"))
         with mock.patch.object(main, "find_text_channel", return_value=None), self.assertRaises(main.EventError):
             await main.publish_event(guild, "Training", "", 1792600000)
+
+
+class EventChangeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        main.initialize_storage()
+        self.start = int(time.time()) + 86400
+        main.save_scheduled_event(500, 10, 20, self.start, "Training", "Maps")
+        main.write_rsvp(500, 1, "going")
+        main.write_rsvp(500, 2, "going")
+        main.write_rsvp(500, 3, "declined")
+        main.mark_event_reminder_sent(500, "24h")
+        members = {1: SimpleNamespace(id=1, mention="<@1>"), 3: SimpleNamespace(id=3, mention="<@3>")}
+        self.channel = mock.MagicMock(spec=discord.TextChannel)
+        self.channel.send = mock.AsyncMock()
+        self.channel.guild = SimpleNamespace(get_member=members.get)
+        self.message = SimpleNamespace(edit=mock.AsyncMock(), channel=self.channel, embeds=[])
+        self.channel.fetch_message = mock.AsyncMock(return_value=self.message)
+        self.guild = SimpleNamespace(id=10, get_channel=lambda channel_id: self.channel if channel_id == 20 else None)
+
+    async def test_move_resets_reminders_and_notifies_going(self):
+        result = await main.edit_event(self.guild, 500, "Training neu", "", self.start + 3600, notify=True)
+        self.assertIn("verschoben", result)
+        self.assertIn("1 Zusagen", result)
+        event = main.get_scheduled_event(500)
+        self.assertEqual((event.title, event.starts_at), ("Training neu", self.start + 3600))
+        self.assertFalse(main.event_reminder_was_sent(500, "24h"))
+        embed = self.message.edit.await_args.kwargs["embed"]
+        self.assertEqual(embed.footer.text, f"{main.EVENT_MARKER}|{self.start + 3600}")
+        self.assertEqual(embed.fields[0].name, "✅ Dabei (2)")
+        text = self.channel.send.await_args.args[0]
+        mentions = self.channel.send.await_args.kwargs["allowed_mentions"]
+        self.assertIn("<@1>", text)
+        self.assertNotIn("<@3>", text)
+        self.assertEqual([user.id for user in mentions.users], [1])
+        self.assertFalse(mentions.everyone)
+
+    async def test_same_time_keeps_reminders_and_stays_quiet(self):
+        await main.edit_event(self.guild, 500, "Nur Titel", "Neue Infos", self.start, notify=True)
+        self.assertTrue(main.event_reminder_was_sent(500, "24h"))
+        self.channel.send.assert_not_awaited()
+
+    async def test_discord_failure_leaves_database_unchanged(self):
+        self.message.edit.side_effect = discord.HTTPException(mock.Mock(status=500, reason="x"), "kaputt")
+        with self.assertRaises(discord.HTTPException):
+            await main.edit_event(self.guild, 500, "Neu", "", self.start + 60)
+        self.assertEqual(main.get_scheduled_event(500).title, "Training")
+
+    async def test_guards(self):
+        with self.assertRaises(main.EventError):
+            await main.edit_event(self.guild, 999, "x", "", self.start)
+        main.save_scheduled_event(501, 10, 20, int(time.time()) - 60, "Vorbei")
+        with self.assertRaises(main.EventError):
+            await main.edit_event(self.guild, 501, "x", "", self.start)
+        self.channel.fetch_message.side_effect = discord.NotFound(mock.Mock(status=404, reason="x"), "weg")
+        with self.assertRaises(main.EventError) as caught:
+            await main.edit_event(self.guild, 500, "x", "", self.start)
+        self.assertIn("gelöscht", str(caught.exception))
+
+    async def test_cancel(self):
+        result = await main.cancel_event(self.guild, 500, notify=False)
+        self.assertIn("abgesagt", result)
+        kwargs = self.message.edit.await_args.kwargs
+        self.assertTrue(kwargs["embed"].title.startswith("❌ Abgesagt: Training"))
+        self.assertTrue(all(item.disabled for item in kwargs["view"].children))
+        self.assertIsNotNone(main.get_scheduled_event(500).cancelled_at)
+        self.assertEqual(main.get_upcoming_events(0), [])
+        self.channel.send.assert_not_awaited()
+        with self.assertRaises(main.EventError):
+            await main.cancel_event(self.guild, 500)
+        with self.assertRaises(main.EventError):
+            await main.edit_event(self.guild, 500, "x", "", self.start)
+
+    def test_overviews(self):
+        self.assertEqual([event.message_id for event in main.list_events(10)], [500])
+        self.assertEqual(main.event_rsvp_overview(10), {500: {"going": [1, 2], "declined": [3]}})
+        self.assertEqual(list(main.event_reminder_overview(10)[500]), ["24h"])
+        self.assertEqual(main.event_rsvp_overview(11), {})
 
 
 class EnvIntTests(unittest.TestCase):

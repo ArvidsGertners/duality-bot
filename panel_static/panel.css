@@ -205,6 +205,24 @@ th { color: var(--muted); font-weight: 600; font-size: .85rem; }
 .person { display: inline-flex; align-items: center; gap: .45rem; }
 .person img { border-radius: 50%; flex: none; }
 
+/* Termine */
+.form-grid { display: grid; gap: .4rem; }
+.form-grid input, .form-grid textarea { width: 100%; }
+.form-grid label { margin-top: .35rem; }
+.form-error { color: var(--danger); min-height: 1.2em; margin: .25rem 0 0; }
+.event-cancelled { text-decoration: line-through; color: var(--muted); }
+.row-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
+details summary { cursor: pointer; }
+details ul { margin: .35rem 0; padding-left: 1.1rem; }
+.calendar-nav { justify-content: space-between; margin-bottom: .5rem; }
+.calendar-nav h2 { margin: 0; }
+.calendar { table-layout: fixed; min-width: 560px; }
+.calendar td { height: 5.5rem; padding: .3rem; font-size: .82rem; }
+.calendar .day-number { color: var(--muted); font-weight: 600; }
+.calendar .today .day-number { color: #fff; background: var(--accent); border-radius: 999px; padding: 0 .4rem; }
+.calendar .outside { opacity: .35; }
+.calendar .calendar-event { display: block; margin-top: .2rem; padding: .1rem .3rem; border-radius: 4px; background: #2c2448; overflow-wrap: anywhere; }
+
 /* Voice */
 .voice-grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
 .voice-category { grid-column: 1 / -1; margin: .5rem 0 0; font-size: .85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }

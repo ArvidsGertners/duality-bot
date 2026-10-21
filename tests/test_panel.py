@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -144,6 +144,13 @@ def make_hooks(client=None) -> panel.PanelHooks:
         reopen_applications=mock.AsyncMock(return_value=3),
         list_profiles=lambda guild_id: [],
         list_tickets=lambda guild_id: [],
+        list_events=lambda guild_id: [],
+        event_rsvps=lambda guild_id: {},
+        event_reminders=lambda guild_id: {},
+        validate_event=main.validate_event,
+        publish_event=mock.AsyncMock(),
+        edit_event=mock.AsyncMock(return_value="Termin geändert."),
+        cancel_event=mock.AsyncMock(return_value="Termin abgesagt."),
     )
 
 
@@ -1033,6 +1040,86 @@ class TicketPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((closed[0]["thread_id"], closed[0]["closed_at"], closed[0]["reporter"]["on_server"]), ("5001", 1500, False))
         self.assertEqual(len((await (await self.tickets("all")).json())["tickets"]), 2)
         self.assertEqual((await self.tickets("kaputt")).status, 400)
+
+
+class EventPanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        now = int(time.time())
+        self.hooks.list_events = lambda guild_id: [
+            main.ScheduledEvent(700, 1, 20, now - 86400, "Vorbei", "", None),
+            main.ScheduledEvent(800, 1, 20, now + 86400, "Scrim", "Infos", None),
+            main.ScheduledEvent(900, 1, 20, now + 2 * 86400, None, None, now),
+        ]
+        self.hooks.event_rsvps = lambda guild_id: {800: {"going": [PLAYER_ID], "declined": [777777777777777777]}}
+        self.hooks.event_reminders = lambda guild_id: {800: {"24h": now}}
+        self.client = TestClient(TestServer(panel.Panel(CONFIG, self.hooks).build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def get(self, path: str):
+        _, cookie = session_cookie(COACH_ID)
+        return await self.client.get(path, headers={"Cookie": cookie})
+
+    async def post(self, path: str, body, user_id: int = COACH_ID):
+        session, cookie = session_cookie(user_id)
+        return await self.client.post(path, json=body, headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]})
+
+    def future(self, days: int = 2) -> str:
+        return (datetime.now(main.BERLIN) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M")
+
+    async def test_list_ranges(self):
+        upcoming = (await (await self.get("/api/events")).json())["events"]
+        self.assertEqual([event["id"] for event in upcoming], ["800", "900"])
+        scrim, cancelled = upcoming
+        self.assertEqual([person["id"] for person in scrim["rsvps"]["going"]], [str(PLAYER_ID)])
+        self.assertFalse(scrim["rsvps"]["declined"][0]["on_server"])
+        self.assertEqual(list(scrim["reminders"]), ["24h"])
+        self.assertEqual(scrim["url"], "https://discord.com/channels/1/20/800")
+        self.assertEqual(cancelled["title"], "Termin ohne gespeicherten Titel")
+        self.assertIsNotNone(cancelled["cancelled_at"])
+        past = (await (await self.get("/api/events?range=past")).json())["events"]
+        self.assertEqual([event["id"] for event in past], ["700"])
+        self.assertEqual(len((await (await self.get("/api/events?range=all")).json())["events"]), 3)
+        self.assertEqual((await self.get("/api/events?range=x")).status, 400)
+
+    async def test_create_uses_shared_validation(self):
+        response = await self.post("/api/events", {"title": " Training ", "starts_at": self.future(), "details": ""})
+        self.assertEqual(response.status, 200)
+        guild, title, details, starts_at = self.hooks.publish_event.await_args.args
+        self.assertEqual((title, details), ("Training", ""))
+        self.assertIn("angelegt", self.hooks.audit.await_args.args[1])
+        for body, expected in (
+            ({"title": "x", "starts_at": "morgen", "details": ""}, "ungültig"),
+            ({"title": "x", "starts_at": "2020-01-01T19:30", "details": ""}, "Zukunft"),
+            ({"title": "", "starts_at": self.future(), "details": ""}, "Titel"),
+            ({"title": "x"}, "fehlen"),
+        ):
+            response = await self.post("/api/events", body)
+            self.assertEqual(response.status, 400)
+            self.assertIn(expected, (await response.json())["error"])
+        self.hooks.publish_event.assert_awaited_once()
+
+    async def test_failed_publish_is_not_audited(self):
+        self.hooks.publish_event.side_effect = discord.HTTPException(mock.Mock(status=403, reason="x"), "verboten")
+        response = await self.post("/api/events", {"title": "Training", "starts_at": self.future(), "details": ""})
+        self.assertEqual(response.status, 502)
+        self.hooks.audit.assert_not_awaited()
+
+    async def test_edit_and_cancel(self):
+        response = await self.post("/api/events/800", {"title": "Scrim", "starts_at": self.future(3), "details": "", "notify": True})
+        self.assertEqual(await response.json(), {"message": "Termin geändert."})
+        self.assertTrue(self.hooks.edit_event.await_args.kwargs["notify"])
+        self.hooks.edit_event.side_effect = ValueError("Abgesagte Termine können nicht mehr geändert werden.")
+        response = await self.post("/api/events/900", {"title": "x", "starts_at": self.future(), "details": ""})
+        self.assertEqual((await response.json())["error"], "Abgesagte Termine können nicht mehr geändert werden.")
+        self.assertEqual((await self.post("/api/events/800/cancel", {})).status, 400)
+        self.hooks.cancel_event.assert_not_awaited()
+        response = await self.post("/api/events/800/cancel", {"confirm": True, "notify": False})
+        self.assertEqual(response.status, 200)
+        self.assertFalse(self.hooks.cancel_event.await_args.kwargs["notify"])
+        self.assertIn("„Scrim“ abgesagt", self.hooks.audit.await_args.args[1])
+        self.assertEqual((await self.post("/api/events/abc/cancel", {"confirm": True})).status, 400)
 
 
 if __name__ == "__main__":

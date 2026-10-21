@@ -17,6 +17,7 @@
           <li><a href="#dashboard" data-page="dashboard" data-level="1">Dashboard</a></li>
           <li><a href="#konsole" data-page="konsole" data-level="1">Konsole</a></li>
           <li><a href="#voice" data-page="voice" data-level="1">Voice</a></li>
+          <li><a href="#termine" data-page="termine" data-level="1">Termine</a></li>
           <li><a href="#bewerbungen" data-page="bewerbungen" data-level="1">Bewerbungen</a></li>
           <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
           <li><a href="#tickets" data-page="tickets" data-level="1">Tickets</a></li>
@@ -84,6 +85,46 @@
           <label><input type="checkbox" id="voice-hide-empty"> Leere Kanäle ausblenden</label>
         </div>
         <div class="voice-grid" id="voice-list"></div>
+      </section>
+
+      <section id="page-termine" class="page" aria-labelledby="title-termine" hidden>
+        <h1 id="title-termine">Termine</h1>
+        <div class="toolbar">
+          <div role="group" aria-label="Ansicht">
+            <button type="button" id="events-view-list" aria-pressed="true">Liste</button>
+            <button type="button" id="events-view-calendar" aria-pressed="false">Kalender</button>
+          </div>
+          <label for="events-range">Zeitraum</label>
+          <select id="events-range">
+            <option value="upcoming">Kommende</option>
+            <option value="past">Vergangene</option>
+            <option value="all">Alle</option>
+          </select>
+          <button type="button" class="primary" id="event-new">Neuer Termin</button>
+          <span class="muted" id="events-message" role="status"></span>
+        </div>
+        <div class="card table-wrap" id="events-list-view">
+          <table>
+            <thead>
+              <tr><th scope="col">Wann</th><th scope="col">Termin</th><th scope="col">Antworten</th><th scope="col">Erinnerungen</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr>
+            </thead>
+            <tbody id="events-list"></tbody>
+          </table>
+        </div>
+        <div class="card" id="events-calendar-view" hidden>
+          <div class="toolbar calendar-nav">
+            <button type="button" id="calendar-prev" aria-label="Vorheriger Monat">‹</button>
+            <h2 id="calendar-title" aria-live="polite"></h2>
+            <button type="button" id="calendar-next" aria-label="Nächster Monat">›</button>
+          </div>
+          <div class="table-wrap">
+            <table class="calendar">
+              <thead><tr><th scope="col">Mo</th><th scope="col">Di</th><th scope="col">Mi</th><th scope="col">Do</th><th scope="col">Fr</th><th scope="col">Sa</th><th scope="col">So</th></tr></thead>
+              <tbody id="calendar-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <p class="muted small">Termine und Antworten werden nach der Löschfrist (90 Tage) automatisch entfernt.</p>
       </section>
 
       <section id="page-bewerbungen" class="page" aria-labelledby="title-bewerbungen" hidden>
@@ -199,11 +240,30 @@
     </main>
   </div>
 
+  <dialog id="event-dialog" aria-labelledby="event-dialog-title">
+    <form id="event-form" class="form-grid">
+      <h2 id="event-dialog-title">Neuer Termin</h2>
+      <label for="event-title">Titel</label>
+      <input id="event-title" required maxlength="100">
+      <label for="event-start">Datum und Uhrzeit (Berliner Zeit)</label>
+      <input id="event-start" type="datetime-local" required>
+      <label for="event-details">Infos (optional)</label>
+      <textarea id="event-details" rows="4" maxlength="1000"></textarea>
+      <label id="event-notify-row" hidden><input type="checkbox" id="event-notify"> Zusagen über eine Verschiebung benachrichtigen (erwähnt nur sie)</label>
+      <p class="form-error" id="event-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" id="event-cancel-dialog">Abbrechen</button>
+        <button type="submit" class="primary" id="event-save">Veröffentlichen</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="confirm-dialog" aria-labelledby="confirm-title">
     <form method="dialog">
       <h2 id="confirm-title">Wirklich ausführen?</h2>
       <p id="confirm-text"></p>
       <p class="mono" id="confirm-command"></p>
+      <label id="confirm-option-row" hidden><input type="checkbox" id="confirm-option"> <span id="confirm-option-text"></span></label>
       <div class="actions">
         <button value="cancel" type="submit" autofocus>Abbrechen</button>
         <button value="ok" type="submit" class="danger" id="confirm-ok">Ausführen</button>

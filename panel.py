@@ -594,6 +594,14 @@ class PanelHooks:
     list_profiles: Callable[[int], list]
     # Tickets: (Thread, meldende Person, erstellt, geschlossen); Inhalte bleiben im Thread.
     list_tickets: Callable[[int], list[tuple[int, int, int, int | None]]]
+    # Termine: dieselben Funktionen wie /termin; Fehler kommen als ValueError mit Meldung für die Person.
+    list_events: Callable[[int], list]
+    event_rsvps: Callable[[int], dict[int, dict[str, list[int]]]]
+    event_reminders: Callable[[int], dict[int, dict[str, int]]]
+    validate_event: Callable[[str, datetime, str], tuple[str, str, int]]
+    publish_event: Callable[[discord.Guild, str, str, int], Awaitable[discord.Message]]
+    edit_event: Callable[..., Awaitable[str]]
+    cancel_event: Callable[..., Awaitable[str]]
 
 
 class Panel:
@@ -634,6 +642,10 @@ class Panel:
             web.post("/api/applications/new-season", self.api_new_season),
             web.get("/api/players", self.api_players),
             web.get("/api/tickets", self.api_tickets),
+            web.get("/api/events", self.api_events),
+            web.post("/api/events", self.api_create_event),
+            web.post("/api/events/{message_id}", self.api_edit_event),
+            web.post("/api/events/{message_id}/cancel", self.api_cancel_event),
             web.post("/api/players/{user_id}/sync-rank", self.api_sync_player_rank),
             web.get("/api/backups", self.api_backups),
             web.post("/api/backups", self.api_create_backup),
@@ -1129,6 +1141,120 @@ class Panel:
                 "url": f"https://discord.com/channels/{guild.id}/{thread_id}",
             })
         return web.json_response({"tickets": tickets})
+
+    async def api_events(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        wanted = request.query.get("range", "upcoming")
+        if wanted not in ("upcoming", "past", "all"):
+            raise json_error(400, "Unbekannter Zeitraum.")
+        now = time.time()
+        rsvps = self.hooks.event_rsvps(guild.id)
+        reminders = self.hooks.event_reminders(guild.id)
+        events = []
+        for event in self.hooks.list_events(guild.id):
+            upcoming = event.starts_at > now
+            if (wanted == "upcoming" and not upcoming) or (wanted == "past" and upcoming):
+                continue
+            responses = rsvps.get(event.message_id, {})
+            events.append({
+                "id": str(event.message_id),
+                "title": event.title or "Termin ohne gespeicherten Titel",
+                "details": event.details or "",
+                "starts_at": event.starts_at,
+                "cancelled_at": event.cancelled_at,
+                "upcoming": upcoming,
+                "rsvps": {
+                    choice: [self.person(guild, user_id) for user_id in responses.get(choice, [])]
+                    for choice in ("going", "maybe", "declined")
+                },
+                "reminders": reminders.get(event.message_id, {}),
+                "url": f"https://discord.com/channels/{guild.id}/{event.channel_id}/{event.message_id}",
+            })
+        if wanted == "past":
+            events.reverse()
+        return web.json_response({"events": events})
+
+    async def event_form(self, request: web.Request) -> tuple[str, str, int, bool]:
+        """Formular prüfen: Zeit kommt als „JJJJ-MM-TTTHH:MM“ in Berliner Zeit."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise json_error(400, "Ungültige Anfrage.")
+        title, details, starts_at = body.get("title"), body.get("details", ""), body.get("starts_at")
+        if not isinstance(title, str) or not isinstance(details, str) or not isinstance(starts_at, str):
+            raise json_error(400, "Titel, Datum und Uhrzeit fehlen.")
+        try:
+            moment = datetime.strptime(starts_at, "%Y-%m-%dT%H:%M").replace(tzinfo=BERLIN)
+        except ValueError:
+            raise json_error(400, "Datum und Uhrzeit sind ungültig.") from None
+        try:
+            clean_title, clean_details, timestamp = self.hooks.validate_event(title, moment, details)
+        except ValueError as error:
+            raise json_error(400, str(error)) from None
+        return clean_title, clean_details, timestamp, body.get("notify") is True
+
+    @staticmethod
+    def event_id(request: web.Request) -> int:
+        try:
+            return int(request.match_info["message_id"])
+        except ValueError:
+            raise json_error(400, "Ungültiger Termin.") from None
+
+    async def run_event_change(self, action: Awaitable[str], member: discord.Member, audit_text: str) -> web.Response:
+        # Audit erst nach Erfolg, damit dort nichts steht, was Discord abgelehnt hat.
+        try:
+            message = await action
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=400)
+        except discord.HTTPException:
+            log.exception("Termin konnte in Discord nicht geändert werden")
+            return web.json_response({"error": "Discord hat die Änderung abgelehnt. Details stehen im Log."}, status=502)
+        await self.audit_action(member, audit_text)
+        return web.json_response({"message": message})
+
+    def event_title(self, message_id: int) -> str:
+        event = next((event for event in self.hooks.list_events(self.guild().id) if event.message_id == message_id), None)
+        return discord.utils.escape_markdown(event.title) if event and event.title else f"`{message_id}`"
+
+    async def api_create_event(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request)
+        title, details, starts_at, _ = await self.event_form(request)
+
+        async def publish() -> str:
+            await self.hooks.publish_event(self.guild(), title, details, starts_at)
+            return "Termin in #spieltermine veröffentlicht."
+
+        return await self.run_event_change(
+            publish(), member, f"hat den Termin „{discord.utils.escape_markdown(title)}“ für <t:{starts_at}:F> angelegt"
+        )
+
+    async def api_edit_event(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request)
+        message_id = self.event_id(request)
+        title, details, starts_at, notify = await self.event_form(request)
+        return await self.run_event_change(
+            self.hooks.edit_event(self.guild(), message_id, title, details, starts_at, notify=notify),
+            member,
+            f"hat den Termin „{discord.utils.escape_markdown(title)}“ geändert (jetzt <t:{starts_at}:F>)",
+        )
+
+    async def api_cancel_event(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request)
+        message_id = self.event_id(request)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or body.get("confirm") is not True:
+            raise json_error(400, "Die Absage muss bestätigt werden.")
+        return await self.run_event_change(
+            self.hooks.cancel_event(self.guild(), message_id, notify=body.get("notify") is True),
+            member,
+            f"hat den Termin „{self.event_title(message_id)}“ abgesagt",
+        )
 
     async def api_new_season(self, request: web.Request) -> web.Response:
         _, member, _ = self.authenticate(request, ADMIN)

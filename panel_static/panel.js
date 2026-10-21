@@ -20,6 +20,10 @@ const state = {
   status: null,
   voice: [],
   players: [],
+  events: [],
+  eventsView: "list",
+  calendarMonth: null,
+  editingEvent: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -371,6 +375,198 @@ async function syncPlayerRank(player, button) {
   }
 }
 
+/* Termine */
+
+const berlinParts = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Berlin", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+
+function berlinDate(seconds) {
+  const parts = Object.fromEntries(berlinParts.formatToParts(new Date(seconds * 1000)).map((part) => [part.type, part.value]));
+  return { day: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}`, year: Number(parts.year), month: Number(parts.month) - 1 };
+}
+
+const weekday = new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", weekday: "short" });
+
+function eventWhen(seconds) {
+  return `${weekday.format(new Date(seconds * 1000))}, ${formatTime(seconds)}`;
+}
+
+function rsvpDetails(event) {
+  const wrapper = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = `✅ ${event.rsvps.going.length} · 🤔 ${event.rsvps.maybe.length} · ❌ ${event.rsvps.declined.length}`;
+  wrapper.append(summary);
+  for (const [choice, label] of [["going", "Dabei"], ["maybe", "Vielleicht"], ["declined", "Kann nicht"]]) {
+    const heading = span("small muted", label);
+    const list = document.createElement("ul");
+    for (const person of event.rsvps[choice]) list.append(listItem(person.name));
+    if (!event.rsvps[choice].length) list.append(listItem(span("muted", "niemand")));
+    wrapper.append(heading, list);
+  }
+  return wrapper;
+}
+
+function reminderText(event) {
+  const sent = Object.entries(event.reminders).map(([key, at]) => `${key} ✓ (${formatTime(at)})`);
+  return sent.length ? sent.join(" · ") : "–";
+}
+
+function eventActions(event) {
+  const actions = span("row-actions", "");
+  actions.append(discordLink(event.url, "Discord"));
+  if (event.upcoming && !event.cancelled_at) {
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "small";
+    editButton.textContent = "Bearbeiten";
+    editButton.setAttribute("aria-label", `${event.title} bearbeiten`);
+    editButton.addEventListener("click", () => openEventDialog(event));
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "small danger";
+    cancelButton.textContent = "Absagen";
+    cancelButton.setAttribute("aria-label", `${event.title} absagen`);
+    cancelButton.addEventListener("click", () => cancelEvent(event));
+    actions.append(editButton, cancelButton);
+  }
+  return actions;
+}
+
+function renderEventList() {
+  const rows = state.events.map((event) => {
+    const title = span(event.cancelled_at ? "event-cancelled" : "", event.title);
+    const cell = span("", "");
+    cell.append(title);
+    if (event.cancelled_at) cell.append(" ", pill("abgesagt", "bad"));
+    return tableRow(eventWhen(event.starts_at), cell, rsvpDetails(event), reminderText(event), eventActions(event));
+  });
+  $("#events-list").replaceChildren(...(rows.length ? rows : [emptyRow(5, "Keine Termine in diesem Zeitraum.")]));
+}
+
+function renderCalendar() {
+  const now = berlinDate(Date.now() / 1000);
+  if (!state.calendarMonth) state.calendarMonth = { year: now.year, month: now.month };
+  const { year, month } = state.calendarMonth;
+  $("#calendar-title").textContent = new Intl.DateTimeFormat("de-DE", { month: "long", year: "numeric", timeZone: "UTC" })
+    .format(new Date(Date.UTC(year, month, 1)));
+  const byDay = {};
+  for (const event of state.events) (byDay[berlinDate(event.starts_at).day] ||= []).push(event);
+  const first = new Date(Date.UTC(year, month, 1));
+  const start = new Date(first);
+  start.setUTCDate(1 - ((first.getUTCDay() + 6) % 7));
+  const rows = [];
+  for (let week = 0; week < 6; week += 1) {
+    const row = document.createElement("tr");
+    for (let day = 0; day < 7; day += 1) {
+      const date = new Date(start);
+      date.setUTCDate(start.getUTCDate() + week * 7 + day);
+      const key = date.toISOString().slice(0, 10);
+      const cell = document.createElement("td");
+      if (date.getUTCMonth() !== month) cell.classList.add("outside");
+      if (key === now.day) cell.classList.add("today");
+      cell.append(span("day-number", String(date.getUTCDate())));
+      for (const event of byDay[key] || []) {
+        const entry = span(`calendar-event${event.cancelled_at ? " event-cancelled" : ""}`, `${berlinDate(event.starts_at).time} ${event.title}`);
+        entry.title = `${event.title} · ✅ ${event.rsvps.going.length} · 🤔 ${event.rsvps.maybe.length} · ❌ ${event.rsvps.declined.length}`;
+        cell.append(entry);
+      }
+      row.append(cell);
+    }
+    rows.push(row);
+    const nextWeek = new Date(start);
+    nextWeek.setUTCDate(start.getUTCDate() + (week + 1) * 7);
+    if (nextWeek.getUTCMonth() !== month && week >= 3) break;
+  }
+  $("#calendar-body").replaceChildren(...rows);
+}
+
+function showEventsView(view) {
+  state.eventsView = view;
+  $("#events-view-list").setAttribute("aria-pressed", String(view === "list"));
+  $("#events-view-calendar").setAttribute("aria-pressed", String(view === "calendar"));
+  $("#events-list-view").hidden = view !== "list";
+  $("#events-calendar-view").hidden = view !== "calendar";
+  // Der Kalender zeigt immer alle Termine, die Liste den gewählten Zeitraum.
+  $("#events-range").disabled = view === "calendar";
+  loadEvents().catch((error) => setBanner(error.message));
+}
+
+async function loadEvents() {
+  const range = state.eventsView === "calendar" ? "all" : $("#events-range").value;
+  state.events = (await api(`/api/events?range=${range}`)).events;
+  if (state.eventsView === "calendar") renderCalendar();
+  else renderEventList();
+}
+
+function berlinInputValue(seconds) {
+  const parts = berlinDate(seconds);
+  return `${parts.day}T${parts.time}`;
+}
+
+function openEventDialog(event = null) {
+  state.editingEvent = event;
+  $("#event-dialog-title").textContent = event ? "Termin bearbeiten" : "Neuer Termin";
+  $("#event-save").textContent = event ? "Speichern" : "Veröffentlichen";
+  $("#event-title").value = event ? event.title : "";
+  $("#event-details").value = event ? event.details : "";
+  $("#event-start").value = event ? berlinInputValue(event.starts_at) : "";
+  $("#event-start").min = berlinInputValue(Date.now() / 1000);
+  $("#event-notify-row").hidden = !event;
+  $("#event-notify").checked = false;
+  $("#event-error").textContent = "";
+  $("#event-dialog").showModal();
+}
+
+async function saveEvent(submitEvent) {
+  submitEvent.preventDefault();
+  const button = $("#event-save");
+  button.disabled = true;
+  const body = {
+    title: $("#event-title").value,
+    starts_at: $("#event-start").value,
+    details: $("#event-details").value,
+    notify: $("#event-notify").checked,
+  };
+  try {
+    const path = state.editingEvent ? `/api/events/${state.editingEvent.id}` : "/api/events";
+    const result = await api(path, { method: "POST", body });
+    $("#event-dialog").close();
+    $("#events-message").textContent = result.message;
+    await loadEvents();
+  } catch (error) {
+    $("#event-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function cancelEvent(event) {
+  const confirmed = await confirmAction(
+    `„${event.title}“ am ${formatTime(event.starts_at)} wird in Discord als abgesagt markiert. Die Buttons werden deaktiviert und es gehen keine Erinnerungen mehr raus.`,
+    null,
+    "Termin absagen",
+    "Zusagen über die Absage benachrichtigen (erwähnt nur sie)",
+  );
+  if (!confirmed) return;
+  try {
+    const result = await api(`/api/events/${event.id}/cancel`, {
+      method: "POST", body: { confirm: true, notify: $("#confirm-option").checked },
+    });
+    $("#events-message").textContent = result.message;
+    await loadEvents();
+  } catch (error) {
+    $("#events-message").textContent = error.message;
+  }
+}
+
+function moveCalendar(step) {
+  const { year, month } = state.calendarMonth;
+  const next = new Date(Date.UTC(year, month + step, 1));
+  state.calendarMonth = { year: next.getUTCFullYear(), month: next.getUTCMonth() };
+  renderCalendar();
+}
+
 async function loadTickets() {
   const filter = $("#ticket-filter").value;
   const { tickets } = await api(`/api/tickets?state=${filter}`);
@@ -386,7 +582,7 @@ async function loadTickets() {
 }
 
 const pageLoaders = {
-  backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets,
+  backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
 };
 
 function renderVoice(channels) {
@@ -595,12 +791,16 @@ function remember(line) {
   }
 }
 
-function confirmAction(text, detail, okLabel = "Ausführen") {
+function confirmAction(text, detail, okLabel = "Ausführen", optionText = null) {
   const dialog = $("#confirm-dialog");
   $("#confirm-text").textContent = text;
   $("#confirm-command").textContent = detail || "";
   $("#confirm-command").hidden = !detail;
   $("#confirm-ok").textContent = okLabel;
+  // Optionale Zusatzfrage; den Haken liest der Aufrufer danach aus #confirm-option.
+  $("#confirm-option-row").hidden = !optionText;
+  $("#confirm-option-text").textContent = optionText || "";
+  $("#confirm-option").checked = false;
   dialog.returnValue = "";
   return new Promise((resolve) => {
     dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true });
@@ -686,6 +886,14 @@ async function init() {
   $("#players-only").addEventListener("change", () => loadPlayers().catch((error) => setBanner(error.message)));
   $("#player-search").addEventListener("input", renderPlayers);
   $("#ticket-filter").addEventListener("change", () => loadTickets().catch((error) => setBanner(error.message)));
+  $("#events-range").addEventListener("change", () => loadEvents().catch((error) => setBanner(error.message)));
+  $("#events-view-list").addEventListener("click", () => showEventsView("list"));
+  $("#events-view-calendar").addEventListener("click", () => showEventsView("calendar"));
+  $("#calendar-prev").addEventListener("click", () => moveCalendar(-1));
+  $("#calendar-next").addEventListener("click", () => moveCalendar(1));
+  $("#event-new").addEventListener("click", () => openEventDialog());
+  $("#event-form").addEventListener("submit", saveEvent);
+  $("#event-cancel-dialog").addEventListener("click", () => $("#event-dialog").close());
   $("#log-search").addEventListener("input", renderLog);
   for (const box of document.querySelectorAll("input[name=log-level]")) box.addEventListener("change", renderLog);
   window.addEventListener("hashchange", showPage);

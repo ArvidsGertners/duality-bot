@@ -671,6 +671,45 @@ def fill_event_text(message_id: int, title: str | None, details: str | None) -> 
         )
 
 
+def list_events(guild_id: int) -> list[ScheduledEvent]:
+    with open_db() as connection:
+        return [
+            ScheduledEvent(*row)
+            for row in connection.execute(
+                f"SELECT {EVENT_COLUMNS} FROM scheduled_events WHERE guild_id = ? ORDER BY starts_at", (guild_id,)
+            )
+        ]
+
+
+def event_rsvp_overview(guild_id: int) -> dict[int, dict[str, list[int]]]:
+    """Zu- und Absagen je Termin."""
+    overview: dict[int, dict[str, list[int]]] = {}
+    with open_db() as connection:
+        rows = connection.execute(
+            "SELECT rsvp.message_id, rsvp.choice, rsvp.user_id FROM event_rsvps AS rsvp "
+            "JOIN scheduled_events AS event ON event.message_id = rsvp.message_id WHERE event.guild_id = ? "
+            "ORDER BY rsvp.user_id",
+            (guild_id,),
+        ).fetchall()
+    for message_id, choice, user_id in rows:
+        overview.setdefault(message_id, {}).setdefault(choice, []).append(user_id)
+    return overview
+
+
+def event_reminder_overview(guild_id: int) -> dict[int, dict[str, int]]:
+    """Gesendete Erinnerungen je Termin: Schlüssel (24h, 1h) → Zeitpunkt."""
+    overview: dict[int, dict[str, int]] = {}
+    with open_db() as connection:
+        rows = connection.execute(
+            "SELECT sent.message_id, sent.reminder_key, sent.sent_at FROM event_reminders_sent AS sent "
+            "JOIN scheduled_events AS event ON event.message_id = sent.message_id WHERE event.guild_id = ?",
+            (guild_id,),
+        ).fetchall()
+    for message_id, key, sent_at in rows:
+        overview.setdefault(message_id, {})[key] = sent_at
+    return overview
+
+
 def get_upcoming_events(now: int) -> list[tuple[int, int, int, int]]:
     with open_db() as connection:
         return connection.execute(
@@ -2477,8 +2516,8 @@ RSVP_LABELS = {
 EVENT_COLOR = discord.Color.from_rgb(110, 70, 255)
 
 
-class EventError(Exception):
-    """Ungültige Termin-Angaben; die Meldung geht so an die Person, die den Termin anlegt."""
+class EventError(ValueError):
+    """Ungültige Termin-Angaben oder -Änderung; die Meldung geht so an die Person, die sie auslöst."""
 
 
 def event_description(starts_at: int, details: str) -> str:
@@ -2530,6 +2569,94 @@ async def publish_event(guild: discord.Guild, title: str, details: str, starts_a
     )
     save_scheduled_event(event_message.id, guild.id, event_channel.id, starts_at, title, details)
     return event_message
+
+
+def disabled_rsvp_view() -> discord.ui.View:
+    view = EventRSVPView()
+    for item in view.children:
+        item.disabled = True
+    return view
+
+
+async def fetch_event(guild: discord.Guild, message_id: int) -> tuple[ScheduledEvent, discord.Message]:
+    event = get_scheduled_event(message_id)
+    if event is None or event.guild_id != guild.id:
+        raise EventError("Diesen Termin gibt es nicht.")
+    channel = guild.get_channel(event.channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        raise EventError("Der Kanal dieses Termins existiert nicht mehr.")
+    try:
+        message = await channel.fetch_message(message_id)
+    except discord.NotFound:
+        raise EventError("Die Termin-Nachricht wurde in Discord gelöscht.") from None
+    return event, message
+
+
+def stored_event_text(event: ScheduledEvent, message: discord.Message) -> tuple[str, str]:
+    """Titel und Infos aus der DB, bei älteren Terminen aus dem Embed."""
+    embed = message.embeds[0] if message.embeds else None
+    title = event.title or (embed.title if embed else None) or "Teamtermin"
+    details = event.details if event.details is not None else ((embed.description or "").partition("\n\n")[2] if embed else "")
+    return title, details
+
+
+async def notify_going(channel: discord.TextChannel, message_id: int, text: str) -> int:
+    """Kurze Nachricht an alle Zusagen; erwähnt werden nur diese Personen."""
+    attendees = [member for user_id in get_rsvps(message_id).get("going", []) if (member := channel.guild.get_member(user_id))]
+    attendees = attendees[:100]
+    if not attendees:
+        return 0
+    await channel.send(
+        f"{text}\n{' '.join(member.mention for member in attendees)}",
+        allowed_mentions=discord.AllowedMentions(users=attendees, roles=False, everyone=False, replied_user=False),
+    )
+    return len(attendees)
+
+
+async def edit_event(
+    guild: discord.Guild, message_id: int, title: str, details: str, starts_at: int, notify: bool = False
+) -> str:
+    """Termin ändern oder verschieben (Werte vorher mit validate_event prüfen)."""
+    event, message = await fetch_event(guild, message_id)
+    if event.cancelled_at:
+        raise EventError("Abgesagte Termine können nicht mehr geändert werden.")
+    if event.starts_at <= time.time():
+        raise EventError("Der Termin hat schon begonnen und kann nicht mehr geändert werden.")
+    lock = RSVP_LOCKS.setdefault(message_id, asyncio.Lock())
+    async with lock:
+        # Erst Discord, dann die DB: Scheitert Discord, bleibt alles beim Alten.
+        await message.edit(
+            embed=event_embed(title, details, starts_at, get_rsvps(message_id)),
+            view=EventRSVPView(),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        update_scheduled_event(message_id, title, details, starts_at)
+    moved = starts_at != event.starts_at
+    result = "Termin verschoben; Erinnerungen werden für die neue Zeit erneut gesendet." if moved else "Termin geändert."
+    if notify and moved:
+        notified = await notify_going(message.channel, message_id, f"📅 **{discord.utils.escape_markdown(title)}** wurde verschoben: jetzt <t:{starts_at}:F> (<t:{starts_at}:R>).")
+        result += f" {notified} Zusagen wurden benachrichtigt."
+    return result
+
+
+async def cancel_event(guild: discord.Guild, message_id: int, notify: bool = False) -> str:
+    event, message = await fetch_event(guild, message_id)
+    if event.cancelled_at:
+        raise EventError("Der Termin ist bereits abgesagt.")
+    title, details = stored_event_text(event, message)
+    lock = RSVP_LOCKS.setdefault(message_id, asyncio.Lock())
+    async with lock:
+        embed = event_embed(title, details, event.starts_at, get_rsvps(message_id))
+        embed.title = f"❌ Abgesagt: {title}"[:256]
+        embed.description = f"**Dieser Termin wurde abgesagt.**\n{embed.description}"
+        embed.color = discord.Color.dark_grey()
+        await message.edit(embed=embed, view=disabled_rsvp_view(), allowed_mentions=discord.AllowedMentions.none())
+        cancel_scheduled_event(message_id)
+    result = "Termin abgesagt; es gehen keine Erinnerungen mehr raus."
+    if notify:
+        notified = await notify_going(message.channel, message_id, f"❌ **{discord.utils.escape_markdown(title)}** am <t:{event.starts_at}:F> wurde abgesagt.")
+        result += f" {notified} Zusagen wurden benachrichtigt."
+    return result
 
 
 async def update_event_rsvps(interaction: discord.Interaction, choice: str) -> None:
@@ -3810,6 +3937,13 @@ async def main(apply: bool) -> int | None:
                     reopen_applications=reopen_applications,
                     list_profiles=list_profiles,
                     list_tickets=list_tickets,
+                    list_events=list_events,
+                    event_rsvps=event_rsvp_overview,
+                    event_reminders=event_reminder_overview,
+                    validate_event=validate_event,
+                    publish_event=publish_event,
+                    edit_event=edit_event,
+                    cancel_event=cancel_event,
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

@@ -29,8 +29,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] A5 Tickets — fertig (a770e37); Phase 2 auf dem VPS seit 21.10.2026
 
 ### Phase 3 – Team
-- [x] Gemeinsame Termin-Funktion für `/termin` und Panel — fertig (Commit „Gemeinsame Termin-Funktion …“)
-- [ ] C2 Termine im Panel (anlegen, bearbeiten/verschieben, absagen) — offen
+- [x] Gemeinsame Termin-Funktion für `/termin` und Panel — fertig (20f2037)
+- [x] C2 Termine im Panel (anlegen, bearbeiten/verschieben, absagen) — fertig (Commit „Termine im Panel …“)
 - [ ] C1 Anwesenheitsübersicht + CSV — offen
 - [ ] C3 Glückwunsch bei Rangaufstieg — offen
 - [ ] C4 `/rangliste` + Panel-Ansicht + `rank_history` — offen
@@ -102,6 +102,8 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 
 - **Termine (gemeinsam):** `validate_event()` (Zukunft, Titel 1–100, Infos ≤ 1000), `publish_event()` (Embed, `EventRSVPView`, `save_scheduled_event`), `event_embed()`/`set_rsvp_fields()`/`RSVP_LABELS` statt doppeltem Code in `/termin` und `update_event_rsvps`. `scheduled_events` hat neue Spalten `title`, `details`, `cancelled_at` (per `ALTER TABLE` in `initialize_storage`, keine neue Tabelle, alte Zeilen bleiben). `save_scheduled_event` behält einen gespeicherten Titel; `update_scheduled_event` ändert ihn und löscht gesendete Erinnerungen nur bei neuer Uhrzeit. Titel alter Termine trägt `register_existing_scheduled_events` beim Start aus dem Embed nach. Abgesagte Termine: keine Erinnerungen, nicht in `attendance()`, Zu-/Absagen werden abgelehnt.
 
+- **C2 Termine:** `/api/events?range=upcoming|past|all` mit Zu-/Absagen (Namen aus dem Cache) und gesendeten Erinnerungen; Anlegen/Bearbeiten/Absagen ab Coach über `validate_event`/`publish_event`/`edit_event`/`cancel_event` (main.py). Uhrzeit im Panel als `datetime-local`, Server liest sie als Berliner Zeit. `edit_event`: nur kommende, nicht abgesagte Termine; erst Discord-Embed (unter dem RSVP-Lock), dann DB; neue Uhrzeit → Erinnerungen zurückgesetzt; optional Nachricht an Zusagen, die nur diese erwähnt (`AllowedMentions(users=…)`). `cancel_event`: Embed „❌ Abgesagt“, Buttons deaktiviert, `cancelled_at` gesetzt, optional Zusagen benachrichtigen (auch bei Absage, nicht nur beim Verschieben). Audit bei Terminen erst nach Erfolg. `EventError` erbt von `ValueError`, das Panel fängt `ValueError` → 400 mit Meldung, `discord.HTTPException` → 502. Kalender: Monatsansicht ohne Bibliothek, zeigt alle Termine.
+
 ## VPS (Stand 21.10.2026)
 - Ubuntu 24.04, Dienst `duality-bot` läuft als `dualitybot`, `Restart=on-failure` (passt zu Exit-Code 75), Env in `/etc/duality-bot.env` (root, 600).
 - Python 3.14.8, discord.py 2.7.1, aiohttp 3.14.5.
@@ -140,4 +142,4 @@ _(noch keine)_
 - Lokal (Mac, python.org-Python) schlägt die Verbindung zu discord.com mit `CERTIFICATE_VERIFY_FAILED` fehl; betrifft nur Testläufe hier, nicht den VPS. Echter Discord-Login lokal daher nicht getestet.
 
 ## Nächster Schritt
-Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Nächstes Feature: C2 Termine im Panel (Liste + Kalender, anlegen, bearbeiten/verschieben mit optionaler Nachricht an Zusagen, absagen mit deaktivierten Buttons). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
+Phase 2 läuft (OK von Arvids, Login über https://duality.217-154-173-183.sslip.io klappt). Phase 3 läuft (OK von Arvids). Nächstes Feature: C1 Anwesenheit (pro Spieler Zusagen/Vielleicht/Absagen/keine Reaktion für einen Zeitraum, Quote, Markierung < 50 % oder ≥ 2× keine Reaktion, Detailansicht, CSV-Export, Hinweis auf 90-Tage-Löschfrist). Phase 3 beginnt mit der gemeinsamen Termin-Funktion für `/termin` und Panel (C2). Dann: B1 Fehler-Benachrichtigung (nutzt `LOOP_STATUS`, `GATEWAY_STATE`, `HenrikDevClient.failures_in_row`).
