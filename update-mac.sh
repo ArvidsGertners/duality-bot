@@ -6,7 +6,7 @@ cd "$PROJECT_DIR"
 
 EXPECTED_HTTPS_REMOTE="https://github.com/ArvidsGertners/duality-bot.git"
 EXPECTED_SSH_REMOTE="git@github.com:ArvidsGertners/duality-bot.git"
-FILES=(main.py requirements.txt .gitignore .python-version update-mac.sh update-vps.sh README.md PANEL_PROMPT.md PROGRESS.md)
+FILES=(main.py requirements.txt .gitignore .python-version update-mac.sh update-vps.sh README.md PANEL_PROMPT.md PROGRESS.md panel.py panel_static tests)
 
 if ! command -v git >/dev/null 2>&1; then
     echo "Fehler: Git wurde nicht gefunden."

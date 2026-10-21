@@ -671,6 +671,14 @@ def is_staff(member: discord.Member) -> bool:
     return any(member_has_role(member, name) for name in STAFF_ROLES)
 
 
+def staff_level(member: discord.Member) -> int:
+    """Rechte-Stufe fürs Panel: Owner 3, Admin 2, Coach 1, sonst 0 (STAFF_ROLES ist absteigend sortiert)."""
+    return max(
+        (len(STAFF_ROLES) - index for index, name in enumerate(STAFF_ROLES) if member_has_role(member, name)),
+        default=0,
+    )
+
+
 def category_overwrites(guild: discord.Guild, roles: dict[str, discord.Role], allowed_names):
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=allowed_names is None)
@@ -3230,11 +3238,26 @@ async def main(apply: bool) -> None:
         else:
             await client.close()
 
+    panel_runner = None
     try:
+        if os.getenv("PANEL_ENABLED") == "1":
+            if apply:
+                from panel import PanelHooks, start_panel
+
+                panel_runner = await start_panel(PanelHooks(
+                    client=client,
+                    guild_id=target_id,
+                    staff_level=staff_level,
+                    audit=audit,
+                ))
+            else:
+                print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)
         async with client:
             print("Verbinde mit Discord ...", flush=True)
             await client.start(token)
     finally:
+        if panel_runner:
+            await panel_runner.cleanup()
         if RANK_CLIENT:
             await RANK_CLIENT.close()
 

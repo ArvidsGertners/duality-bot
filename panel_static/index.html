@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Duality-Panel</title>
+  <link rel="stylesheet" href="/static/panel.css">
+  <script src="/static/panel.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Zum Inhalt springen</a>
+  <div class="layout">
+    <header class="sidebar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Duality-Panel</div>
+      <nav aria-label="Bereiche">
+        <ul id="nav">
+          <li><a href="#dashboard" data-page="dashboard" data-level="1">Dashboard</a></li>
+        </ul>
+      </nav>
+      <div class="user">
+        <img id="user-avatar" src="data:," alt="" width="32" height="32">
+        <div>
+          <div id="user-name">…</div>
+          <div class="muted" id="user-role"></div>
+        </div>
+        <button type="button" class="small" id="logout">Abmelden</button>
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <div class="banner" id="connection-banner" role="status" hidden></div>
+
+      <section id="page-dashboard" class="page" aria-labelledby="title-dashboard">
+        <h1 id="title-dashboard">Dashboard</h1>
+        <p class="muted">Willkommen im Panel. Weitere Bereiche folgen.</p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
