@@ -147,9 +147,10 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - **21.10.2026, 13:12 UTC: Phase 4 deployt (e5499f4)**, vorher Backup `duality-backup-2026-10-21_151242.sqlite3`. `update-vps.sh` Exit 0, Dienst aktiv, 0 Fehler, neue Tabellen da, Standardwerte aktiv, feste Nachrichten mit den (unveränderten) Standardtexten neu gesetzt, Panel lokal/öffentlich ok.
 - **21.10.2026, 13:21 UTC: Phase 5 deployt (7f87f7d)**, vorher Backup `duality-backup-2026-10-21_152155.sqlite3`. Exit 0, Dienst aktiv, 0 Fehler, Panel ok. Setup-Vorschau gegen den echten Server noch nicht angesehen (geht nur über das Panel).
 - **21.10.2026, 15:06 UTC: Abschluss deployt (f24331b)**, vorher Backup `duality-backup-2026-10-21_170647.sqlite3`. Exit 0, Dienst aktiv, 0 Fehler, Syntaxprüfung in `update-vps.sh` vorhanden, `git status` sauber, Panel lokal/öffentlich ok.
+- **21.10.2026, 15:19 UTC: Design-Update deployt (c827c7f)**, vorher Backup `duality-backup-2026-10-21_171937.sqlite3`. Exit 0, Dienst aktiv, 0 Neustarts, 0 Fehler, `git status` sauber, Panel lokal/öffentlich ok, neue Dateien `daisyui.css` und `theme.js` werden ausgeliefert. Hinweis: nginx komprimiert CSS/JS nicht (`daisyui.css` 437 KB statt ca. 29 KB mit gzip).
 
 ## Design-Update (Wunsch von Arvids, 21.10.2026)
-- [x] Panel in den Farben der Palette (`palette.ase`: `#eb1b29`, Schwarz, Weiß), Themes `duality-dark`/`duality-light`, Umschalter System/Hell/Dunkel in der Seitenleiste (Wahl nur im Browser gespeichert, `panel_static/theme.js`) — fertig (Commit folgt)
+- [x] Panel in den Farben der Palette (`palette.ase`: `#eb1b29`, Schwarz, Weiß), Themes `duality-dark`/`duality-light`, Umschalter System/Hell/Dunkel in der Seitenleiste (Wahl nur im Browser gespeichert, `panel_static/theme.js`) — fertig (c827c7f)
 - Statt shadcn (braucht React + Build, verboten) auf Wunsch daisyUI 5.7.50: nur die genutzten Komponenten als `panel_static/daisyui.css`, unverändert von jsDelivr zusammengefügt, ohne Tailwind und ohne Build. Eigene Klassen nur für Layout und Discord-Vorschau.
 - Kontrast: Primärrot `#eb1b29` mit weißer Schrift hat 4,45:1 (knapp unter 4,5); roter Text nutzt daher den Akzent (`#ff4d58` dunkel, `#c8101c` hell). Fehler-Knöpfe sind umrandet, damit sie sich vom roten Primärknopf abheben.
 - Standardfarbe neuer Ankündigungen ist jetzt `#eb1b29`.
