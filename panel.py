@@ -63,6 +63,10 @@ WS_CHECK_SECONDS = 5
 COMMANDS_PER_MINUTE = 20
 # Riot-ID-Abfragen für Bewerber je Staff-Mitglied; jede kostet einen Aufruf beim HenrikDev-Schlüssel.
 LOOKUPS_PER_MINUTE = 6
+# Eine Liga-Suche fragt die Custom Games aller Spieler ab und kostet entsprechend viele Aufrufe.
+LEAGUE_SEARCHES_PER_MINUTE = 2
+# Öffentliche Liga-Seite je IP; der Schlüssel ist ohnehin nicht zu erraten.
+LEAGUE_REQUESTS_PER_MINUTE = 60
 # Schließcode, wenn der Zugriff weg ist: Das Frontend lädt dann neu, statt sich wieder zu verbinden.
 WS_CLOSE_NO_ACCESS = 4403
 # Was nach Token oder Secret aussieht, kommt nie in die Konsole.
@@ -685,6 +689,25 @@ class PanelHooks:
     stats_rules: Callable[[], dict]
     # Server-Wachstum: Beitritte, Abgänge, Mitgliederzahl je Woche (nur Zahlen, keine Personen) und Zählbeginn
     member_flow: Callable[[int], dict]
+    # Liga-Stats: ausgewählte OPLeague-Matches (main.LeagueMatch, neueste zuerst) und ihre Auswertung; Suche
+    # und Hinzufügen fragen die HenrikDev-API ab (ValueError mit Meldung). Der Schlüssel der öffentlichen Seite
+    # liegt in der Datenbank; die Discord-Funktionen bekommen die Adresse der Seite und lösen ValueError
+    # (Kanal fehlt) oder discord.HTTPException aus.
+    league_matches: Callable[[int], list]
+    summarize_league: Callable[[list], dict]
+    find_league_candidates: Callable[[discord.Guild], Awaitable[list[dict]]]
+    add_league_match: Callable[..., Awaitable[Any]]
+    validate_league_texts: Callable[[Any, Any], tuple[str, str | None]]
+    update_league_match: Callable[[int, str, str, str | None], Any]
+    delete_league_match: Callable[[int, str], Any]
+    league_token: Callable[[int], str]
+    renew_league_token: Callable[[int], str]
+    league_guild_for_token: Callable[[str], int | None]
+    post_league_match: Callable[..., Awaitable[bool]]
+    delete_league_message: Callable[[discord.Guild, Any], Awaitable[None]]
+    refresh_league_overview: Callable[[discord.Guild, str], Awaitable[None]]
+    refresh_league_messages: Callable[[discord.Guild, str], Awaitable[int]]
+    league_rules: Callable[[], dict]
 
 
 class Panel:
@@ -695,6 +718,8 @@ class Panel:
         self.login_limiter = RateLimiter(LOGIN_ATTEMPTS, LOGIN_WINDOW_SECONDS)
         self.command_limiter = RateLimiter(COMMANDS_PER_MINUTE, 60)
         self.lookup_limiter = RateLimiter(LOOKUPS_PER_MINUTE, 60)
+        self.league_search_limiter = RateLimiter(LEAGUE_SEARCHES_PER_MINUTE, 60)
+        self.league_limiter = RateLimiter(LEAGUE_REQUESTS_PER_MINUTE, 60)
         self.http: aiohttp.ClientSession | None = None
         self.console = ConsoleLog()
         self.log_handler = ConsoleLogHandler(self.console)
@@ -735,6 +760,15 @@ class Panel:
             web.post("/api/stats/lookup", self.api_stats_lookup),
             web.get("/api/stats/{user_id}", self.api_player_stats),
             web.post("/api/stats/{user_id}/refresh", self.api_refresh_stats),
+            web.get("/api/league", self.api_league),
+            web.post("/api/league", self.api_add_league_match),
+            web.post("/api/league/search", self.api_league_search),
+            web.post("/api/league/link", self.api_renew_league_link),
+            web.post("/api/league/{match_id}", self.api_edit_league_match),
+            web.post("/api/league/{match_id}/post", self.api_post_league_match),
+            web.delete("/api/league/{match_id}", self.api_delete_league_match),
+            web.get("/liga/{token}", self.league_page),
+            web.get("/liga/{token}/data", self.league_data),
             web.get("/api/announcements", self.api_announcements),
             web.post("/api/announcements", self.api_create_announcement),
             web.post("/api/announcements/{announcement_id}", self.api_edit_announcement),
@@ -794,6 +828,11 @@ class Panel:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         if request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        if request.path.startswith("/liga/"):
+            # Der Schlüssel steht in der Adresse: nicht als Referer weitergeben, nicht cachen, nicht indexieren.
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Robots-Tag"] = "noindex, nofollow"
 
     @web.middleware
     async def require_csrf(self, request: web.Request, handler):
@@ -1792,6 +1831,191 @@ class Panel:
             "region": result["region"],
             "summary": self.hooks.summarize_matches(result["matches"]),
             "matches": [self.match_payload(match) for match in result["matches"]],
+        })
+
+    # Liga-Stats: Der Staff wählt OPLeague-Matches aus, das Team sieht sie über einen geheimen Link ohne Login.
+
+    def league_url(self, guild_id: int) -> str:
+        return f"{self.config.base_url}/liga/{self.hooks.league_token(guild_id)}"
+
+    def league_match_json(self, guild: discord.Guild, match) -> dict:
+        return {
+            "match_id": match.match_id,
+            "started_at": match.started_at,
+            "map": match.map,
+            "opponent": match.opponent,
+            "label": match.label,
+            "our_team": match.our_team,
+            "rounds_won": match.rounds_won,
+            "rounds_lost": match.rounds_lost,
+            "won": match.won,
+            "added_by": self.person(guild, match.added_by),
+            "added_at": match.added_at,
+            "posted": match.message_id is not None,
+            "url": f"{self.league_url(guild.id)}#match/{match.match_id}",
+        }
+
+    def league_match_or_404(self, request: web.Request):
+        match_id = request.match_info["match_id"].lower()
+        match = next((entry for entry in self.hooks.league_matches(self.hooks.guild_id) if entry.match_id == match_id), None)
+        if match is None:
+            raise json_error(404, "Dieses Liga-Match gibt es nicht.")
+        return match
+
+    async def league_body(self, request: web.Request) -> dict:
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise json_error(400, "Ungültige Anfrage.")
+        return body
+
+    async def sync_league_discord(self, guild: discord.Guild, match=None, repost: bool = False) -> str | None:
+        """Match-Nachricht und angepinnte Übersicht in Discord nachziehen. Gibt bei Problemen den Grund zurück."""
+        url = self.league_url(guild.id)
+        try:
+            if match is not None:
+                await self.hooks.post_league_match(guild, match, url, repost=repost)
+            await self.hooks.refresh_league_overview(guild, url)
+        except ValueError as error:
+            return str(error)
+        except discord.HTTPException:
+            log.exception("Liga-Stats: Nachricht in Discord konnte nicht gesendet oder bearbeitet werden")
+            return "Discord hat die Nachricht abgelehnt. Details stehen im Log."
+        return None
+
+    async def api_league(self, request: web.Request) -> web.Response:
+        self.authenticate(request)
+        guild = self.guild()
+        rules = self.hooks.league_rules()
+        return web.json_response({
+            "matches": [self.league_match_json(guild, match) for match in self.hooks.league_matches(guild.id)],
+            "url": self.league_url(guild.id),
+            "channel": rules["channel"],
+            "channel_exists": self.hooks.find_text_channel(guild, rules["channel"]) is not None,
+            "enabled": rules["enabled"],
+        })
+
+    async def api_league_search(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request)
+        if not self.league_search_limiter.allow(str(member.id)):
+            raise json_error(429, f"Höchstens {LEAGUE_SEARCHES_PER_MINUTE} Suchen pro Minute. Bitte kurz warten.")
+        try:
+            candidates = await self.hooks.find_league_candidates(self.guild())
+        except ValueError as error:
+            raise json_error(400, str(error)) from None
+        log.info("Panel: %s hat nach Custom Games für die Liga-Stats gesucht", member)
+        return web.json_response({"candidates": candidates})
+
+    async def api_add_league_match(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request)
+        body = await self.league_body(request)
+        guild = self.guild()
+        try:
+            match = await self.hooks.add_league_match(
+                guild, body.get("match"), body.get("opponent"), body.get("label"), body.get("team") or None, member.id,
+            )
+        except ValueError as error:
+            raise json_error(400, str(error)) from None
+        await self.audit_action(
+            member,
+            f"hat das Liga-Match gegen **{discord.utils.escape_markdown(match.opponent)}** "
+            f"({match.rounds_won} : {match.rounds_lost}, {match.map or 'unbekannte Map'}) hinzugefügt",
+        )
+        problem = await self.sync_league_discord(guild, match, repost=True) if body.get("post") is True else None
+        return web.json_response({
+            "match": self.league_match_json(guild, match),
+            "notice": f"Gespeichert, aber nicht in Discord gepostet: {problem}" if problem else None,
+        })
+
+    async def api_edit_league_match(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request)
+        match = self.league_match_or_404(request)
+        body = await self.league_body(request)
+        try:
+            opponent, label = self.hooks.validate_league_texts(body.get("opponent"), body.get("label"))
+        except ValueError as error:
+            raise json_error(400, str(error)) from None
+        guild = self.guild()
+        match = self.hooks.update_league_match(guild.id, match.match_id, opponent, label)
+        if match is None:
+            raise json_error(404, "Dieses Liga-Match gibt es nicht mehr.")
+        await self.audit_action(member, f"hat das Liga-Match gegen **{discord.utils.escape_markdown(opponent)}** bearbeitet")
+        problem = await self.sync_league_discord(guild, match if match.message_id else None)
+        return web.json_response({
+            "match": self.league_match_json(guild, match),
+            "notice": f"Gespeichert, aber Discord nicht aktualisiert: {problem}" if problem else None,
+        })
+
+    async def api_post_league_match(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request)
+        match = self.league_match_or_404(request)
+        guild = self.guild()
+        problem = await self.sync_league_discord(guild, match, repost=True)
+        if problem:
+            return web.json_response({"error": problem}, status=502)
+        await self.audit_action(member, f"hat das Liga-Match gegen **{discord.utils.escape_markdown(match.opponent)}** in Discord gepostet")
+        return web.json_response({"message": "In Discord gepostet."})
+
+    async def api_delete_league_match(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        match = self.league_match_or_404(request)
+        guild = self.guild()
+        self.hooks.delete_league_match(guild.id, match.match_id)
+        problem = None
+        try:
+            await self.hooks.delete_league_message(guild, match)
+        except discord.HTTPException:
+            log.exception("Liga-Stats: Nachricht in Discord konnte nicht gelöscht werden")
+            problem = "Die Nachricht in Discord konnte nicht entfernt werden."
+        problem = await self.sync_league_discord(guild) or problem
+        notice = f"Gelöscht, aber Discord nicht aktualisiert: {problem}" if problem else None
+        await self.audit_action(member, f"hat das Liga-Match gegen **{discord.utils.escape_markdown(match.opponent)}** gelöscht")
+        return web.json_response({"message": "Liga-Match gelöscht.", "notice": notice})
+
+    async def api_renew_league_link(self, request: web.Request) -> web.Response:
+        _, member, _ = self.authenticate(request, ADMIN)
+        guild = self.guild()
+        self.hooks.renew_league_token(guild.id)
+        url = self.league_url(guild.id)
+        await self.audit_action(member, "hat den Link zu den Liga-Stats erneuert; alte Links gelten nicht mehr")
+        try:
+            updated = await self.hooks.refresh_league_messages(guild, url)
+        except ValueError as error:
+            return web.json_response({"url": url, "message": f"Neuer Link aktiv. Discord wurde nicht aktualisiert: {error}"})
+        except discord.HTTPException:
+            log.exception("Liga-Stats: Nachrichten mit dem neuen Link konnten nicht aktualisiert werden")
+            return web.json_response({"url": url, "message": "Neuer Link aktiv, aber Discord hat die Aktualisierung abgelehnt."})
+        return web.json_response({"url": url, "message": f"Neuer Link aktiv. Übersicht und {updated} Match-Nachricht(en) in Discord aktualisiert."})
+
+    def league_guild(self, request: web.Request) -> int | None:
+        """Server zum Schlüssel aus der Adresse; None bei unbekanntem oder fremdem Schlüssel."""
+        if not self.league_limiter.allow(client_ip(request)):
+            raise web.HTTPTooManyRequests(text="Zu viele Anfragen. Bitte kurz warten.")
+        guild_id = self.hooks.league_guild_for_token(request.match_info["token"])
+        return guild_id if guild_id == self.hooks.guild_id else None
+
+    async def league_page(self, request: web.Request) -> web.StreamResponse:
+        # Liest nur die Datenbank und funktioniert deshalb auch, solange der Bot nicht mit Discord verbunden ist.
+        if self.league_guild(request) is None:
+            return page(
+                "Link ungültig",
+                f"<p>Dieser Link zu den Liga-Stats gilt nicht (mehr). Den aktuellen Link findest du angepinnt in "
+                f"#{html.escape(self.hooks.league_rules()['channel'])}.</p>",
+                404,
+            )
+        return web.FileResponse(STATIC_DIR / "liga.html")
+
+    async def league_data(self, request: web.Request) -> web.Response:
+        guild_id = self.league_guild(request)
+        if guild_id is None:
+            raise json_error(404, "Dieser Link gilt nicht (mehr).")
+        matches = self.hooks.league_matches(guild_id)
+        # Nur, was die Seite zeigt: keine Discord-IDs, nicht wer das Match hinzugefügt hat.
+        return web.json_response({
+            "summary": self.hooks.summarize_league(matches),
+            "matches": [{"opponent": match.opponent, "label": match.label, "won": match.won, **match.data} for match in matches],
         })
 
     async def api_attendance(self, request: web.Request) -> web.Response:

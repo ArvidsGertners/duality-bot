@@ -31,6 +31,7 @@
               <li><a href="#anwesenheit" data-page="anwesenheit" data-level="1">Anwesenheit</a></li>
               <li><a href="#rangliste" data-page="rangliste" data-level="1">Rangliste</a></li>
               <li><a href="#statistiken" data-page="statistiken" data-level="1">Statistiken</a></li>
+              <li><a href="#liga" data-page="liga" data-level="1">Liga</a></li>
               <li><a href="#spieler" data-page="spieler" data-level="1">Spieler</a></li>
             </ul>
           </li>
@@ -291,6 +292,59 @@
             </table>
           </div>
         </article>
+      </section>
+
+      <section id="page-liga" class="page" aria-labelledby="title-liga" hidden>
+        <h1 id="title-liga">Liga</h1>
+        <p class="muted" id="league-rules"></p>
+        <div class="card">
+          <h2>Link fürs Team</h2>
+          <p class="small muted">Wer diesen Link hat, sieht die Liga-Stats ohne Anmeldung. Der Bot pinnt ihn in <span id="league-channel"></span> an und hängt ihn an jedes gepostete Match. Erneuern macht alle alten Links ungültig.</p>
+          <div class="command-line">
+            <input class="input" id="league-url" readonly aria-label="Link zu den Liga-Stats">
+            <button type="button" class="btn" id="league-copy">Kopieren</button>
+            <a class="btn" id="league-open" target="_blank" rel="noopener noreferrer">Öffnen</a>
+            <button type="button" class="btn btn-outline btn-error" id="league-renew" data-level="2">Erneuern</button>
+          </div>
+          <p class="small" id="league-link-message" role="status"></p>
+        </div>
+
+        <div class="card spaced">
+          <h2>Matches hinzufügen</h2>
+          <p class="small muted">Die Suche geht die letzten 10 Custom Games jedes Spielers mit verknüpfter Riot-ID durch und zeigt Spiele mit mindestens zwei eigenen Spielern. Ältere Matches gehen über den tracker.gg-Link oder die Match-ID.</p>
+          <div class="toolbar">
+            <button type="button" class="btn btn-primary" id="league-search">Custom Games suchen</button>
+            <button type="button" class="btn" id="league-manual">Per Link hinzufügen</button>
+            <span class="small" id="league-search-message" role="status"></span>
+          </div>
+          <div class="table-wrap" id="league-candidates-wrap" hidden>
+            <table class="table">
+              <thead><tr><th scope="col">Datum</th><th scope="col">Map</th><th scope="col">Stand</th><th scope="col">Eigene Spieler</th><th scope="col"><span class="visually-hidden">Aktion</span></th></tr></thead>
+              <tbody id="league-candidates"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="toolbar spaced">
+          <span class="muted" id="league-summary" role="status"></span>
+          <span class="small" id="league-message" role="status"></span>
+        </div>
+        <div class="card table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th scope="col">Datum</th>
+                <th scope="col">Gegner</th>
+                <th scope="col">Bezeichnung</th>
+                <th scope="col">Map</th>
+                <th scope="col">Ergebnis</th>
+                <th scope="col">Discord</th>
+                <th scope="col"><span class="visually-hidden">Aktionen</span></th>
+              </tr>
+            </thead>
+            <tbody id="league-list"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="page-bewerbungen" class="page" aria-labelledby="title-bewerbungen" hidden>
@@ -572,6 +626,31 @@
       <div class="modal-action">
         <button class="btn" type="button" id="event-cancel-dialog">Abbrechen</button>
         <button type="submit" class="btn btn-primary" id="event-save">Veröffentlichen</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="league-dialog" aria-labelledby="league-dialog-title">
+    <form id="league-form" class="modal-box form-grid">
+      <h2 id="league-dialog-title">Liga-Match hinzufügen</h2>
+      <p class="small muted" id="league-dialog-info"></p>
+      <label for="league-match" id="league-match-label">tracker.gg-Match-Link oder Match-ID</label>
+      <input class="input" id="league-match" maxlength="300" autocomplete="off" spellcheck="false" placeholder="https://tracker.gg/valorant/match/…">
+      <label for="league-opponent">Gegner</label>
+      <input class="input" id="league-opponent" required maxlength="60" placeholder="z. B. Uni Heidelberg">
+      <label for="league-label">Bezeichnung (optional)</label>
+      <input class="input" id="league-label" maxlength="60" placeholder="z. B. Spieltag 3">
+      <label for="league-team" id="league-team-label">Eigenes Team</label>
+      <select class="select" id="league-team">
+        <option value="">Automatisch (verknüpfte Riot-IDs)</option>
+        <option value="Red">Rot</option>
+        <option value="Blue">Blau</option>
+      </select>
+      <label id="league-post-row"><input class="checkbox checkbox-sm" type="checkbox" id="league-post" checked> Ergebnis und Link in #liga-stats posten</label>
+      <p class="form-error" id="league-error" role="alert"></p>
+      <div class="modal-action">
+        <button class="btn" type="button" id="league-cancel-dialog">Abbrechen</button>
+        <button type="submit" class="btn btn-primary" id="league-save">Hinzufügen</button>
       </div>
     </form>
   </dialog>

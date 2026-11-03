@@ -507,3 +507,68 @@ tr.flagged td:first-child { box-shadow: inset 3px 0 0 var(--color-error); }
   .card > h2:first-child { margin: -1rem -1rem 1rem; padding: .85rem 1rem; }
   .console { height: calc(100vh - 14rem); }
 }
+
+/* Liga-Stats: öffentliche Seite /liga/… (ohne Seitenleiste) und Rundenleiste */
+.liga-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .75rem 1.5rem;
+  padding: 1rem 3rem;
+  background: var(--color-base-100);
+  color: var(--color-base-content);
+  border-bottom: var(--border) solid var(--line);
+}
+.liga-header .brand { margin: 0; color: inherit; text-decoration: none; }
+.liga-nav { display: flex; gap: .5rem; margin-left: auto; }
+.liga main > section { max-width: 1200px; }
+.liga .stat-tiles { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.liga .stat-tile .value { white-space: nowrap; }
+.round-strip { display: flex; flex-wrap: wrap; gap: 4px; }
+.round-gap { width: .75rem; }
+.round-chip {
+  display: grid;
+  place-items: center;
+  width: 2.3rem;
+  padding: .2rem 0;
+  border: var(--border) solid var(--line);
+  border-top-width: 3px;
+  background: transparent;
+  color: inherit;
+  font-family: var(--mono);
+  font-size: .72rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.round-chip .round-number { color: var(--muted); }
+.round-chip .round-symbol { font-size: .95rem; }
+.round-chip.win { background: color-mix(in oklab, var(--color-success) 22%, transparent); border-color: var(--color-success); }
+.round-chip.loss { background: color-mix(in oklab, var(--color-primary) 20%, transparent); border-color: var(--color-primary); }
+/* Eigener Angriff: oben ein Rahmen in Textfarbe */
+.round-chip.attack { border-top-color: var(--color-base-content); }
+.round-chip[aria-pressed="true"] { outline: 2px solid var(--color-base-content); outline-offset: 1px; }
+.round-legend { margin: .75rem 0 0; }
+#round-detail { margin-top: 1rem; padding-top: 1rem; border-top: var(--border) solid var(--line); }
+#round-detail h3:first-child { margin-top: 0; }
+.round-facts { max-width: 640px; }
+.round-facts dd { text-align: left; }
+.kill-feed { margin: 0; padding: 0; list-style: none; display: grid; gap: .3rem; font-family: var(--mono); font-size: .85rem; }
+.team-us { color: var(--color-success); font-weight: 700; }
+.team-them { color: var(--color-accent); font-weight: 700; }
+.scoreboard-caption {
+  caption-side: top;
+  text-align: left;
+  padding: .85rem 1.1rem;
+  border-bottom: var(--border) solid var(--line);
+  font-size: .8rem;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.scoreboard td, .scoreboard th { white-space: nowrap; }
+@media (max-width: 760px) {
+  .liga-header { padding: .75rem 16px; }
+  .liga-nav { margin-left: 0; }
+  .liga .table :where(th, td) { padding: .6rem .65rem; }
+}

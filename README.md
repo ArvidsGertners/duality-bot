@@ -55,17 +55,21 @@ Fehlt eine Panel-Variable, startet der Bot normal ohne Panel und schreibt den Gr
 
 ## Web-Panel
 
-Das Panel ist ein aiohttp-Server im Bot-Prozess. Es zeigt Dashboard, Live-Konsole, Voice-Kanäle, Termine, Anwesenheit, Rangliste, Statistiken, Bewerbungen, Spieler, Tickets, Ankündigungen, Texte, Einstellungen, Server-Setup, Backups und Datenschutz. Anmelden geht nur mit Discord und nur mit einer Staff-Rolle; die Rolle wird bei jeder Anfrage neu geprüft.
+Das Panel ist ein aiohttp-Server im Bot-Prozess. Es zeigt Dashboard, Live-Konsole, Voice-Kanäle, Termine, Anwesenheit, Rangliste, Statistiken, Liga, Bewerbungen, Spieler, Tickets, Ankündigungen, Texte, Einstellungen, Server-Setup, Backups und Datenschutz. Anmelden geht nur mit Discord und nur mit einer Staff-Rolle; die Rolle wird bei jeder Anfrage neu geprüft.
 
 | Rolle | Darf |
 |---|---|
-| Coach | alles ansehen, Termine anlegen/verschieben/absagen, Anwesenheit inkl. CSV, Riot-ID von Bewerbern auswerten (höchstens 6 pro Minute, nichts gespeichert), Konsole `help`/`status`/`tasks` |
-| Admin | zusätzlich steuernde Konsolenbefehle (`sync-ranks`, `reminders`, `purge`, `cleanup-voice`, `backup`, `say`), Rang abgleichen, Matches neu abholen, neue Saison, Ankündigungen, Texte, Einstellungen, Datenschutz, Setup-Vorschau |
+| Coach | alles ansehen, Termine anlegen/verschieben/absagen, Anwesenheit inkl. CSV, Riot-ID von Bewerbern auswerten (höchstens 6 pro Minute, nichts gespeichert), Liga-Matches suchen (höchstens 2 pro Minute), hinzufügen, bearbeiten und posten, Konsole `help`/`status`/`tasks` |
+| Admin | zusätzlich steuernde Konsolenbefehle (`sync-ranks`, `reminders`, `purge`, `cleanup-voice`, `backup`, `say`), Rang abgleichen, Matches neu abholen, Liga-Matches löschen, Liga-Link erneuern, neue Saison, Ankündigungen, Texte, Einstellungen, Datenschutz, Setup-Vorschau |
 | Owner | zusätzlich `restart`, Backup-Download, Server-Setup anwenden |
 
 Jede steuernde Aktion landet mit Name im Audit-Kanal.
 
 **Statistiken:** Beim täglichen Rang-Abgleich holt der Bot zusätzlich die letzten Matches jedes verknüpften Spielers (`/valorant/v1/stored-matches`, Standard: 20 Competitive-Matches, einstellbar) und speichert Map, Agent, K/D/A, Treffer, Schaden, Punkte und Ergebnis in `match_stats`. Matches älter als 90 Tage löscht er; eine neue oder gelöste Riot-ID löscht die Matches des alten Kontos. Die Daten sind Teil von Auskunft und Löschung.
+
+**Liga-Stats (OPLeague):** Uniliga-Spiele laufen als Custom Games. Auf der Seite **Liga** sucht der Staff in den letzten 10 Custom Games jedes Spielers mit verknüpfter Riot-ID (`/valorant/v4/matches/…?mode=custom`). Angezeigt werden Matches mit mindestens zwei eigenen Spielern; ältere Matches gehen per tracker.gg-Match-Link oder Match-ID. Beim Hinzufügen holt der Bot das ganze Match (`/valorant/v4/match/…`) und speichert eine Auswertung in `league_matches`: Scoreboard beider Teams (ACS, K/D/A, ADR, HS %, KAST, First Kills/Deaths, Multi-Kills, Clutches, Plants, Defuses), jede Runde mit Seite, Kaufrunde und Kill-Feed sowie Team-Werte (Angriff/Verteidigung, Pistol, Eco). Das eigene Team erkennt der Bot an den verknüpften Riot-IDs; ist das nicht eindeutig, wählt der Staff Rot oder Blau.
+
+Das Team sieht alles unter `<PANEL_BASE_URL>/liga/<schlüssel>`, ohne Anmeldung: eine Saison-Übersicht, eine Seite je Match und eine je Spieler. Der Schlüssel ist zufällig (32 Byte) und steht nur im Link. Der Bot pinnt den Link in `#liga-stats` (Kategorie 🎮 TEAM) an und postet zu jedem Match das Ergebnis mit einem Knopf zur Match-Seite. Wer den Link hat, sieht die Stats; wird er weitergegeben, erneuert ein Admin ihn im Panel. Danach gilt nur noch der neue Link, und der Bot passt die angepinnte Übersicht und alle Match-Nachrichten an. Die Seite liest nur die Datenbank und funktioniert auch, solange der Bot nicht verbunden ist.
 
 **Server-Wachstum:** Das Dashboard zeigt Beitritte und Abgänge der letzten 12 Wochen. Der Bot speichert dafür nur Tageszahlen in `member_flow` (keine User-IDs, 400 Tage). Beim Start trägt er Beitritte aus den Beitrittsdaten der aktuellen Mitglieder nach; Abgänge zählt er erst ab dem ersten Start mit dieser Version.
 
@@ -149,9 +153,11 @@ map $http_upgrade $duality_connection_upgrade {
     default upgrade;
     ''      close;
 }
-# Der OAuth-Callback trägt den einmaligen Discord-Code in der URL und wird nicht geloggt.
+# Der OAuth-Callback trägt den einmaligen Discord-Code in der URL und wird nicht geloggt,
+# ebenso die Liga-Seite, deren Adresse den geheimen Schlüssel enthält.
 map $request_uri $duality_loggable {
     ~^/auth/callback 0;
+    ~^/liga/ 0;
     default 1;
 }
 
@@ -254,6 +260,7 @@ Danach im Panel oder mit `journalctl -u duality-bot -n 50` prüfen, ob der Bot n
 - Ins Audit-Log kommt nur, dass und von wem eine Auskunft oder Löschung erfolgte, nie die Daten.
 - Bewerbungsinhalte (Name, Kurs, Tracker-Link) liegen nur in der Discord-Nachricht, nicht in der Datenbank.
 - Tickets und Staff-Stimmen bleiben als Nachweis erhalten. Bei Änderungen im Panel (Einstellungen, Texte, Ankündigungen) wird bei einer Löschung nur der Name entfernt.
+- Liga-Matches enthalten die Riot-IDs und Werte aller zehn Spieler, auch der Gegner, und bleiben, bis ein Admin das Match löscht. Bei einer Löschung bleibt das Match als Teamergebnis erhalten; Riot-ID und puuid der Person werden durch „Gelöschte Person“ ersetzt. Die Liga-Seite enthält keine Discord-IDs.
 - In Backups stehen gelöschte Daten, bis das Backup nach `BACKUP_RETENTION_DAYS` gelöscht wird.
 
 ## Entwicklung und Deploy

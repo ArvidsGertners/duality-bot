@@ -1,5 +1,6 @@
 """Tests für Bot-Funktionen aus main.py ohne Discord-Verbindung: python -m unittest discover -s tests"""
 
+import json
 import os
 import sqlite3
 import stat
@@ -19,6 +20,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 import main
+from league_fixture import RIOT_IDS, v4_match
 
 
 def setUpModule():
@@ -1096,6 +1098,294 @@ class PrivacyTests(unittest.IsolatedAsyncioTestCase):
         applications = {entry["message_id"]: entry for entry in export["daten"]["bewerbungen"]}
         self.assertEqual(applications[500]["angaben"], {"Kurs": "WI24"})
         self.assertEqual(applications[501]["angaben"], "Nachricht nicht mehr vorhanden")
+
+
+class LeagueParseTests(unittest.TestCase):
+    def setUp(self):
+        self.data, self.own = main.parse_league_match(v4_match(), RIOT_IDS)
+        self.players = {player["name"]: player for player in self.data["players"]}
+
+    def test_team_score_and_order(self):
+        self.assertEqual((self.data["our_team"], self.data["score"], self.data["halftime"]), ("Red", {"us": 2, "them": 1}, {"us": 2, "them": 1}))
+        self.assertEqual(self.own, {"zoe": 5, "kai": 6})
+        self.assertEqual((self.data["map"], self.data["mode"], self.data["duration"]), ("Ascent", "Custom", 1800))
+        self.assertEqual(self.data["started_at"], int(datetime(2026, 10, 28, 18, tzinfo=timezone.utc).timestamp()))
+        # Eigenes Team zuerst, jeweils nach Punkten; die Auswertung enthält keine Discord-IDs.
+        self.assertEqual([player["name"] for player in self.data["players"]][:6], ["R5", "Zoe", "Kai", "R4", "R3", "B1"])
+        data, own = main.parse_league_match(v4_match(), {"zoe#euw": 987654321987654321})
+        self.assertEqual(own, {"zoe": 987654321987654321})
+        self.assertNotIn("987654321987654321", json.dumps(data))
+
+    def test_player_values(self):
+        zoe, kai, r5, b1, b4 = (self.players[name] for name in ("Zoe", "Kai", "R5", "B1", "B4"))
+        self.assertEqual((zoe["fk"], zoe["fd"], zoe["kast"]), (1, 2, 100))  # in Runde 1 getradet
+        self.assertEqual(kai["multi"], {"2k": 0, "3k": 1, "4k": 0, "5k": 0})
+        self.assertEqual((r5["clutches"], r5["plants"], r5["multi"]["5k"], r5["acs"]), (1, 1, 1, 133))
+        self.assertEqual((b1["fk"], b1["fd"], b1["multi"]["4k"]), (2, 1, 2))
+        self.assertEqual((b4["defuses"], b4["kast_rounds"], b4["kast"]), (1, 1, 33))
+        self.assertEqual((zoe["adr"], zoe["dd_delta"], zoe["hs_percent"], zoe["kd"]), (150, 50, 25.0, 0.33))
+
+    def test_rounds_and_team_values(self):
+        first, second, third = self.data["rounds"]
+        self.assertEqual((first["winner"], first["end"], first["buy"]), ("us", "elimination", {"us": "pistol", "them": "pistol"}))
+        self.assertEqual((second["end"], second["buy"], second["side"]), ("defuse", {"us": "eco", "them": "full"}, "attack"))
+        self.assertEqual((second["plant"]["site"], self.data["players"][second["defuse"]["player"]]["name"]), ("A", "B4"))
+        self.assertEqual((third["ceremony"], third["clutch"]), ("Clutch", {"player": 0, "enemies": 5}))
+        feed = first["kills"][1]
+        self.assertEqual(
+            (self.data["players"][feed["killer"]]["name"], self.data["players"][feed["victim"]]["name"], feed["weapon"]),
+            ("B2", "Zoe", "Vandal"),
+        )
+        self.assertEqual([self.data["players"][index]["name"] for index in first["kills"][2]["assists"]], ["R3"])
+        us, them = self.data["teams"]["us"], self.data["teams"]["them"]
+        self.assertEqual((us["attack"], us["defense"], us["pistol"]), ({"won": 2, "played": 3}, {"won": 0, "played": 0}, {"won": 1, "played": 1}))
+        self.assertEqual((us["eco"], them["full_buy"], us["fk"], them["fk"]), ({"won": 0, "played": 1}, {"won": 1, "played": 2}, 1, 2))
+
+    def test_team_choice(self):
+        with self.assertRaises(main.LeagueError):
+            main.parse_league_match(v4_match(), {})
+        data, own = main.parse_league_match(v4_match(), {}, team="Blue")
+        self.assertEqual((data["our_team"], data["score"], own), ("Blue", {"us": 1, "them": 2}, {}))
+        self.assertEqual(data["players"][0]["name"], "B1")
+        self.assertEqual(data["rounds"][1]["side"], "defense")
+        with self.assertRaises(main.LeagueError):
+            main.parse_league_match(v4_match(), RIOT_IDS, team="Green")
+        broken = v4_match()
+        broken["rounds"] = []
+        with self.assertRaises(main.LeagueError):
+            main.parse_league_match(broken, RIOT_IDS)
+        broken = v4_match()
+        del broken["players"][0]["stats"]
+        with self.assertRaises(KeyError):
+            main.parse_league_match(broken, RIOT_IDS)
+
+    def test_helpers(self):
+        match_id = "11111111-2222-3333-4444-555555555555"
+        self.assertEqual(main.parse_match_reference(f"https://tracker.gg/valorant/match/{match_id.upper()}?handle=Zoe%23EUW"), match_id)
+        self.assertEqual(main.parse_match_reference(f" {match_id} "), match_id)
+        self.assertIsNone(main.parse_match_reference("https://tracker.gg/valorant/profile/riot/Zoe%23EUW"))
+        self.assertEqual([main.attacking_team(index) for index in (0, 11, 12, 23, 24, 25, 26)], ["Red", "Red", "Blue", "Blue", "Red", "Blue", "Red"])
+        self.assertEqual(
+            [main.round_end(text) for text in ("Eliminated", "Bomb detonated", "Bomb defused", "Round timer expired", "Surrendered", None)],
+            ["elimination", "detonate", "defuse", "time", "surrender", "time"],
+        )
+        self.assertEqual([main.buy_type(value, False) for value in (4999, 5000, 19999, 20000)], ["eco", "half", "half", "full"])
+        self.assertEqual(main.buy_type(25000, True), "pistol")
+
+    def test_summary(self):
+        win = league_match(main.parse_league_match(v4_match("a"), RIOT_IDS)[0])
+        loss = league_match(main.parse_league_match(v4_match("b", map_name="Bind", started_at="2026-10-30T18:00:00Z"), {}, team="Blue")[0])
+        summary = main.summarize_league([win, loss])
+        self.assertEqual((summary["matches"], summary["wins"], summary["losses"], summary["draws"]), (2, 1, 1, 0))
+        self.assertEqual((summary["rounds_won"], summary["rounds_lost"]), (3, 3))
+        self.assertEqual(summary["pistol"], {"won": 1, "played": 2, "rate": 50.0})
+        self.assertEqual([(entry["name"], entry["wins"], entry["round_diff"]) for entry in summary["maps"]], [("Ascent", 1, 1), ("Bind", 0, -1)])
+        # Nur eigene Spieler; nach ACS sortiert und über Runden gewichtet.
+        self.assertEqual([player["name"] for player in summary["players"]][:2], ["B1", "R5"])
+        self.assertEqual(len(summary["players"]), 10)
+        zoe = next(player for player in summary["players"] if player["name"] == "Zoe")
+        self.assertEqual((zoe["matches"], zoe["rounds"], zoe["acs"], zoe["agents"]), (1, 3, 100, [{"name": "Jett", "games": 1}]))
+        empty = main.summarize_league([])
+        self.assertEqual((empty["matches"], empty["attack"]["rate"], empty["players"]), (0, None, []))
+
+
+def league_match(data: dict, opponent: str = "Uni Heidelberg", message_id=None) -> "main.LeagueMatch":
+    return main.LeagueMatch(
+        1, data["match_id"], data["started_at"], data["map"], opponent, None, data["our_team"],
+        data["score"]["us"], data["score"]["them"], data, 7, 100, message_id,
+    )
+
+
+class LeagueStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for patcher in (
+            mock.patch.object(main, "DATA_PATH", Path(directory.name) / "bot.sqlite3"),
+            mock.patch.object(main, "SETTINGS_CACHE", None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        main.initialize_storage()
+        main.update_profile(1, 5, riot_name="Zoe", riot_tag="EUW", region="eu")
+        main.update_profile(1, 6, riot_name="Kai", riot_tag="EUW")
+
+    def save(self, match_id="a", **kwargs):
+        data, own = main.parse_league_match(v4_match(match_id, **kwargs), main.league_riot_ids(1))
+        main.save_league_match(1, data, own, "Uni Heidelberg", "Spieltag 1", 42, 1000)
+        return data
+
+    def test_storage(self):
+        self.save("a", started_at="2026-10-01T18:00:00Z")
+        self.save("b", started_at="2026-10-02T18:00:00Z")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.save("a")
+        matches = main.list_league_matches(1)
+        self.assertEqual([match.match_id for match in matches], ["b", "a"])
+        self.assertEqual((matches[0].won, matches[0].rounds_won, matches[0].label, matches[0].data["map"]), (1, 2, "Spieltag 1", "Ascent"))
+        self.assertEqual(main.league_match_members(1, "a"), {"zoe": 5, "kai": 6})
+        updated = main.update_league_match(1, "a", "KIT", None)
+        self.assertEqual((updated.opponent, updated.label), ("KIT", None))
+        main.set_league_message(1, "a", 99)
+        self.assertEqual(main.get_league_match(1, "a").message_id, 99)
+        self.assertEqual(main.delete_league_match(1, "a").message_id, 99)
+        self.assertIsNone(main.delete_league_match(1, "a"))
+        self.assertEqual(main.league_match_members(1, "a"), {})
+        self.assertEqual(main.list_league_matches(2), [])
+        # Eine neue Riot-ID ändert nichts an gespeicherten Liga-Matches.
+        main.update_profile(1, 5, riot_name="Neu", riot_tag="EUW")
+        self.assertEqual(main.league_match_members(1, "b"), {"zoe": 5, "kai": 6})
+
+    def test_token(self):
+        token = main.league_token(1)
+        self.assertGreaterEqual(len(token), 40)
+        self.assertEqual(main.league_token(1), token)
+        self.assertEqual(main.league_guild_for_token(token), 1)
+        self.assertIsNone(main.league_guild_for_token(token[:-1] + ("A" if token[-1] != "A" else "B")))
+        self.assertIsNone(main.league_guild_for_token(""))
+        main.set_league_overview_message(1, 77)
+        renewed = main.renew_league_token(1)
+        self.assertNotEqual(renewed, token)
+        self.assertIsNone(main.league_guild_for_token(token))
+        self.assertEqual((main.league_guild_for_token(renewed), main.league_overview_message(1)), (1, 77))
+        self.assertIsNone(main.league_overview_message(2))
+
+    def test_privacy(self):
+        self.save("a")
+        data = main.collect_user_data(1, 5)
+        (entry,) = data["liga_matches"]
+        self.assertEqual((entry["match_id"], entry["opponent"], entry["werte"]["name"], entry["werte"]["kills"]), ("a", "Uni Heidelberg", "Zoe", 1))
+        self.assertEqual([row["match_id"] for row in main.collect_user_data(1, 42)["liga_matches_hinzugefuegt"]], ["a"])
+        main.delete_user_data(1, 5)
+        main.delete_user_data(1, 42)
+        self.assertEqual(main.collect_user_data(1, 5)["liga_matches"], [])
+        self.assertEqual(main.collect_user_data(1, 42)["liga_matches_hinzugefuegt"], [])
+        match = main.get_league_match(1, "a")
+        names = [player["name"] for player in match.data["players"]]
+        self.assertNotIn("Zoe", names)
+        self.assertIn("Kai", names)
+        anonymous = next(player for player in match.data["players"] if player["name"] == "Gelöschte Person")
+        self.assertTrue(anonymous["puuid"].startswith("geloescht-"))
+        self.assertEqual((anonymous["kills"], match.added_by), (1, None))
+        self.assertEqual(main.league_match_members(1, "a"), {"kai": 6})
+
+    async def test_add_league_match(self):
+        client = SimpleNamespace(match_details=mock.AsyncMock(return_value=v4_match()))
+        guild = SimpleNamespace(id=1)
+        link = "https://tracker.gg/valorant/match/11111111-2222-3333-4444-555555555555"
+        with mock.patch.object(main, "RANK_CLIENT", client):
+            for reference, opponent, label, team in (
+                ("kein Link", "KIT", None, None), (link, "  ", None, None), (link, "x" * 61, None, None),
+                (link, "KIT", None, "Green"), (None, "KIT", None, None), (link, 5, None, None),
+            ):
+                with self.subTest(reference=reference, opponent=opponent, team=team), self.assertRaises(ValueError):
+                    await main.add_league_match(guild, reference, opponent, label, team, 42)
+            client.match_details.assert_not_awaited()
+            match = await main.add_league_match(guild, link, "  Uni   Heidelberg ", " Spieltag 3 ", None, 42)
+            self.assertEqual(client.match_details.await_args.args, ("eu", "11111111-2222-3333-4444-555555555555"))
+            self.assertEqual((match.opponent, match.label, match.our_team, match.added_by), ("Uni Heidelberg", "Spieltag 3", "Red", 42))
+            with self.assertRaisesRegex(ValueError, "schon gespeichert"):
+                await main.add_league_match(guild, link, "KIT", None, None, 42)
+            other = "99999999-2222-3333-4444-555555555555"
+            client.match_details.return_value = v4_match(other)
+            client.match_details.side_effect = main.RankLookupError("Dieses Match wurde nicht gefunden.")
+            with self.assertRaisesRegex(ValueError, "nicht gefunden"):
+                await main.add_league_match(guild, other, "KIT", None, None, 42)
+            client.match_details.side_effect = None
+            client.match_details.return_value = {"metadata": {}}
+            with self.assertRaisesRegex(ValueError, "unerwartete Antwort"):
+                await main.add_league_match(guild, other, "KIT", None, None, 42)
+            client.match_details.return_value = v4_match(other)
+            main.update_profile(1, 5, riot_name=None, riot_tag=None)
+            main.update_profile(1, 6, riot_name=None, riot_tag=None)
+            with self.assertRaisesRegex(ValueError, "nicht eindeutig"):
+                await main.add_league_match(guild, other, "KIT", None, None, 42)
+            match = await main.add_league_match(guild, other, "KIT", None, "Blue", 42)
+            self.assertEqual((match.our_team, match.won), ("Blue", 0))
+        with mock.patch.object(main, "RANK_CLIENT", None), self.assertRaisesRegex(ValueError, "HENRIKDEV_API_KEY"):
+            await main.add_league_match(guild, "12345678-2222-3333-4444-555555555555", "KIT", None, None, 42)
+
+    async def test_find_candidates(self):
+        self.save("a")
+        members = [SimpleNamespace(id=5), SimpleNamespace(id=6)]
+        role = SimpleNamespace(members=members)
+        candidate = v4_match("b", started_at="2026-10-30T18:00:00Z")
+        solo = v4_match("c")
+        solo["players"] = [player for player in solo["players"] if player["puuid"] != "kai"]  # nur ein eigener Spieler
+        client = SimpleNamespace(custom_matches=mock.AsyncMock(side_effect=[
+            ([v4_match("a"), candidate, solo], "eu"),
+            main.RankLookupError("Für diese Riot-ID gibt es keine aktuellen Matches."),
+        ]))
+        guild = SimpleNamespace(id=1)
+        with mock.patch.object(main, "RANK_CLIENT", client), mock.patch.object(main, "find_role", return_value=role), \
+                mock.patch.object(main.asyncio, "sleep", mock.AsyncMock()) as sleep:
+            candidates = await main.find_league_candidates(guild)
+        self.assertEqual([entry["match_id"] for entry in candidates], ["b"])
+        self.assertEqual(candidates[0]["players"], ["Kai#EUW", "Zoe#EUW"])
+        self.assertEqual((candidates[0]["our_team"], candidates[0]["rounds_won"], candidates[0]["map"]), ("Red", 2, "Ascent"))
+        self.assertEqual(client.custom_matches.await_args_list[0].args, ("Zoe", "EUW", "eu", main.LEAGUE_SEARCH_SIZE))
+        sleep.assert_awaited_once()
+        client.custom_matches = mock.AsyncMock(side_effect=main.RankLookupError("kaputt"))
+        with mock.patch.object(main, "RANK_CLIENT", client), mock.patch.object(main, "find_role", return_value=role), \
+                mock.patch.object(main.asyncio, "sleep", mock.AsyncMock()), self.assertRaisesRegex(ValueError, "keinem Spieler"):
+            await main.find_league_candidates(guild)
+        with mock.patch.object(main, "RANK_CLIENT", client), mock.patch.object(main, "find_role", return_value=SimpleNamespace(members=[])), \
+                self.assertRaisesRegex(ValueError, "Riot-ID"):
+            await main.find_league_candidates(guild)
+
+    async def test_api_paths(self):
+        client = main.HenrikDevClient("key")
+        client.get = mock.AsyncMock(return_value={"status": 200, "data": [v4_match()]})
+        matches, region = await client.custom_matches("Zoe Z", "EUW", "eu", 10)
+        self.assertEqual(client.get.await_args.args[0], "/valorant/v4/matches/eu/pc/Zoe%20Z/EUW?mode=custom&size=10")
+        self.assertEqual((len(matches), region), (1, "eu"))
+        client.get = mock.AsyncMock(return_value={"status": 200, "data": v4_match()})
+        data = await client.match_details("eu", "abc")
+        self.assertEqual(client.get.await_args.args[0], "/valorant/v4/match/eu/abc")
+        self.assertIn("Match", client.get.await_args.kwargs["not_found"])
+        self.assertEqual(data["metadata"]["map"]["name"], "Ascent")
+        client.get = mock.AsyncMock(return_value={"status": 200})
+        with self.assertRaises(main.RankLookupError):
+            await client.match_details("eu", "abc")
+
+    async def test_discord_messages(self):
+        self.save("a")
+        match = main.get_league_match(1, "a")
+        sent = SimpleNamespace(id=500, pin=mock.AsyncMock())
+        partial = SimpleNamespace(edit=mock.AsyncMock(), delete=mock.AsyncMock())
+        channel = SimpleNamespace(send=mock.AsyncMock(return_value=sent), get_partial_message=mock.Mock(return_value=partial))
+        guild = SimpleNamespace(id=1)
+        url = "https://panel.example.de/liga/geheim"
+        with mock.patch.object(main, "find_text_channel", return_value=channel):
+            self.assertTrue(await main.post_league_match(guild, match, url))
+            embed, view = channel.send.await_args.kwargs["embed"], channel.send.await_args.kwargs["view"]
+            self.assertEqual(embed.title, "Sieg 2 : 1 gegen Uni Heidelberg")
+            self.assertIn("**Spieltag 1**", embed.description)
+            self.assertEqual(embed.fields[0].value.split(" · ")[0], "R5#0000")
+            self.assertEqual(view.children[0].url, f"{url}#match/a")
+            match = main.get_league_match(1, "a")
+            self.assertEqual(match.message_id, 500)
+            # Vorhandene Nachricht wird bearbeitet, nicht neu gepostet.
+            self.assertTrue(await main.post_league_match(guild, match, url + "2"))
+            channel.get_partial_message.assert_called_with(500)
+            self.assertEqual(partial.edit.await_args.kwargs["view"].children[0].url, f"{url}2#match/a")
+            self.assertEqual(channel.send.await_count, 1)
+            # Gelöschte Nachricht: nur mit repost neu posten.
+            partial.edit.side_effect = discord.NotFound(mock.Mock(status=404, reason="x"), "weg")
+            self.assertFalse(await main.post_league_match(guild, match, url, repost=False))
+            self.assertIsNone(main.get_league_match(1, "a").message_id)
+            partial.edit.side_effect = None
+            await main.refresh_league_overview(guild, url)
+            overview = channel.send.await_args.kwargs["embed"]
+            self.assertIn("1 Sieg · 0 Niederlagen", overview.fields[0].value)
+            sent.pin.assert_awaited_once()
+            self.assertEqual(main.league_overview_message(1), 500)
+            await main.refresh_league_overview(guild, url)
+            self.assertEqual(channel.send.await_count, 2)  # zweites Mal nur bearbeitet
+            await main.delete_league_message(guild, main.get_league_match(1, "a"))
+            partial.delete.assert_not_awaited()  # ohne Nachricht nichts zu löschen
+        with mock.patch.object(main, "find_text_channel", return_value=None), self.assertRaisesRegex(ValueError, "liga-stats"):
+            await main.post_league_match(guild, match, url)
 
 
 class EnvIntTests(unittest.TestCase):

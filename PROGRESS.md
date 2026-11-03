@@ -169,6 +169,16 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 - [x] Server-Wachstum: Tabelle `member_flow` nur mit Tageszahlen (keine User-IDs, 400 Tage), Zählung bei Beitritt/Abgang, beim Start Mitgliederzahl + Nachtrag der Beitritte vor Zählbeginn aus `joined_at`; Dashboard-Karte mit Kacheln und SVG-Balkendiagramm (12 Wochen, Beitritte grün, Abgänge rot) — fertig (e17879c)
 - [x] Bewerbung, Schritt 2: Spielzeiten als Button-Raster statt Dropdowns (Zeilen = Stundenblöcke 19–20, 20–21, 21–22, 22–23 ohne Überlappung, Spalten = Mi–So, grün = gewählt, letzte Zeile Zurück/Abschicken); zusammenhängende Stunden erscheinen in der Bewerbung als ein Zeitraum (z. B. „Mi · 19:00–22:00“). Standardtext in #bewerbung angepasst (ein im Panel geänderter Text bleibt) — fertig (7ff7a32)
 
+## Liga-Stats (Wunsch von Arvids, 03.11.2026)
+- [x] OPLeague-Custom-Matches auswählen und mit allen Stats zeigen, Zugriff nur per Link aus einem Kanal — fertig, noch nicht deployt
+  - Panel-Seite „Liga“ (Team-Gruppe): Suche in den letzten 10 Custom Games je Spieler (HenrikDev `v4/matches/…?mode=custom`, Kandidaten mit ≥ 2 eigenen Spielern, 2 Suchen/min je Staff) oder per tracker.gg-Link/Match-ID; Gegner, Bezeichnung, Team (automatisch/Rot/Blau), „in #liga-stats posten“. Bearbeiten und Posten ab Coach, Löschen und Link erneuern ab Admin, alles im Audit-Log.
+  - Auswertung aus `v4/match` (`parse_league_match`): beide Scoreboards mit ACS, K/D/A, ±, ADR, HS %, KAST (Trade-Fenster 5 s), FK/FD, 2K–5K, Clutches, Plants, Defuses; je Runde Sieger, Ende, Ceremony, Seite (Planter-Team, sonst Rot greift Runde 1–12 an, Blau 13–24, Verlängerung abwechselnd), Kaufrunde (Pistol/Eco < 5000/Halb/Voll ≥ 20000 je Team), Kill-Feed. Gespeichert wird nur diese Auswertung (ca. 50 KB je Match), nicht die Rohantwort.
+  - Öffentliche Seite `/liga/<schlüssel>` (`liga.html`, `liga.js`): Übersicht (Bilanz, Seiten, Pistol, Eco, Maps, Top-Spieler), Spieler-Tabelle sortierbar, Match mit Rundenleiste und Rundendetail, Spielerseite. Ohne Login, liest nur die DB; `no-referrer`, `no-store`, `noindex`, 60 Anfragen/min je IP. Keine Discord-IDs in den Daten.
+  - Discord: neuer Kanal `#liga-stats` in 🎮 TEAM (Setup legt ihn an, Rechte von der Kategorie, `PERMISSIONS_VERSION` unverändert). Angepinnte Übersicht mit Bilanz und Link-Knopf, je Match ein Embed mit Ergebnis, bestem Spieler (Erwähnung, falls verknüpft) und Knopf zur Match-Seite. Neuer Schlüssel → Übersicht und Match-Nachrichten werden bearbeitet; gelöschte Nachrichten werden dabei nicht neu gepostet.
+  - Datenschutz: `liga_matches` (mit eigenen Werten) und `liga_matches_hinzugefuegt` in der Auskunft; Löschung ersetzt Riot-ID und puuid in den Matches durch „Gelöschte Person“ und entfernt die Zuordnung.
+  - Nicht echt getestet: lokal gibt es keinen `HENRIKDEV_API_KEY`, der Parser ist nach dem OpenAPI-Schema von `v4/match` gebaut und mit einem synthetischen Match getestet (`tests/league_fixture.py`). Beim ersten Match auf dem VPS prüfen: ob `mode=custom` die OPLeague-Spiele liefert, ob `v4/match/{region}/{id}` ohne `platform` geht und ob die Werte zu tracker.gg passen. Seite und Panel lokal im Browser (Headless-Chrome) mit Beispieldaten geprüft.
+  - Beim Deploy: nginx-Map `$duality_loggable` um `~^/liga/ 0;` ergänzen (README), damit der Schlüssel nicht im Access-Log landet. `#liga-stats` legt das Setup beim Neustart mit `--apply` an.
+
 ## Neue Env-Variablen
 | Variable | Standard | Zweck |
 |---|---|---|
@@ -185,6 +195,7 @@ Status: `offen` · `in Arbeit` · `fertig (<Commit>)`
 | `BACKUP_RETENTION_DAYS` | `14` | Ältere Backups werden gelöscht |
 
 ## Neue Tabellen und Spalten
+- `league_matches`, `league_match_players`, `league_share` (Liga-Stats)
 - `match_stats` (Statistiken), `member_flow` (Server-Wachstum)
 - `rank_history` (C4)
 - `bot_settings` (D3)

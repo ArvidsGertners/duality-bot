@@ -11,6 +11,7 @@ file. --apply creates missing items and updates managed permissions.
 import argparse
 import asyncio
 import functools
+import hmac
 import io
 import json
 import math
@@ -19,6 +20,7 @@ import getpass
 import logging
 import os
 import re
+import secrets
 import time
 import sys
 import weakref
@@ -87,6 +89,15 @@ HENRIKDEV_NO_RECENT_MATCHES = 24
 RANK_SYNC_DELAY_SECONDS = 3
 STATS_MATCH_COUNT = 20
 MATCH_STATS_RETENTION_DAYS = 90
+# OPLeague-/Uniliga-Spiele sind Custom Games. Die Suche holt so viele je Spieler und zeigt nur Matches,
+# in denen mindestens LEAGUE_MIN_OWN_PLAYERS verknüpfte Spieler dabei waren.
+LEAGUE_SEARCH_SIZE = 10
+LEAGUE_MIN_OWN_PLAYERS = 2
+LEAGUE_CHANNEL = "liga-stats"
+LEAGUE_TEXT_LIMIT = 60
+# Ein Tod gilt als getradet, wenn ein Teamkollege den Killer innerhalb dieser Zeit erwischt (wie bei tracker.gg).
+TRADE_WINDOW_MS = 5000
+MATCH_ID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 MEMBER_FLOW_RETENTION_DAYS = 400
 GROWTH_WEEKS = 12
 TEMP_VOICE_CREATORS = {"➕ Neuer Voice": "🔊", "➕ Neuer Valorant-Voice": "🎯"}
@@ -140,7 +151,7 @@ CATEGORIES = [
     {
         "name": "🎮 TEAM",
         "roles": TEAM_ROLES,
-        "channels": [("text", "team-chat"), ("text", "spieltermine")],
+        "channels": [("text", "team-chat"), ("text", "spieltermine"), ("text", LEAGUE_CHANNEL)],
     },
     {
         "name": "🔒 STAFF",
@@ -278,6 +289,26 @@ def initialize_storage() -> None:
             "CREATE TABLE IF NOT EXISTS member_flow ("
             "guild_id INTEGER NOT NULL, day TEXT NOT NULL, joins INTEGER NOT NULL DEFAULT 0, leaves INTEGER NOT NULL DEFAULT 0, "
             "members INTEGER, tracked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, day))"
+        )
+        # Vom Staff ausgewählte OPLeague-Matches. data ist die kompakte Auswertung aus parse_league_match
+        # (alle zehn Spieler, Runden, Kills), nicht die Rohantwort der API.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS league_matches ("
+            "guild_id INTEGER NOT NULL, match_id TEXT NOT NULL, started_at INTEGER NOT NULL, map TEXT, "
+            "opponent TEXT NOT NULL, label TEXT, our_team TEXT NOT NULL, rounds_won INTEGER NOT NULL, "
+            "rounds_lost INTEGER NOT NULL, data TEXT NOT NULL, added_by INTEGER, added_at INTEGER NOT NULL, "
+            "message_id INTEGER, PRIMARY KEY (guild_id, match_id))"
+        )
+        # Welche verknüpften Mitglieder in einem Liga-Match gespielt haben, für Auskunft und Löschung.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS league_match_players ("
+            "guild_id INTEGER NOT NULL, match_id TEXT NOT NULL, user_id INTEGER NOT NULL, puuid TEXT NOT NULL, "
+            "PRIMARY KEY (guild_id, match_id, user_id))"
+        )
+        # Geheimer Schlüssel der öffentlichen Liga-Seite und die angepinnte Übersicht in #liga-stats.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS league_share ("
+            "guild_id INTEGER PRIMARY KEY, token TEXT NOT NULL, created_at INTEGER NOT NULL, message_id INTEGER)"
         )
         # Spalten, die spätere Versionen ergänzt haben; bestehende Zeilen behalten ihre Daten.
         event_columns = {row[1] for row in connection.execute("PRAGMA table_info(scheduled_events)")}
@@ -633,6 +664,448 @@ def summarize_matches(matches: Sequence[MatchStat]) -> dict:
     }
 
 
+class LeagueError(ValueError):
+    """Ein Liga-Match lässt sich nicht auswerten; die Meldung ist für den Staff gedacht."""
+
+
+class LeagueMatch(NamedTuple):
+    guild_id: int
+    match_id: str
+    started_at: int
+    map: str | None
+    opponent: str
+    label: str | None
+    our_team: str
+    rounds_won: int
+    rounds_lost: int
+    # Auswertung aus parse_league_match
+    data: dict
+    added_by: int | None
+    added_at: int
+    message_id: int | None
+
+    @property
+    def won(self) -> int | None:
+        """1 Sieg, 0 Niederlage, None Unentschieden"""
+        return None if self.rounds_won == self.rounds_lost else int(self.rounds_won > self.rounds_lost)
+
+
+LEAGUE_COLUMNS = (
+    "guild_id, match_id, started_at, map, opponent, label, our_team, rounds_won, rounds_lost, data, "
+    "added_by, added_at, message_id"
+)
+# Summen je Spieler, aus denen league_rates() die Kennzahlen berechnet.
+LEAGUE_TOTALS = (
+    "rounds", "score", "kills", "deaths", "assists", "headshots", "bodyshots", "legshots", "damage",
+    "damage_received", "kast_rounds", "fk", "fd", "clutches", "plants", "defuses",
+)
+MULTI_KILLS = ("2k", "3k", "4k", "5k")
+
+
+def api_timestamp(text: str) -> int:
+    return int(datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp())
+
+
+def parse_match_reference(text: str) -> str | None:
+    """Match-ID aus einem tracker.gg-Match-Link oder als reine ID; sonst None."""
+    found = MATCH_ID_PATTERN.search(text or "")
+    return found.group(0).lower() if found else None
+
+
+def attacking_team(round_index: int) -> str:
+    """Rot greift in der ersten Halbzeit an, Blau in der zweiten; in der Verlängerung wechseln die Seiten jede Runde."""
+    if round_index < 12:
+        return "Red"
+    if round_index < 24:
+        return "Blue"
+    return "Red" if (round_index - 24) % 2 == 0 else "Blue"
+
+
+def round_end(result: str | None) -> str:
+    """Rundenende vereinheitlicht: elimination, detonate, defuse, surrender oder time."""
+    text = str(result or "").casefold()
+    for key, needle in (("elimination", "elim"), ("detonate", "deton"), ("defuse", "defus"), ("surrender", "surrend")):
+        if needle in text:
+            return key
+    return "time"
+
+
+def buy_type(loadout: int, pistol: bool) -> str:
+    """Kaufrunde eines Teams nach dem Gesamtwert der Ausrüstung, Grenzen wie bei tracker.gg."""
+    if pistol:
+        return "pistol"
+    if loadout < 5000:
+        return "eco"
+    return "half" if loadout < 20000 else "full"
+
+
+def league_rates(totals: dict) -> dict:
+    """ACS, ADR, K/D, Headshot-Quote, KAST und Schadensdifferenz pro Runde aus aufsummierten Werten."""
+    rounds = totals["rounds"]
+    shots = totals["headshots"] + totals["bodyshots"] + totals["legshots"]
+    return {
+        "acs": round(totals["score"] / rounds) if rounds else None,
+        "adr": round(totals["damage"] / rounds) if rounds else None,
+        "dd_delta": round((totals["damage"] - totals["damage_received"]) / rounds) if rounds else None,
+        "kd": round(totals["kills"] / totals["deaths"], 2) if totals["deaths"] else float(totals["kills"]),
+        "hs_percent": round(100 * totals["headshots"] / shots, 1) if shots else None,
+        "kast": round(100 * totals["kast_rounds"] / rounds) if rounds else None,
+    }
+
+
+def parse_league_match(raw: dict, riot_ids: dict[str, int], team: str | None = None) -> tuple[dict, dict[str, int]]:
+    """Wertet ein Match aus /valorant/v4/match aus: Scoreboard beider Teams, Runden mit Kills und Team-Werte.
+
+    riot_ids ordnet verknüpfte Riot-IDs (casefold) einer User-ID zu; daran erkennt die Funktion das eigene
+    Team, außer `team` („Red“/„Blue“) ist vorgegeben. Gibt (Auswertung, puuid → User-ID der eigenen Spieler)
+    zurück. Die Auswertung ist öffentlich lesbar und enthält deshalb keine Discord-IDs. Fehlende Felder lösen
+    KeyError/TypeError aus, ein unklares Team LeagueError."""
+    metadata = raw["metadata"]
+    players_raw = [player for player in raw["players"] if player["team_id"] in ("Red", "Blue")]
+    own_players: dict[str, int] = {}
+    counts = {"Red": 0, "Blue": 0}
+    for player in players_raw:
+        user_id = riot_ids.get(f"{player['name']}#{player['tag']}".casefold())
+        if user_id is not None:
+            own_players[player["puuid"]] = user_id
+            counts[player["team_id"]] += 1
+    if team is None:
+        if counts["Red"] == counts["Blue"]:
+            raise LeagueError(
+                "Das eigene Team ist nicht eindeutig, weil verknüpfte Spieler in keinem oder in beiden Teams sind. "
+                "Bitte Rot oder Blau auswählen."
+            )
+        team = max(counts, key=counts.get)
+    elif team not in counts:
+        raise LeagueError("Das Team muss Rot oder Blau sein.")
+    other = "Blue" if team == "Red" else "Red"
+    label = {team: "us", other: "them"}
+
+    # Eigenes Team zuerst, jeweils nach Punkten; Kills und Plants verweisen auf diese Reihenfolge.
+    players_raw.sort(key=lambda player: (player["team_id"] != team, -int(player["stats"]["score"])))
+    index_of = {player["puuid"]: index for index, player in enumerate(players_raw)}
+    team_of = {player["puuid"]: player["team_id"] for player in players_raw}
+    extra = {puuid: {"kast_rounds": 0, "fk": 0, "fd": 0, "clutches": 0, "plants": 0, "defuses": 0,
+                     "multi": dict.fromkeys(MULTI_KILLS, 0)} for puuid in index_of}
+    kills_by_round: dict[int, list[dict]] = {}
+    for kill in raw["kills"]:
+        kills_by_round.setdefault(int(kill["round"]), []).append(kill)
+
+    rounds = []
+    for position, entry in enumerate(sorted(raw["rounds"], key=lambda entry: int(entry["id"]))):
+        events = []
+        for kill in sorted(kills_by_round.get(int(entry["id"]), []), key=lambda kill: int(kill["time_in_round_in_ms"])):
+            killer, victim = (kill.get("killer") or {}).get("puuid"), (kill.get("victim") or {}).get("puuid")
+            if victim not in index_of:
+                continue
+            events.append({
+                "time": int(kill["time_in_round_in_ms"]),
+                "killer": killer if killer in index_of else None,
+                "victim": victim,
+                "assists": [puuid for assistant in kill.get("assistants") or [] if (puuid := assistant.get("puuid")) in index_of],
+                "weapon": (kill.get("weapon") or {}).get("name"),
+            })
+        # Teamkills und Selbsttötungen zählen nicht für First Kills, Multi-Kills und Trades.
+        enemy_kills = [event for event in events if event["killer"] and team_of[event["killer"]] != team_of[event["victim"]]]
+        if enemy_kills:
+            extra[enemy_kills[0]["killer"]]["fk"] += 1
+            extra[enemy_kills[0]["victim"]]["fd"] += 1
+        round_kills: dict[str, int] = {}
+        for event in enemy_kills:
+            round_kills[event["killer"]] = round_kills.get(event["killer"], 0) + 1
+        for puuid, count in round_kills.items():
+            if count >= 2:
+                extra[puuid]["multi"][f"{min(count, 5)}k"] += 1
+        # KAST: Kill, Assist, überlebt oder getradet.
+        dead = {event["victim"] for event in events}
+        kast = set(round_kills) | {puuid for event in enemy_kills for puuid in event["assists"]} | (set(index_of) - dead)
+        for event in enemy_kills:
+            if any(
+                other_kill["victim"] == event["killer"] and team_of[other_kill["killer"]] == team_of[event["victim"]]
+                and 0 <= other_kill["time"] - event["time"] <= TRADE_WINDOW_MS
+                for other_kill in enemy_kills
+            ):
+                kast.add(event["victim"])
+        for puuid in kast:
+            extra[puuid]["kast_rounds"] += 1
+        # Clutch: Das Team gewinnt die Runde, nachdem nur noch eine Person gegen mindestens einen Gegner stand.
+        alive = {team_id: {puuid for puuid in index_of if team_of[puuid] == team_id} for team_id in ("Red", "Blue")}
+        last_alive: dict[str, tuple[str, int]] = {}
+        for event in events:
+            alive[team_of[event["victim"]]].discard(event["victim"])
+            for team_id, enemy_id in (("Red", "Blue"), ("Blue", "Red")):
+                if team_id not in last_alive and len(alive[team_id]) == 1 and alive[enemy_id]:
+                    last_alive[team_id] = (next(iter(alive[team_id])), len(alive[enemy_id]))
+        winner = entry.get("winning_team")
+        clutch = None
+        if winner in last_alive:
+            puuid, enemies = last_alive[winner]
+            extra[puuid]["clutches"] += 1
+            clutch = {"player": index_of[puuid], "enemies": enemies}
+
+        loadout = {"Red": 0, "Blue": 0}
+        for player_stats in entry.get("stats") or []:
+            puuid = (player_stats.get("player") or {}).get("puuid")
+            if puuid in team_of:
+                loadout[team_of[puuid]] += int((player_stats.get("economy") or {}).get("loadout_value") or 0)
+        pistol = position in (0, 12)
+
+        def bomb_event(key: str) -> dict | None:
+            event = entry.get(key)
+            puuid = ((event or {}).get("player") or {}).get("puuid")
+            if puuid not in index_of:
+                return None
+            extra[puuid][f"{key}s"] += 1
+            return {"player": index_of[puuid], "time": event.get("round_time_in_ms"), "site": event.get("site")}
+
+        plant, defuse = bomb_event("plant"), bomb_event("defuse")
+        # Wer pflanzt, greift an; ohne Plant gilt die Seitenregel.
+        attacker = players_raw[plant["player"]]["team_id"] if plant else attacking_team(position)
+        ceremony = str(entry.get("ceremony") or "").removeprefix("Ceremony")
+        rounds.append({
+            "number": position + 1,
+            "winner": label.get(winner),
+            "end": round_end(entry.get("result")),
+            "ceremony": ceremony if ceremony not in ("", "Default") else None,
+            "side": "attack" if attacker == team else "defense",
+            "loadout": {"us": loadout[team], "them": loadout[other]},
+            "buy": {"us": buy_type(loadout[team], pistol), "them": buy_type(loadout[other], pistol)},
+            "plant": plant,
+            "defuse": defuse,
+            "clutch": clutch,
+            "kills": [
+                {
+                    "time": event["time"],
+                    "killer": index_of.get(event["killer"]),
+                    "victim": index_of[event["victim"]],
+                    "assists": [index_of[puuid] for puuid in event["assists"]],
+                    "weapon": event["weapon"],
+                }
+                for event in events
+            ],
+        })
+    if not rounds:
+        raise LeagueError("Das Match hat keine Runden.")
+
+    players = []
+    for player in players_raw:
+        stats, damage = player["stats"], player["stats"]["damage"]
+        totals = {
+            "rounds": len(rounds), "score": int(stats["score"]), "kills": int(stats["kills"]),
+            "deaths": int(stats["deaths"]), "assists": int(stats["assists"]), "headshots": int(stats["headshots"]),
+            "bodyshots": int(stats["bodyshots"]), "legshots": int(stats["legshots"]), "damage": int(damage["dealt"]),
+            "damage_received": int(damage["received"]),
+        }
+        totals.update(extra[player["puuid"]])
+        players.append({
+            "puuid": player["puuid"], "name": player["name"], "tag": player["tag"], "team": label[player["team_id"]],
+            "agent": player["agent"]["name"], **totals, **league_rates(totals),
+        })
+
+    def record(matching: list[dict], side: str) -> dict:
+        return {"won": sum(entry["winner"] == side for entry in matching), "played": len(matching)}
+
+    def team_values(side: str) -> dict:
+        # „side“ einer Runde ist die Seite des eigenen Teams; der Gegner steht jeweils auf der anderen.
+        attacking = [(entry["side"] == "attack") == (side == "us") for entry in rounds]
+        members = [player for player in players if player["team"] == side]
+        return {
+            "attack": record([entry for entry, attack in zip(rounds, attacking) if attack], side),
+            "defense": record([entry for entry, attack in zip(rounds, attacking) if not attack], side),
+            "pistol": record([entry for entry in rounds if entry["buy"][side] == "pistol"], side),
+            "eco": record([entry for entry in rounds if entry["buy"][side] == "eco"], side),
+            "full_buy": record([entry for entry in rounds if entry["buy"][side] == "full"], side),
+            **{key: sum(player[key] for player in members) for key in ("fk", "plants", "defuses", "clutches")},
+        }
+
+    teams = {entry["team_id"]: entry["rounds"] for entry in raw.get("teams") or []}
+    if team in teams:
+        score = {"us": int(teams[team]["won"]), "them": int(teams[team]["lost"])}
+    else:
+        score = {side: sum(entry["winner"] == side for entry in rounds) for side in ("us", "them")}
+    queue = metadata.get("queue") or {}
+    data = {
+        "match_id": str(metadata["match_id"]).lower(),
+        "map": (metadata.get("map") or {}).get("name"),
+        "started_at": api_timestamp(metadata["started_at"]),
+        "duration": int(metadata.get("game_length_in_ms") or 0) // 1000,
+        "mode": queue.get("name") or queue.get("id"),
+        "our_team": team,
+        "score": score,
+        "halftime": {side: sum(entry["winner"] == side for entry in rounds[:12]) for side in ("us", "them")},
+        "players": players,
+        "rounds": rounds,
+        "teams": {side: team_values(side) for side in ("us", "them")},
+    }
+    return data, own_players
+
+
+def summarize_league(matches: Sequence[LeagueMatch]) -> dict:
+    """Saison-Übersicht über alle Liga-Matches: Bilanz, Seiten, Maps und Werte je eigenem Spieler (über Runden gewichtet)."""
+    def rate(won: int, played: int) -> float | None:
+        return round(100 * won / played, 1) if played else None
+
+    def record(key: str) -> dict:
+        won = sum(match.data["teams"]["us"][key]["won"] for match in matches)
+        played = sum(match.data["teams"]["us"][key]["played"] for match in matches)
+        return {"won": won, "played": played, "rate": rate(won, played)}
+
+    maps: dict[str, dict] = {}
+    players: dict[str, dict] = {}
+    # Älteste zuerst, damit am Ende der aktuelle Riot-Name steht.
+    for match in sorted(matches, key=lambda match: match.started_at):
+        entry = maps.setdefault(match.map or "Unbekannt", {"name": match.map or "Unbekannt", "games": 0, "wins": 0, "losses": 0, "round_diff": 0})
+        entry["games"] += 1
+        entry["wins"] += match.won == 1
+        entry["losses"] += match.won == 0
+        entry["round_diff"] += match.rounds_won - match.rounds_lost
+        for player in match.data["players"]:
+            if player["team"] != "us":
+                continue
+            total = players.setdefault(player["puuid"], {
+                "puuid": player["puuid"], "matches": 0, "wins": 0, "agents": {},
+                "multi": dict.fromkeys(MULTI_KILLS, 0), **dict.fromkeys(LEAGUE_TOTALS, 0),
+            })
+            total.update(name=player["name"], tag=player["tag"])
+            total["matches"] += 1
+            total["wins"] += match.won == 1
+            total["agents"][player["agent"]] = total["agents"].get(player["agent"], 0) + 1
+            for key in LEAGUE_TOTALS:
+                total[key] += player[key]
+            for key in MULTI_KILLS:
+                total["multi"][key] += player["multi"][key]
+    for entry in maps.values():
+        entry["win_rate"] = rate(entry["wins"], entry["wins"] + entry["losses"])
+    summaries = []
+    for total in players.values():
+        agents = sorted(total["agents"].items(), key=lambda item: (-item[1], item[0]))
+        summaries.append({**total, **league_rates(total), "agents": [{"name": name, "games": games} for name, games in agents]})
+    summaries.sort(key=lambda player: (-(player["acs"] or 0), player["name"].casefold()))
+    return {
+        "matches": len(matches),
+        "wins": sum(match.won == 1 for match in matches),
+        "losses": sum(match.won == 0 for match in matches),
+        "draws": sum(match.won is None for match in matches),
+        "rounds_won": sum(match.rounds_won for match in matches),
+        "rounds_lost": sum(match.rounds_lost for match in matches),
+        **{key: record(key) for key in ("attack", "defense", "pistol", "eco")},
+        "maps": sorted(maps.values(), key=lambda entry: (-entry["games"], entry["name"])),
+        "players": summaries,
+    }
+
+
+def league_match_from_row(row: Sequence) -> LeagueMatch:
+    return LeagueMatch(*row[:9], json.loads(row[9]), *row[10:])
+
+
+def save_league_match(guild_id: int, data: dict, own_players: dict[str, int], opponent: str, label: str | None,
+                      added_by: int | None, added_at: int) -> None:
+    """Speichert ein ausgewertetes Liga-Match; ein schon gespeichertes löst sqlite3.IntegrityError aus."""
+    with open_db() as connection:
+        connection.execute(
+            f"INSERT INTO league_matches ({LEAGUE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            (guild_id, data["match_id"], data["started_at"], data["map"], opponent, label, data["our_team"],
+             data["score"]["us"], data["score"]["them"], json.dumps(data, separators=(",", ":")), added_by, added_at),
+        )
+        connection.executemany(
+            "INSERT OR REPLACE INTO league_match_players (guild_id, match_id, user_id, puuid) VALUES (?, ?, ?, ?)",
+            [(guild_id, data["match_id"], user_id, puuid) for puuid, user_id in own_players.items()],
+        )
+
+
+def list_league_matches(guild_id: int) -> list[LeagueMatch]:
+    """Alle Liga-Matches, neueste zuerst."""
+    with open_db() as connection:
+        rows = connection.execute(
+            f"SELECT {LEAGUE_COLUMNS} FROM league_matches WHERE guild_id = ? ORDER BY started_at DESC", (guild_id,)
+        ).fetchall()
+    return [league_match_from_row(row) for row in rows]
+
+
+def get_league_match(guild_id: int, match_id: str) -> LeagueMatch | None:
+    with open_db() as connection:
+        row = connection.execute(
+            f"SELECT {LEAGUE_COLUMNS} FROM league_matches WHERE guild_id = ? AND match_id = ?", (guild_id, match_id)
+        ).fetchone()
+    return league_match_from_row(row) if row else None
+
+
+def update_league_match(guild_id: int, match_id: str, opponent: str, label: str | None) -> LeagueMatch | None:
+    with open_db() as connection:
+        connection.execute(
+            "UPDATE league_matches SET opponent = ?, label = ? WHERE guild_id = ? AND match_id = ?",
+            (opponent, label, guild_id, match_id),
+        )
+    return get_league_match(guild_id, match_id)
+
+
+def set_league_message(guild_id: int, match_id: str, message_id: int | None) -> None:
+    with open_db() as connection:
+        connection.execute(
+            "UPDATE league_matches SET message_id = ? WHERE guild_id = ? AND match_id = ?", (message_id, guild_id, match_id)
+        )
+
+
+def delete_league_match(guild_id: int, match_id: str) -> LeagueMatch | None:
+    """Löscht ein Liga-Match samt Spielerzuordnung und gibt es zurück (für die Discord-Nachricht)."""
+    match = get_league_match(guild_id, match_id)
+    if match:
+        with open_db() as connection:
+            connection.execute("DELETE FROM league_matches WHERE guild_id = ? AND match_id = ?", (guild_id, match_id))
+            connection.execute("DELETE FROM league_match_players WHERE guild_id = ? AND match_id = ?", (guild_id, match_id))
+    return match
+
+
+def league_match_members(guild_id: int, match_id: str) -> dict[str, int]:
+    """puuid → User-ID der verknüpften Mitglieder, die in diesem Match gespielt haben."""
+    with open_db() as connection:
+        return dict(connection.execute(
+            "SELECT puuid, user_id FROM league_match_players WHERE guild_id = ? AND match_id = ?", (guild_id, match_id)
+        ).fetchall())
+
+
+def league_token(guild_id: int) -> str:
+    """Schlüssel der öffentlichen Liga-Seite; beim ersten Aufruf wird er erzeugt."""
+    with open_db() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO league_share (guild_id, token, created_at) VALUES (?, ?, ?)",
+            (guild_id, secrets.token_urlsafe(32), int(time.time())),
+        )
+        return connection.execute("SELECT token FROM league_share WHERE guild_id = ?", (guild_id,)).fetchone()[0]
+
+
+def renew_league_token(guild_id: int) -> str:
+    """Neuer Schlüssel; alle bisherigen Links gehen danach nicht mehr."""
+    league_token(guild_id)
+    token = secrets.token_urlsafe(32)
+    with open_db() as connection:
+        connection.execute(
+            "UPDATE league_share SET token = ?, created_at = ? WHERE guild_id = ?", (token, int(time.time()), guild_id)
+        )
+    return token
+
+
+def league_guild_for_token(token: str) -> int | None:
+    """Server, zu dem ein Schlüssel gehört; Vergleich in konstanter Zeit."""
+    if not token:
+        return None
+    with open_db() as connection:
+        rows = connection.execute("SELECT guild_id, token FROM league_share").fetchall()
+    return next((guild_id for guild_id, stored in rows if hmac.compare_digest(stored.encode(), token.encode())), None)
+
+
+def league_overview_message(guild_id: int) -> int | None:
+    with open_db() as connection:
+        row = connection.execute("SELECT message_id FROM league_share WHERE guild_id = ?", (guild_id,)).fetchone()
+    return row[0] if row else None
+
+
+def set_league_overview_message(guild_id: int, message_id: int) -> None:
+    league_token(guild_id)
+    with open_db() as connection:
+        connection.execute("UPDATE league_share SET message_id = ? WHERE guild_id = ?", (message_id, guild_id))
+
+
 def berlin_day(moment: datetime) -> str:
     return moment.astimezone(BERLIN).date().isoformat()
 
@@ -841,6 +1314,19 @@ def collect_user_data(guild_id: int, user_id: int) -> dict:
         def rows(query: str, parameters: tuple) -> list[dict]:
             return [dict(row) for row in connection.execute(query, parameters)]
 
+        # Liga-Matches, in denen die Person gespielt hat, mit ihren eigenen Werten aus der Auswertung.
+        league_rows = []
+        for entry in rows(
+            "SELECT league.match_id, league.started_at, league.map, league.opponent, league.label, player.puuid, league.data "
+            "FROM league_match_players AS player JOIN league_matches AS league "
+            "ON league.guild_id = player.guild_id AND league.match_id = player.match_id "
+            "WHERE player.guild_id = ? AND player.user_id = ? ORDER BY league.started_at",
+            (guild_id, user_id),
+        ):
+            data = json.loads(entry.pop("data"))
+            entry["werte"] = next((player for player in data["players"] if player["puuid"] == entry["puuid"]), None)
+            league_rows.append(entry)
+
         return {
             "profil": rows("SELECT * FROM player_profiles WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)),
             "teamname": rows("SELECT * FROM player_roster_names WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)),
@@ -863,7 +1349,11 @@ def collect_user_data(guild_id: int, user_id: int) -> dict:
                 f"SELECT {MATCH_COLUMNS}, fetched_at FROM match_stats WHERE guild_id = ? AND user_id = ? ORDER BY started_at",
                 (guild_id, user_id),
             ),
+            "liga_matches": league_rows,
             # Was jemand als Staff im Panel geändert hat; der Inhalt gehört dem Server, verknüpft ist nur die Person.
+            "liga_matches_hinzugefuegt": rows(
+                "SELECT match_id, opponent, added_at FROM league_matches WHERE guild_id = ? AND added_by = ?", (guild_id, user_id)
+            ),
             "geaenderte_einstellungen": rows("SELECT key, updated_at FROM bot_settings WHERE updated_by = ?", (user_id,)),
             "geaenderte_texte": rows("SELECT key, updated_at FROM bot_texts WHERE updated_by = ? ORDER BY id", (user_id,)),
             "ankuendigungen": rows(
@@ -883,7 +1373,26 @@ def delete_user_data(guild_id: int, user_id: int) -> None:
         connection.execute("DELETE FROM event_rsvps WHERE user_id = ?", (user_id,))
         connection.execute("DELETE FROM rank_history WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         connection.execute("DELETE FROM match_stats WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-        # Einstellungen, Texte und Ankündigungen gehören dem Server und bleiben; nur der Bezug zur Person verschwindet.
+        # Liga-Matches bleiben als Ergebnis des Teams; Riot-ID und puuid der Person werden ersetzt. Eine
+        # gemeinsame Ersatz-ID hält ihre Werte in der Saison-Übersicht zusammen, ohne auf sie zu verweisen.
+        replacement = f"geloescht-{secrets.token_hex(8)}"
+        for match_id, puuid, data in connection.execute(
+            "SELECT player.match_id, player.puuid, league.data FROM league_match_players AS player "
+            "JOIN league_matches AS league ON league.guild_id = player.guild_id AND league.match_id = player.match_id "
+            "WHERE player.guild_id = ? AND player.user_id = ?",
+            (guild_id, user_id),
+        ).fetchall():
+            data = json.loads(data)
+            for player in data["players"]:
+                if player["puuid"] == puuid:
+                    player.update(puuid=replacement, name="Gelöschte Person", tag="")
+            connection.execute(
+                "UPDATE league_matches SET data = ? WHERE guild_id = ? AND match_id = ?",
+                (json.dumps(data, separators=(",", ":")), guild_id, match_id),
+            )
+        connection.execute("DELETE FROM league_match_players WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+        # Einstellungen, Texte, Ankündigungen und Liga-Matches gehören dem Server und bleiben; nur der Bezug zur Person verschwindet.
+        connection.execute("UPDATE league_matches SET added_by = NULL WHERE guild_id = ? AND added_by = ?", (guild_id, user_id))
         connection.execute("UPDATE bot_settings SET updated_by = NULL WHERE updated_by = ?", (user_id,))
         connection.execute("UPDATE bot_texts SET updated_by = NULL WHERE updated_by = ?", (user_id,))
         connection.execute(
@@ -1371,7 +1880,7 @@ class HenrikDevClient:
         self.last_error = text
         self.last_error_at = int(time.time())
 
-    async def get(self, path: str) -> dict:
+    async def get(self, path: str, not_found: str = "Diese Riot-ID wurde nicht gefunden.") -> dict:
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
         for attempt in range(2):
@@ -1395,7 +1904,7 @@ class HenrikDevClient:
                             "Für diese Riot-ID gibt es keine aktuellen Matches. Spiel eine Runde "
                             "(z. B. Deathmatch) und versuche es danach erneut."
                         )
-                    raise RankLookupError("Diese Riot-ID wurde nicht gefunden.")
+                    raise RankLookupError(not_found)
                 if response.status != 200:
                     self.record_failure(f"Status {response.status}")
                     raise RankLookupError(f"Die HenrikDev-API antwortet gerade mit Status {response.status}.")
@@ -1436,6 +1945,37 @@ class HenrikDevClient:
             self.record_failure("nicht erreichbar")
             raise RankLookupError("Die HenrikDev-API ist gerade nicht erreichbar.") from error
         except (KeyError, TypeError, ValueError) as error:
+            self.record_failure("unerwartete Antwort")
+            raise RankLookupError("Die HenrikDev-API hat eine unerwartete Antwort geschickt.") from error
+
+    async def custom_matches(self, name: str, tag: str, region: str | None, size: int) -> tuple[list[dict], str]:
+        """Die letzten Custom Games einer Riot-ID als volle v4-Match-Objekte, dazu die Region."""
+        riot_name, riot_tag = quote(name, safe=""), quote(tag, safe="")
+        try:
+            if not region:
+                account = await self.get(f"/valorant/v2/account/{riot_name}/{riot_tag}")
+                region = account["data"]["region"]
+            data = await self.get(f"/valorant/v4/matches/{region}/pc/{riot_name}/{riot_tag}?mode=custom&size={size}")
+            return list(data["data"]), region
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            self.record_failure("nicht erreichbar")
+            raise RankLookupError("Die HenrikDev-API ist gerade nicht erreichbar.") from error
+        except (KeyError, TypeError) as error:
+            self.record_failure("unerwartete Antwort")
+            raise RankLookupError("Die HenrikDev-API hat eine unerwartete Antwort geschickt.") from error
+
+    async def match_details(self, region: str, match_id: str) -> dict:
+        """Ein Match mit allen Spielern, Runden und Kills (/valorant/v4/match)."""
+        try:
+            data = await self.get(
+                f"/valorant/v4/match/{quote(region, safe='')}/{quote(match_id, safe='')}",
+                not_found="Dieses Match wurde nicht gefunden. Stimmt die Match-ID?",
+            )
+            return data["data"]
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            self.record_failure("nicht erreichbar")
+            raise RankLookupError("Die HenrikDev-API ist gerade nicht erreichbar.") from error
+        except (KeyError, TypeError) as error:
             self.record_failure("unerwartete Antwort")
             raise RankLookupError("Die HenrikDev-API hat eine unerwartete Antwort geschickt.") from error
 
@@ -1627,6 +2167,255 @@ async def sync_ranks_now(guild: discord.Guild, member: discord.Member | None = N
     except (RankLookupError, discord.HTTPException) as error:
         return f"Der Rang von {member.display_name} konnte nicht abgeglichen werden: {error}"
     return f"Rang von {member.display_name}: {tier_name}"
+
+
+LEAGUE_SEARCH_LOCK = asyncio.Lock()
+LEAGUE_NO_API_KEY = "Die Liga-Stats brauchen den HenrikDev-API-Schlüssel (HENRIKDEV_API_KEY fehlt)."
+
+
+def league_riot_ids(guild_id: int) -> dict[str, int]:
+    """Verknüpfte Riot-IDs (casefold) → User-ID; daran erkennt der Bot das eigene Team."""
+    return {profile.riot_id.casefold(): profile.user_id for profile in linked_profiles(guild_id)}
+
+
+def league_candidate(raw: dict, riot_ids: dict[str, int]) -> dict | None:
+    """Kurzinfo zu einem Custom Game aus der Match-Liste; None, wenn zu wenige eigene Spieler dabei waren."""
+    own: dict[str, list[str]] = {"Red": [], "Blue": []}
+    for player in raw["players"]:
+        riot_id = f"{player['name']}#{player['tag']}"
+        if riot_id.casefold() in riot_ids and player["team_id"] in own:
+            own[player["team_id"]].append(riot_id)
+    team = max(own, key=lambda team_id: len(own[team_id]))
+    if len(own[team]) < LEAGUE_MIN_OWN_PLAYERS:
+        return None
+    rounds = {entry["team_id"]: entry["rounds"] for entry in raw.get("teams") or []}
+    metadata = raw["metadata"]
+    return {
+        "match_id": str(metadata["match_id"]).lower(),
+        "started_at": api_timestamp(metadata["started_at"]),
+        "map": (metadata.get("map") or {}).get("name"),
+        "our_team": team,
+        "rounds_won": int(rounds[team]["won"]) if team in rounds else None,
+        "rounds_lost": int(rounds[team]["lost"]) if team in rounds else None,
+        "players": sorted(own[team], key=str.casefold),
+    }
+
+
+async def find_league_candidates(guild: discord.Guild) -> list[dict]:
+    """Sucht in den letzten Custom Games der Spieler nach Teamspielen, die noch nicht gespeichert sind.
+    Neueste zuerst; Fehler kommen als ValueError mit Meldung für den Staff."""
+    if RANK_CLIENT is None:
+        raise ValueError(LEAGUE_NO_API_KEY)
+    if LEAGUE_SEARCH_LOCK.locked():
+        raise ValueError("Es läuft schon eine Suche. Bitte kurz warten.")
+    async with LEAGUE_SEARCH_LOCK:
+        player_role = find_role(guild, "Spieler")
+        player_ids = {member.id for member in player_role.members} if player_role else set()
+        profiles = [profile for profile in linked_profiles(guild.id) if profile.user_id in player_ids]
+        if not profiles:
+            raise ValueError("Kein Spieler hat eine Riot-ID verknüpft (/riot-id).")
+        riot_ids = league_riot_ids(guild.id)
+        stored = {match.match_id for match in list_league_matches(guild.id)}
+        candidates: dict[str, dict] = {}
+        failed = 0
+        for index, profile in enumerate(profiles):
+            if index:
+                # Abstand halten, damit der API-Key nicht ins Rate-Limit läuft.
+                await asyncio.sleep(setting("rank_sync_delay_seconds"))
+            try:
+                matches, _ = await RANK_CLIENT.custom_matches(profile.riot_name, profile.riot_tag, profile.region, LEAGUE_SEARCH_SIZE)
+            except RankLookupError as error:
+                failed += 1
+                log.info("Custom Games von %s konnten nicht abgefragt werden: %s", profile.user_id, error)
+                continue
+            for raw in matches:
+                try:
+                    candidate = league_candidate(raw, riot_ids)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if candidate and candidate["match_id"] not in stored:
+                    candidates.setdefault(candidate["match_id"], candidate)
+        if failed == len(profiles):
+            raise ValueError("Die Custom Games konnten bei keinem Spieler abgefragt werden. Bitte später erneut versuchen.")
+    return sorted(candidates.values(), key=lambda candidate: candidate["started_at"], reverse=True)
+
+
+def validate_league_texts(opponent, label) -> tuple[str, str | None]:
+    """Gegner (Pflicht) und Bezeichnung wie „Spieltag 3“ (optional), Leerraum zusammengefasst. Fehler als ValueError."""
+    if not isinstance(opponent, str) or not isinstance(label, (str, type(None))):
+        raise ValueError("Ungültige Angaben.")
+    opponent, label = " ".join(opponent.split()), " ".join((label or "").split()) or None
+    if not opponent:
+        raise ValueError("Bitte den Gegner angeben.")
+    if len(opponent) > LEAGUE_TEXT_LIMIT or len(label or "") > LEAGUE_TEXT_LIMIT:
+        raise ValueError(f"Gegner und Bezeichnung dürfen höchstens {LEAGUE_TEXT_LIMIT} Zeichen lang sein.")
+    return opponent, label
+
+
+async def add_league_match(guild: discord.Guild, reference: str, opponent, label, team: str | None, added_by: int) -> LeagueMatch:
+    """Holt ein Match per tracker.gg-Link oder Match-ID, wertet es aus und speichert es. Fehler als ValueError."""
+    match_id = parse_match_reference(reference) if isinstance(reference, str) else None
+    if match_id is None:
+        raise ValueError("Bitte einen tracker.gg-Match-Link oder eine Match-ID angeben.")
+    opponent, label = validate_league_texts(opponent, label)
+    if team not in (None, "Red", "Blue"):
+        raise ValueError("Das Team muss Rot oder Blau sein.")
+    if get_league_match(guild.id, match_id):
+        raise ValueError("Dieses Match ist schon gespeichert.")
+    if RANK_CLIENT is None:
+        raise ValueError(LEAGUE_NO_API_KEY)
+    region = next((profile.region for profile in linked_profiles(guild.id) if profile.region), "eu")
+    try:
+        raw = await RANK_CLIENT.match_details(region, match_id)
+    except RankLookupError as error:
+        raise ValueError(str(error)) from error
+    try:
+        data, own_players = parse_league_match(raw, league_riot_ids(guild.id), team)
+    except LeagueError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        log.warning("Liga-Match %s: unerwartete Antwort der HenrikDev-API (%r)", match_id, error)
+        raise ValueError("Die HenrikDev-API hat eine unerwartete Antwort geschickt.") from error
+    try:
+        save_league_match(guild.id, data, own_players, opponent, label, added_by, int(time.time()))
+    except sqlite3.IntegrityError as error:
+        raise ValueError("Dieses Match ist schon gespeichert.") from error
+    return get_league_match(guild.id, data["match_id"])
+
+
+def league_match_url(league_url: str, match_id: str) -> str:
+    return f"{league_url}#match/{match_id}"
+
+
+def league_link_view(url: str, label: str) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label=label, emoji="📊", url=url))
+    return view
+
+
+LEAGUE_RESULTS = {1: ("Sieg", discord.Color.green()), 0: ("Niederlage", discord.Color.red())}
+
+
+def league_match_embed(match: LeagueMatch, members: dict[str, int]) -> discord.Embed:
+    """Ergebnis für #liga-stats; der beste eigene Spieler erscheint als Erwähnung, falls verknüpft."""
+    result, color = LEAGUE_RESULTS.get(match.won, ("Unentschieden", discord.Color.light_grey()))
+    details = [f"Map: **{match.map or 'Unbekannt'}**", datetime.fromtimestamp(match.started_at, BERLIN).strftime("%d.%m.%Y, %H:%M Uhr")]
+    if match.label:
+        details.insert(0, f"**{discord.utils.escape_markdown(match.label)}**")
+    embed = discord.Embed(
+        title=f"{result} {match.rounds_won} : {match.rounds_lost} gegen {discord.utils.escape_markdown(match.opponent)}",
+        description="\n".join(details),
+        color=color,
+    )
+    ours = [player for player in match.data["players"] if player["team"] == "us"]
+    if ours:
+        best = max(ours, key=lambda player: player["acs"] or 0)
+        name = f"<@{members[best['puuid']]}>" if best["puuid"] in members else discord.utils.escape_markdown(f"{best['name']}#{best['tag']}")
+        embed.add_field(
+            name="Bester Spieler (ACS)",
+            value=f"{name} · {best['agent']} · {best['acs']} ACS · {best['kills']}/{best['deaths']}/{best['assists']}",
+            inline=False,
+        )
+    embed.set_footer(text="OPLeague · Der Link ist nur fürs Team, bitte nicht weitergeben.")
+    return embed
+
+
+def league_channel(guild: discord.Guild) -> discord.TextChannel:
+    channel = find_text_channel(guild, LEAGUE_CHANNEL)
+    if channel is None:
+        raise ValueError(f"#{LEAGUE_CHANNEL} gibt es noch nicht. Der Kanal entsteht beim nächsten Server-Setup.")
+    return channel
+
+
+async def post_league_match(guild: discord.Guild, match: LeagueMatch, league_url: str, repost: bool = True) -> bool:
+    """Ergebnis mit Link-Button in #liga-stats posten oder die vorhandene Nachricht aktualisieren.
+    Ist die Nachricht gelöscht, wird sie nur mit repost neu gepostet. Gibt zurück, ob es eine Nachricht gibt."""
+    channel = league_channel(guild)
+    embed = league_match_embed(match, league_match_members(guild.id, match.match_id))
+    view = league_link_view(league_match_url(league_url, match.match_id), "Match-Stats öffnen")
+    if match.message_id:
+        try:
+            await channel.get_partial_message(match.message_id).edit(embed=embed, view=view)
+            return True
+        except discord.NotFound:
+            set_league_message(guild.id, match.match_id, None)
+    if not repost:
+        return False
+    message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+    set_league_message(guild.id, match.match_id, message.id)
+    return True
+
+
+async def delete_league_message(guild: discord.Guild, match: LeagueMatch) -> None:
+    channel = find_text_channel(guild, LEAGUE_CHANNEL)
+    if channel is None or not match.message_id:
+        return
+    try:
+        await channel.get_partial_message(match.message_id).delete()
+    except discord.NotFound:
+        pass
+
+
+def league_overview_embed(guild_id: int) -> discord.Embed:
+    matches = list_league_matches(guild_id)
+    embed = discord.Embed(
+        title="📊 OPLeague-Stats",
+        description=(
+            "Alle ausgewählten OPLeague-Matches mit Match-, Team- und Spieler-Stats.\n"
+            "Der Link ist nur für das Team, bitte nicht weitergeben."
+        ),
+        color=discord.Color.from_rgb(110, 70, 255),
+    )
+    if matches:
+        summary = summarize_league(matches)
+        record = (
+            f"{summary['wins']} {'Sieg' if summary['wins'] == 1 else 'Siege'} · "
+            f"{summary['losses']} {'Niederlage' if summary['losses'] == 1 else 'Niederlagen'}"
+        )
+        if summary["draws"]:
+            record += f" · {summary['draws']} Unentschieden"
+        embed.add_field(name="Bilanz", value=f"{record}\nRunden {summary['rounds_won']} : {summary['rounds_lost']}", inline=False)
+        last = matches[0]
+        result = LEAGUE_RESULTS.get(last.won, ("Unentschieden",))[0]
+        embed.add_field(
+            name="Letztes Match",
+            value=f"{result} {last.rounds_won} : {last.rounds_lost} gegen {discord.utils.escape_markdown(last.opponent)} ({last.map or 'Unbekannt'})",
+            inline=False,
+        )
+    else:
+        embed.add_field(name="Bilanz", value="Noch keine Matches ausgewählt.", inline=False)
+    return embed
+
+
+async def refresh_league_overview(guild: discord.Guild, league_url: str) -> None:
+    """Angepinnte Übersicht in #liga-stats anlegen oder aktualisieren (Bilanz und Link)."""
+    channel = league_channel(guild)
+    embed = league_overview_embed(guild.id)
+    view = league_link_view(league_url, "Alle Stats öffnen")
+    message_id = league_overview_message(guild.id)
+    if message_id:
+        try:
+            await channel.get_partial_message(message_id).edit(embed=embed, view=view)
+            return
+        except discord.NotFound:
+            pass
+    message = await channel.send(embed=embed, view=view)
+    set_league_overview_message(guild.id, message.id)
+    try:
+        await message.pin(reason="Liga-Stats: Link zur Übersicht")
+    except discord.HTTPException:
+        log.warning("Die Liga-Übersicht in #%s konnte nicht angepinnt werden", LEAGUE_CHANNEL)
+
+
+async def refresh_league_messages(guild: discord.Guild, league_url: str) -> int:
+    """Nach einem neuen Schlüssel: Übersicht und alle Match-Nachrichten zeigen den neuen Link.
+    Gelöschte Match-Nachrichten werden nicht neu gepostet. Gibt die Zahl der aktualisierten Matches zurück."""
+    await refresh_league_overview(guild, league_url)
+    updated = 0
+    for match in list_league_matches(guild.id):
+        if match.message_id and await post_league_match(guild, match, league_url, repost=False):
+            updated += 1
+    return updated
 
 
 def tracked(name: str):
@@ -5210,6 +5999,21 @@ async def main(apply: bool) -> int | None:
                         "retention_days": MATCH_STATS_RETENTION_DAYS,
                         "enabled": RANK_CLIENT is not None,
                     },
+                    league_matches=list_league_matches,
+                    summarize_league=summarize_league,
+                    find_league_candidates=find_league_candidates,
+                    add_league_match=add_league_match,
+                    validate_league_texts=validate_league_texts,
+                    update_league_match=update_league_match,
+                    delete_league_match=delete_league_match,
+                    league_token=league_token,
+                    renew_league_token=renew_league_token,
+                    league_guild_for_token=league_guild_for_token,
+                    post_league_match=post_league_match,
+                    delete_league_message=delete_league_message,
+                    refresh_league_overview=refresh_league_overview,
+                    refresh_league_messages=refresh_league_messages,
+                    league_rules=lambda: {"enabled": RANK_CLIENT is not None, "channel": LEAGUE_CHANNEL},
                 ))
             else:
                 print("PANEL_ENABLED ist gesetzt, das Web-Panel läuft aber nur mit --apply.", flush=True)

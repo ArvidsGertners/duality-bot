@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Liga-Stats · Duality</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <script src="/static/theme.js"></script>
+  <link rel="stylesheet" href="/static/daisyui.css">
+  <link rel="stylesheet" href="/static/panel.css">
+  <script src="/static/liga.js" defer></script>
+</head>
+<body class="liga">
+  <a class="skip-link" href="#main">Zum Inhalt springen</a>
+  <header class="liga-header" data-theme="duality-dark">
+    <a class="brand" href="#"><svg class="brand-logo" viewBox="190 190 700 700" aria-hidden="true" focusable="false"><path class="logo-base" d="M206.5 511.416 L511.416 206.5 L511.416 816.331 Z M454.247 344.256 L287.087 511.416 L454.247 678.575 Z"/><path class="logo-red" d="M568.584 873.5 L568.584 263.669 L873.5 568.584 L797.258 644.826 L797.258 572.434 L740.09 515.265 L740.09 701.994 L682.921 759.163 L682.921 458.097 L625.753 400.928 L625.753 816.331 Z"/></svg>Duality</a>
+    <nav class="liga-nav" aria-label="Bereiche">
+      <a class="btn btn-sm" href="#" data-view="overview">Übersicht</a>
+      <a class="btn btn-sm" href="#spieler" data-view="players">Spieler</a>
+    </nav>
+    <button type="button" class="btn btn-sm" id="theme-toggle">Theme</button>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <p class="muted" id="liga-status" role="status">Lade die Liga-Stats …</p>
+
+    <section id="view-overview" class="page" aria-labelledby="title-overview" hidden>
+      <p class="eyebrow">Duality Mannheim // OPLeague</p>
+      <h1 id="title-overview">Liga-Stats</h1>
+      <div class="stat-tiles" id="overview-tiles"></div>
+      <div class="card table-wrap">
+        <table class="table">
+          <caption class="visually-hidden">Alle Matches</caption>
+          <thead><tr><th scope="col">Datum</th><th scope="col">Gegner</th><th scope="col">Map</th><th scope="col">Ergebnis</th><th scope="col">Bester Spieler</th></tr></thead>
+          <tbody id="overview-matches"></tbody>
+        </table>
+      </div>
+      <div class="stats-columns spaced">
+        <div class="card table-wrap">
+          <table class="table">
+            <caption class="visually-hidden">Maps</caption>
+            <thead><tr><th scope="col">Map</th><th scope="col" class="num">Spiele</th><th scope="col" class="num">S–N</th><th scope="col" class="num">Runden</th><th scope="col">Win-Rate</th></tr></thead>
+            <tbody id="overview-maps"></tbody>
+          </table>
+        </div>
+        <div class="card table-wrap">
+          <table class="table">
+            <caption class="visually-hidden">Top-Spieler</caption>
+            <thead><tr><th scope="col">Spieler</th><th scope="col" class="num">ACS</th><th scope="col" class="num">K/D</th><th scope="col" class="num">KAST</th></tr></thead>
+            <tbody id="overview-top"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-players" class="page" aria-labelledby="title-players" hidden>
+      <p class="eyebrow">Duality Mannheim // OPLeague</p>
+      <h1 id="title-players">Spieler</h1>
+      <p class="muted small">Alle Werte über alle ausgewählten Matches, ACS, ADR und KAST pro Runde gewichtet. KAST: Runden mit Kill, Assist, Überleben oder Trade.</p>
+      <div class="card table-wrap">
+        <table class="table" id="players-table">
+          <thead>
+            <tr>
+              <th scope="col"><button type="button" class="sort" data-sort="name">Spieler</button></th>
+              <th scope="col" class="num"><button type="button" class="sort" data-sort="matches">Matches</button></th>
+              <th scope="col">Agents</th>
+              <th scope="col" class="num" aria-sort="descending"><button type="button" class="sort" data-sort="acs">ACS</button></th>
+              <th scope="col" class="num"><button type="button" class="sort" data-sort="kd">K/D</button></th>
+              <th scope="col" class="num">K / D / A</th>
+              <th scope="col" class="num"><button type="button" class="sort" data-sort="adr">ADR</button></th>
+              <th scope="col" class="num"><button type="button" class="sort" data-sort="hs_percent">HS %</button></th>
+              <th scope="col" class="num"><button type="button" class="sort" data-sort="kast">KAST</button></th>
+              <th scope="col" class="num"><button type="button" class="sort" data-sort="fk">FK</button></th>
+              <th scope="col" class="num"><button type="button" class="sort" data-sort="fd">FD</button></th>
+              <th scope="col" class="num"><button type="button" class="sort" data-sort="clutches">Clutches</button></th>
+            </tr>
+          </thead>
+          <tbody id="players-list"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-match" class="page" aria-labelledby="title-match" hidden>
+      <p class="eyebrow" id="match-eyebrow"></p>
+      <h1 id="title-match"></h1>
+      <p class="muted" id="match-meta"></p>
+      <div class="stat-tiles" id="match-tiles"></div>
+
+      <div class="card">
+        <h2>Runden</h2>
+        <div class="round-strip" id="match-rounds" role="group" aria-label="Runden, zum Öffnen anklicken"></div>
+        <p class="small muted round-legend">✕ Eliminierung · ✹ Spike explodiert · ✓ Spike entschärft · ◷ Zeit abgelaufen · ⚑ Aufgabe · Rahmen oben: eigener Angriff</p>
+        <div id="round-detail" hidden></div>
+      </div>
+
+      <div class="card table-wrap spaced">
+        <table class="table scoreboard">
+          <caption class="scoreboard-caption" id="caption-us">Duality</caption>
+          <thead id="head-us"></thead>
+          <tbody id="board-us"></tbody>
+        </table>
+      </div>
+      <div class="card table-wrap spaced">
+        <table class="table scoreboard">
+          <caption class="scoreboard-caption" id="caption-them"></caption>
+          <thead id="head-them"></thead>
+          <tbody id="board-them"></tbody>
+        </table>
+      </div>
+
+      <div class="card table-wrap spaced">
+        <table class="table">
+          <caption class="visually-hidden">Team-Vergleich</caption>
+          <thead><tr><th scope="col">Team-Vergleich</th><th scope="col" class="num">Duality</th><th scope="col" class="num" id="compare-them">Gegner</th></tr></thead>
+          <tbody id="match-compare"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-player" class="page" aria-labelledby="title-player" hidden>
+      <p class="eyebrow">Duality Mannheim // Spieler</p>
+      <h1 id="title-player"></h1>
+      <div class="stat-tiles" id="player-tiles"></div>
+      <div class="stats-columns">
+        <div class="card table-wrap">
+          <table class="table">
+            <caption class="visually-hidden">Agents</caption>
+            <thead><tr><th scope="col">Agent</th><th scope="col" class="num">Spiele</th></tr></thead>
+            <tbody id="player-agents"></tbody>
+          </table>
+        </div>
+        <div class="card table-wrap">
+          <table class="table">
+            <caption class="visually-hidden">Multi-Kills</caption>
+            <thead><tr><th scope="col">Multi-Kills</th><th scope="col" class="num">Runden</th></tr></thead>
+            <tbody id="player-multi"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card table-wrap spaced">
+        <table class="table">
+          <caption class="visually-hidden">Matches</caption>
+          <thead><tr><th scope="col">Datum</th><th scope="col">Gegner</th><th scope="col">Map</th><th scope="col">Agent</th><th scope="col" class="num">K / D / A</th><th scope="col" class="num">ACS</th><th scope="col" class="num">ADR</th><th scope="col" class="num">HS %</th><th scope="col" class="num">KAST</th><th scope="col">Ergebnis</th></tr></thead>
+          <tbody id="player-matches"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

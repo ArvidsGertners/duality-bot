@@ -21,6 +21,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 import main
 import panel
+from league_fixture import RIOT_IDS, v4_match
 
 
 def setUpModule():
@@ -212,6 +213,21 @@ def make_hooks(client=None) -> panel.PanelHooks:
             "weeks": [{"week_start": "2026-10-19", "week": 43, "joins": 3, "leaves": 1, "members": 4, "leaves_known": True}],
             "tracking_since": "2026-10-19",
         },
+        league_matches=lambda guild_id: [],
+        summarize_league=main.summarize_league,
+        find_league_candidates=mock.AsyncMock(return_value=[]),
+        add_league_match=mock.AsyncMock(),
+        validate_league_texts=main.validate_league_texts,
+        update_league_match=mock.Mock(),
+        delete_league_match=mock.Mock(),
+        league_token=lambda guild_id: "geheimer-schluessel",
+        renew_league_token=mock.Mock(return_value="neuer-schluessel"),
+        league_guild_for_token=lambda token: 1 if token == "geheimer-schluessel" else None,
+        post_league_match=mock.AsyncMock(return_value=True),
+        delete_league_message=mock.AsyncMock(),
+        refresh_league_overview=mock.AsyncMock(),
+        refresh_league_messages=mock.AsyncMock(return_value=2),
+        league_rules=lambda: {"enabled": True, "channel": "liga-stats"},
     )
 
 
@@ -1349,6 +1365,140 @@ class StatsPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statuses, [200] * panel.LOOKUPS_PER_MINUTE + [429])
         # Das Limit gilt pro Person.
         self.assertEqual((await self.post(COACH_ID, "/api/stats/lookup", {"riot_id": "A#1"})).status, 200)
+
+
+class LeaguePanelTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hooks = make_hooks()
+        data = main.parse_league_match(v4_match(), RIOT_IDS)[0]
+        self.match = main.LeagueMatch(
+            1, data["match_id"], data["started_at"], data["map"], "Uni Heidelberg", "Spieltag 1", "Red", 2, 1, data, ADMIN_ID, 1000, None,
+        )
+        self.hooks.league_matches = lambda guild_id: [self.match] if guild_id == 1 else []
+        self.hooks.add_league_match.return_value = self.match
+        self.hooks.update_league_match.side_effect = lambda guild_id, match_id, opponent, label: self.match._replace(opponent=opponent, label=label)
+        self.hooks.delete_league_match.return_value = self.match
+        self.panel = panel.Panel(CONFIG, self.hooks)
+        self.client = TestClient(TestServer(self.panel.build_app()))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def request(self, method: str, path: str, body=None, user_id: int = COACH_ID):
+        session, cookie = session_cookie(user_id)
+        return await self.client.request(method, path, json=body, headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": session["csrf"]})
+
+    async def test_public_page_without_login(self):
+        response = await self.client.get("/liga/geheimer-schluessel")
+        self.assertEqual(response.status, 200)
+        self.assertIn('id="view-match"', await response.text())
+        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIn("noindex", response.headers["X-Robots-Tag"])
+        self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+        response = await self.client.get("/liga/geheimer-schluessel/data")
+        data = await response.json()
+        (match,) = data["matches"]
+        self.assertEqual((match["opponent"], match["label"], match["won"], match["score"]), ("Uni Heidelberg", "Spieltag 1", 1, {"us": 2, "them": 1}))
+        self.assertEqual(len(match["players"]), 10)
+        self.assertEqual((data["summary"]["wins"], data["summary"]["players"][0]["name"]), (1, "R5"))
+        # Keine Discord-IDs und nicht, wer das Match hinzugefügt hat.
+        self.assertNotIn(str(ADMIN_ID), await response.text())
+        self.assertNotIn("added_by", match)
+        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+
+    async def test_public_page_rejects_unknown_token(self):
+        response = await self.client.get("/liga/falsch")
+        self.assertEqual(response.status, 404)
+        self.assertIn("#liga-stats", await response.text())
+        self.assertEqual((await self.client.get("/liga/falsch/data")).status, 404)
+        # Ein Schlüssel eines anderen Servers gilt hier nicht.
+        self.hooks.league_guild_for_token = lambda token: 2
+        self.assertEqual((await self.client.get("/liga/geheimer-schluessel/data")).status, 404)
+
+    async def test_public_page_rate_limit(self):
+        self.panel.league_limiter = panel.RateLimiter(2, 60)
+        statuses = [(await self.client.get("/liga/falsch/data")).status for _ in range(3)]
+        self.assertEqual(statuses, [404, 404, 429])
+
+    async def test_staff_overview(self):
+        self.assertEqual((await self.client.get("/api/league")).status, 401)
+        self.assertEqual((await self.request("GET", "/api/league", user_id=PLAYER_ID)).status, 403)
+        data = await (await self.request("GET", "/api/league")).json()
+        self.assertEqual(data["url"], f"{ORIGIN}/liga/geheimer-schluessel")
+        self.assertEqual((data["channel"], data["channel_exists"], data["enabled"]), ("liga-stats", False, True))
+        (match,) = data["matches"]
+        self.assertEqual((match["opponent"], match["posted"], match["won"]), ("Uni Heidelberg", False, 1))
+        self.assertEqual(match["url"], f"{ORIGIN}/liga/geheimer-schluessel#match/{self.match.match_id}")
+        self.assertEqual(match["added_by"]["id"], str(ADMIN_ID))
+
+    async def test_add_match(self):
+        body = {"match": "https://tracker.gg/valorant/match/x", "opponent": "Uni Heidelberg", "label": "Spieltag 1", "team": "", "post": True}
+        response = await self.request("POST", "/api/league", body)
+        data = await response.json()
+        self.assertEqual((response.status, data["match"]["opponent"], data["notice"]), (200, "Uni Heidelberg", None))
+        args = self.hooks.add_league_match.await_args.args
+        self.assertEqual((args[1:], args[0].id), (("https://tracker.gg/valorant/match/x", "Uni Heidelberg", "Spieltag 1", None, COACH_ID), 1))
+        self.assertEqual(self.hooks.post_league_match.await_args.args[2], f"{ORIGIN}/liga/geheimer-schluessel")
+        self.assertTrue(self.hooks.post_league_match.await_args.kwargs["repost"])
+        self.hooks.refresh_league_overview.assert_awaited_once()
+        self.assertIn("Liga-Match gegen **Uni Heidelberg**", self.hooks.audit.await_args.args[1])
+        # Ohne „posten“ bleibt Discord unberührt.
+        self.hooks.post_league_match.reset_mock()
+        await self.request("POST", "/api/league", {**body, "post": False})
+        self.hooks.post_league_match.assert_not_awaited()
+        # Discord-Fehler: gespeichert, aber mit Hinweis.
+        self.hooks.post_league_match.side_effect = ValueError("#liga-stats gibt es noch nicht.")
+        data = await (await self.request("POST", "/api/league", body)).json()
+        self.assertEqual(data["notice"], "Gespeichert, aber nicht in Discord gepostet: #liga-stats gibt es noch nicht.")
+        self.hooks.add_league_match.side_effect = ValueError("Dieses Match ist schon gespeichert.")
+        response = await self.request("POST", "/api/league", body)
+        self.assertEqual((response.status, (await response.json())["error"]), (400, "Dieses Match ist schon gespeichert."))
+        self.assertEqual((await self.request("POST", "/api/league", ["kein", "objekt"])).status, 400)
+
+    async def test_edit_post_delete(self):
+        path = f"/api/league/{self.match.match_id}"
+        response = await self.request("POST", path, {"opponent": " KIT ", "label": ""})
+        data = await response.json()
+        self.assertEqual((data["match"]["opponent"], data["match"]["label"]), ("KIT", None))
+        self.assertEqual(self.hooks.update_league_match.call_args.args, (1, self.match.match_id, "KIT", None))
+        self.hooks.post_league_match.assert_not_awaited()  # noch nie gepostet: nur die Übersicht
+        self.hooks.refresh_league_overview.assert_awaited_once()
+        self.assertEqual((await self.request("POST", path, {"opponent": ""})).status, 400)
+        self.assertEqual((await self.request("POST", "/api/league/unbekannt", {"opponent": "KIT"})).status, 404)
+
+        response = await self.request("POST", f"{path}/post")
+        self.assertEqual((response.status, (await response.json())["message"]), (200, "In Discord gepostet."))
+        self.hooks.post_league_match.side_effect = discord.HTTPException(mock.Mock(status=400, reason="x"), "kaputt")
+        response = await self.request("POST", f"{path}/post")
+        self.assertEqual(response.status, 502)
+
+        self.assertEqual((await self.request("DELETE", path)).status, 403)
+        response = await self.request("DELETE", path, user_id=ADMIN_ID)
+        self.assertEqual((await response.json())["message"], "Liga-Match gelöscht.")
+        self.hooks.delete_league_match.assert_called_once_with(1, self.match.match_id)
+        self.hooks.delete_league_message.assert_awaited_once()
+
+    async def test_search(self):
+        self.hooks.find_league_candidates.return_value = [{"match_id": "b", "players": ["Zoe#EUW", "Kai#EUW"]}]
+        data = await (await self.request("POST", "/api/league/search")).json()
+        self.assertEqual(data["candidates"][0]["match_id"], "b")
+        self.assertEqual((await self.request("POST", "/api/league/search")).status, 200)
+        self.assertEqual((await self.request("POST", "/api/league/search")).status, 429)
+        self.hooks.find_league_candidates.side_effect = ValueError("Kein Spieler hat eine Riot-ID verknüpft (/riot-id).")
+        response = await self.request("POST", "/api/league/search", user_id=ADMIN_ID)
+        self.assertEqual((response.status, (await response.json())["error"]), (400, "Kein Spieler hat eine Riot-ID verknüpft (/riot-id)."))
+
+    async def test_renew_link_needs_admin(self):
+        self.assertEqual((await self.request("POST", "/api/league/link")).status, 403)
+        tokens = iter(["geheimer-schluessel", "neuer-schluessel"])
+        current = {"token": next(tokens)}
+        self.hooks.renew_league_token.side_effect = lambda guild_id: current.update(token=next(tokens))
+        self.hooks.league_token = lambda guild_id: current["token"]
+        data = await (await self.request("POST", "/api/league/link", user_id=ADMIN_ID)).json()
+        self.assertEqual(data["url"], f"{ORIGIN}/liga/neuer-schluessel")
+        self.assertIn("2 Match-Nachricht(en)", data["message"])
+        self.assertEqual(self.hooks.refresh_league_messages.await_args.args[1], f"{ORIGIN}/liga/neuer-schluessel")
+        self.assertIn("erneuert", self.hooks.audit.await_args.args[1])
 
 
 class SettingsPanelTests(unittest.IsolatedAsyncioTestCase):

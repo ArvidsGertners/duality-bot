@@ -29,6 +29,9 @@ const state = {
   stats: null,
   statsSort: { key: "name", ascending: true },
   statsUser: null,
+  league: null,
+  editingLeague: null,
+  leagueCandidate: null,
   growth: null,
   texts: [],
   announcementData: null,
@@ -933,6 +936,204 @@ async function lookupStats(event) {
   }
 }
 
+/* Liga: OPLeague-Matches auswählen, das Team sieht sie über einen geheimen Link */
+
+function actionButton(label, ariaLabel, onClick, extraClass = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `btn btn-sm ${extraClass}`.trim();
+  button.textContent = label;
+  button.setAttribute("aria-label", ariaLabel);
+  button.addEventListener("click", () => onClick(button));
+  return button;
+}
+
+function leagueResult(won, roundsWon, roundsLost) {
+  const [label, kind] = MATCH_RESULTS[won] || ["Unentschieden", "neutral"];
+  const result = span("row-actions", "");
+  result.append(pill(label, kind), `${roundsWon} : ${roundsLost}`);
+  return result;
+}
+
+function renderLeague() {
+  const { matches } = state.league;
+  $("#league-list").replaceChildren(...(matches.length ? matches.map((match) => {
+    const actions = span("row-actions", "");
+    actions.append(
+      discordLink(match.url, "Stats"),
+      actionButton("Bearbeiten", `Match gegen ${match.opponent} bearbeiten`, () => openLeagueDialog(null, match)),
+    );
+    if (!match.posted) {
+      actions.append(actionButton("Posten", `Match gegen ${match.opponent} in Discord posten`, (button) => postLeagueMatch(match, button)));
+    }
+    if (state.me.level >= 2) {
+      actions.append(actionButton("Löschen", `Match gegen ${match.opponent} löschen`, () => deleteLeagueMatch(match), "btn-error btn-outline"));
+    }
+    return tableRow(
+      formatTime(match.started_at), match.opponent, match.label || "–", match.map || "–",
+      leagueResult(match.won, match.rounds_won, match.rounds_lost), match.posted ? pill("Gepostet", "ok") : pill("Nicht gepostet", "neutral"),
+      actions,
+    );
+  }) : [emptyRow(7, "Noch keine Liga-Matches. Sucht oben nach Custom Games oder fügt eins per Link hinzu.")]));
+  const wins = matches.filter((match) => match.won === 1).length;
+  const losses = matches.filter((match) => match.won === 0).length;
+  $("#league-summary").textContent = `${matches.length} ${matches.length === 1 ? "Match" : "Matches"} · `
+    + `${wins} ${wins === 1 ? "Sieg" : "Siege"} · ${losses} ${losses === 1 ? "Niederlage" : "Niederlagen"}`;
+}
+
+async function loadLeague() {
+  const data = await api("/api/league");
+  state.league = data;
+  $("#league-rules").textContent = data.enabled
+    ? "Hier wählt ihr die OPLeague-Matches aus. Das Team sieht sie mit Scoreboard beider Teams, Runden, Team- und Spieler-Stats über den Link."
+    : "Neue Matches brauchen den HenrikDev-API-Schlüssel (HENRIKDEV_API_KEY fehlt). Gespeicherte Matches bleiben über den Link sichtbar.";
+  $("#league-channel").textContent = data.channel_exists ? `#${data.channel}` : `#${data.channel} (entsteht beim nächsten Server-Setup)`;
+  $("#league-url").value = data.url;
+  $("#league-open").href = data.url;
+  $("#league-search").disabled = !data.enabled;
+  $("#league-manual").disabled = !data.enabled;
+  renderLeague();
+}
+
+async function copyLeagueLink() {
+  try {
+    await navigator.clipboard.writeText($("#league-url").value);
+    $("#league-link-message").textContent = "Link kopiert.";
+  } catch {
+    $("#league-url").select();
+    $("#league-link-message").textContent = "Kopieren ging nicht automatisch; der Link ist markiert.";
+  }
+}
+
+async function renewLeagueLink() {
+  const confirmed = await confirmAction(
+    "Danach gilt nur noch der neue Link. Der Bot aktualisiert die angepinnte Übersicht und alle geposteten Matches in Discord.",
+    null,
+    "Link erneuern",
+  );
+  if (!confirmed) return;
+  try {
+    const result = await api("/api/league/link", { method: "POST" });
+    await loadLeague();
+    $("#league-link-message").textContent = result.message;
+  } catch (error) {
+    $("#league-link-message").textContent = error.message;
+  }
+}
+
+async function searchLeague() {
+  const button = $("#league-search");
+  button.disabled = true;
+  $("#league-search-message").textContent = "Frage die Custom Games aller Spieler ab, das dauert einige Sekunden …";
+  try {
+    const { candidates } = await api("/api/league/search", { method: "POST" });
+    $("#league-candidates-wrap").hidden = false;
+    $("#league-candidates").replaceChildren(...(candidates.length ? candidates.map((candidate) => {
+      const row = tableRow(
+        formatTime(candidate.started_at),
+        candidate.map || "–",
+        candidate.rounds_won === null ? "–" : `${candidate.rounds_won} : ${candidate.rounds_lost}`,
+        candidate.players.join(", "),
+        actionButton("Hinzufügen", `Match vom ${formatTime(candidate.started_at)} hinzufügen`, () => openLeagueDialog(candidate)),
+      );
+      row.dataset.matchId = candidate.match_id;
+      return row;
+    }) : [emptyRow(5, "Keine neuen Custom Games mit mindestens zwei eigenen Spielern gefunden.")]));
+    $("#league-search-message").textContent = `${candidates.length} ${candidates.length === 1 ? "Match" : "Matches"} gefunden.`;
+  } catch (error) {
+    $("#league-search-message").textContent = error.message;
+  } finally {
+    button.disabled = !state.league || !state.league.enabled;
+  }
+}
+
+function openLeagueDialog(candidate = null, match = null) {
+  state.editingLeague = match;
+  state.leagueCandidate = candidate;
+  const manual = !candidate && !match;
+  $("#league-dialog-title").textContent = match ? "Liga-Match bearbeiten" : "Liga-Match hinzufügen";
+  $("#league-dialog-info").textContent = candidate
+    ? `${formatTime(candidate.started_at)} · ${candidate.map || "–"} · ${candidate.players.join(", ")}`
+    : match ? `${formatTime(match.started_at)} · ${match.map || "–"} · ${match.rounds_won} : ${match.rounds_lost}` : "";
+  $("#league-match").value = "";
+  $("#league-match").required = manual;
+  for (const id of ["#league-match", "#league-match-label"]) $(id).hidden = !manual;
+  for (const id of ["#league-team", "#league-team-label", "#league-post-row"]) $(id).hidden = Boolean(match);
+  $("#league-opponent").value = match ? match.opponent : "";
+  $("#league-label").value = match ? match.label || "" : "";
+  $("#league-team").value = "";
+  $("#league-post").checked = true;
+  $("#league-save").textContent = match ? "Speichern" : "Hinzufügen";
+  $("#league-error").textContent = "";
+  $("#league-dialog").showModal();
+}
+
+async function saveLeagueMatch(event) {
+  event.preventDefault();
+  const button = $("#league-save");
+  button.disabled = true;
+  const match = state.editingLeague;
+  try {
+    let result;
+    if (match) {
+      result = await api(`/api/league/${match.match_id}`, {
+        method: "POST", body: { opponent: $("#league-opponent").value, label: $("#league-label").value },
+      });
+    } else {
+      $("#league-error").textContent = "Hole das Match von der HenrikDev-API …";
+      result = await api("/api/league", {
+        method: "POST",
+        body: {
+          match: state.leagueCandidate ? state.leagueCandidate.match_id : $("#league-match").value,
+          opponent: $("#league-opponent").value,
+          label: $("#league-label").value,
+          team: $("#league-team").value,
+          post: $("#league-post").checked,
+        },
+      });
+      if (state.leagueCandidate) {
+        const row = $(`#league-candidates tr[data-match-id="${state.leagueCandidate.match_id}"]`);
+        if (row) row.remove();
+      }
+    }
+    $("#league-dialog").close();
+    $("#league-message").textContent = result.notice || (match ? "Gespeichert." : `Match gegen ${result.match.opponent} hinzugefügt.`);
+    await loadLeague();
+  } catch (error) {
+    $("#league-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function postLeagueMatch(match, button) {
+  button.disabled = true;
+  try {
+    const result = await api(`/api/league/${match.match_id}/post`, { method: "POST" });
+    $("#league-message").textContent = result.message;
+    await loadLeague();
+  } catch (error) {
+    $("#league-message").textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+async function deleteLeagueMatch(match) {
+  const confirmed = await confirmAction(
+    `Das Match gegen ${match.opponent} (${match.rounds_won} : ${match.rounds_lost}) verschwindet aus den Liga-Stats, die Nachricht in Discord wird gelöscht.`,
+    null,
+    "Match löschen",
+  );
+  if (!confirmed) return;
+  try {
+    const result = await api(`/api/league/${match.match_id}`, { method: "DELETE" });
+    $("#league-message").textContent = result.notice || result.message;
+    await loadLeague();
+  } catch (error) {
+    $("#league-message").textContent = error.message;
+  }
+}
+
 /* Vorschau im Discord-Stil (vereinfacht, ohne verschachtelte Formatierung) */
 
 const MARKDOWN_TOKENS = /(\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|`[^`\n]+`|\*[^*\n]+\*|_[^_\n]+_)/g;
@@ -1568,7 +1769,7 @@ async function loadTickets() {
 const pageLoaders = {
   dashboard: loadGrowth,
   backups: loadBackups, bewerbungen: loadApplications, spieler: loadPlayers, tickets: loadTickets, termine: loadEvents,
-  anwesenheit: loadAttendance, rangliste: loadRanking, statistiken: loadStats, einstellungen: loadSettings, texte: loadTexts,
+  anwesenheit: loadAttendance, rangliste: loadRanking, statistiken: loadStats, liga: loadLeague, einstellungen: loadSettings, texte: loadTexts,
   ankuendigungen: loadAnnouncements, setup: loadSetup,
 };
 
@@ -1903,6 +2104,12 @@ async function init() {
   }
   $("#stats-lookup-form").addEventListener("submit", lookupStats);
   $("#stats-refresh").addEventListener("click", refreshStats);
+  $("#league-copy").addEventListener("click", copyLeagueLink);
+  $("#league-renew").addEventListener("click", renewLeagueLink);
+  $("#league-search").addEventListener("click", searchLeague);
+  $("#league-manual").addEventListener("click", () => openLeagueDialog());
+  $("#league-form").addEventListener("submit", saveLeagueMatch);
+  $("#league-cancel-dialog").addEventListener("click", () => $("#league-dialog").close());
   $("#setup-refresh").addEventListener("click", loadSetup);
   $("#setup-apply").addEventListener("click", applySetup);
   $("#privacy-search-form").addEventListener("submit", searchPrivacy);
